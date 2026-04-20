@@ -1,0 +1,5 @@
+FULL = "full"
+INCREMENTAL = "incremental"
+REVIEW_ONLY = "review_only"
+EMBED_ONLY = "embed_only"
+GRAPH_ONLY = "graph_only"
