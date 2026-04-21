@@ -10,7 +10,7 @@ from config.settings import load_settings
 from mcp_server.server import MCPServer
 from services.dependency_service import get_dependencies
 from services.file_summary_service import get_file_summary
-from services.graph_service import get_callers_and_callees, get_graph_neighborhood
+from services.graph_service import get_callers_and_callees, get_graph_neighborhood_with_options
 from services.index_status_service import get_index_status
 from services.review_history_service import get_review_history
 from services.semantic_search import semantic_code_search
@@ -110,8 +110,23 @@ def main() -> int:
     def get_callers_and_callees_tool(target: str) -> dict[str, object]:
         return get_callers_and_callees(kuzu_store, target=target)
 
-    def get_graph_neighborhood_tool(target: str, depth: int = 1) -> dict[str, object]:
-        return get_graph_neighborhood(kuzu_store, target=target, depth=depth)
+    def get_graph_neighborhood_tool(
+        target: str,
+        depth: int = 1,
+        relation: str = "",
+        max_edges: int = 0,
+        mode: str = "full",
+        suppress_common_hubs: bool = False,
+    ) -> dict[str, object]:
+        return get_graph_neighborhood_with_options(
+            kuzu_store,
+            target=target,
+            depth=depth,
+            relation=relation or None,
+            max_edges=max_edges or None,
+            mode=mode,
+            suppress_common_hubs=suppress_common_hubs,
+        )
 
     def get_file_summary_tool(target: str) -> dict[str, object]:
         return get_file_summary(duckdb_store, target=target)

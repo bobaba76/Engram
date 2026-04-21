@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from difflib import SequenceMatcher
+import re
 from typing import Any
 
 APP_PATH_HINTS = ("frontend", "backend", "src", "app", "api", "components", "pages", "routes", "services", "finance_mvp")
@@ -24,6 +25,7 @@ INFRA_PATH_HINTS = (
 )
 FRONTEND_TOKENS = {"component", "page", "button", "drawer", "modal", "frontend", "ui", "screen", "view", "settings", "react", "hook"}
 BACKEND_TOKENS = {"backend", "endpoint", "api", "service", "repository", "store", "database", "db", "ingest", "ingestion", "router"}
+BUG_TOKENS = {"wrong", "bug", "broken", "issue", "incorrect", "missing", "failing", "error", "totals", "shape", "payload", "incoming", "monthly", "stock", "forecast", "trend", "product"}
 
 
 def _normalize_path(path: object) -> str:
@@ -32,6 +34,27 @@ def _normalize_path(path: object) -> str:
 
 def _query_tokens(query: str) -> set[str]:
     return {token for token in query.lower().replace("-", " ").replace("_", " ").split() if token}
+
+
+def _text_tokens(value: object) -> set[str]:
+    return {token for token in re.split(r"[^a-zA-Z0-9]+", str(value or "").lower()) if token}
+
+
+def _feature_overlap_score(query: str, *values: object) -> tuple[float, list[str]]:
+    query_tokens = _query_tokens(query)
+    value_tokens: set[str] = set()
+    for value in values:
+        value_tokens |= _text_tokens(value)
+    overlap = query_tokens & value_tokens
+    score = min(len(overlap) * 0.12, 0.6)
+    reasons: list[str] = []
+    if overlap:
+        reasons.append("feature token overlap")
+    bug_overlap = overlap & BUG_TOKENS
+    if bug_overlap:
+        score += min(len(bug_overlap) * 0.08, 0.32)
+        reasons.append("bug-domain token overlap")
+    return score, reasons
 
 
 def classify_confidence(score: float) -> str:
@@ -105,6 +128,9 @@ def score_path_relevance(query: str, file_path: object) -> tuple[float, list[str
     elif path_name and path_name in query_lower:
         score += 0.3
         reasons.append("filename mentioned in query")
+    overlap_score, overlap_reasons = _feature_overlap_score(query, normalized_path)
+    score += overlap_score
+    reasons.extend(overlap_reasons)
     return score, reasons
 
 
@@ -138,6 +164,13 @@ def score_symbol_relevance(query: str, name: object, qualified_name: object, fil
         reasons.append("hook naming match")
     if FRONTEND_TOKENS & _query_tokens(query) and normalized_kind in {"component", "interface", "function"}:
         score += 0.08
+    overlap_score, overlap_reasons = _feature_overlap_score(query, name_text, qualified_text, file_path)
+    score += overlap_score
+    reasons.extend(overlap_reasons)
+    if BUG_TOKENS & _query_tokens(query):
+        if any(hint in _normalize_path(file_path) for hint in ("/services", "/repositories", "/processors", "/routers")):
+            score += 0.12
+            reasons.append("bug-query backend logic boost")
     path_score, path_reasons = score_path_relevance(query, file_path)
     score += path_score
     reasons.extend(path_reasons)

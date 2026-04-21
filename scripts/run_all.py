@@ -10,7 +10,7 @@ from config.settings import load_settings
 from mcp_server.server import MCPServer
 from services.dependency_service import get_dependencies
 from services.file_summary_service import get_file_summary
-from services.graph_service import get_callers_and_callees, get_graph_neighborhood
+from services.graph_service import get_callers_and_callees, get_graph_neighborhood_with_options
 from services.index_status_service import get_index_status
 from services.review_history_service import get_review_history
 from services.semantic_search import semantic_code_search
@@ -58,7 +58,15 @@ def main() -> int:
     )
     server.register_tool(
         "get_graph_neighborhood",
-        lambda target, depth=1: get_graph_neighborhood(coordinator.kuzu, target=target, depth=depth),
+        lambda target, depth=1, relation="", max_edges=0, mode="full", suppress_common_hubs=False: get_graph_neighborhood_with_options(
+            coordinator.kuzu,
+            target=target,
+            depth=depth,
+            relation=relation or None,
+            max_edges=max_edges or None,
+            mode=mode,
+            suppress_common_hubs=suppress_common_hubs,
+        ),
     )
     server.register_tool(
         "get_file_summary",

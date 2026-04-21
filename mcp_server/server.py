@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import inspect
 import json
 import sys
+from functools import wraps
 from typing import Any, Callable
 
+from mcp_server.formatters import enrich_payload
 from mcp_server.tools import ToolRegistry
 
 try:
@@ -21,7 +24,15 @@ class MCPServer:
     def register_tool(self, name: str, handler: Callable[..., Any]) -> None:
         self.registry.register(name, handler)
         if self._fastmcp is not None:
-            self._fastmcp.tool(name=name)(handler)
+            handler_signature = inspect.signature(handler)
+
+            @wraps(handler)
+            def wrapped_handler(*args: Any, **kwargs: Any) -> Any:
+                return enrich_payload(handler(*args, **kwargs))
+
+            wrapped_handler.__signature__ = handler_signature
+
+            self._fastmcp.tool(name=name)(wrapped_handler)
 
     def describe(self) -> dict[str, object]:
         return {
