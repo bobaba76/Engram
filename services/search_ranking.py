@@ -26,6 +26,7 @@ INFRA_PATH_HINTS = (
 FRONTEND_TOKENS = {"component", "page", "button", "drawer", "modal", "frontend", "ui", "screen", "view", "settings", "react", "hook"}
 BACKEND_TOKENS = {"backend", "endpoint", "api", "service", "repository", "store", "database", "db", "ingest", "ingestion", "router"}
 BUG_TOKENS = {"wrong", "bug", "broken", "issue", "incorrect", "missing", "failing", "error", "totals", "shape", "payload", "incoming", "monthly", "stock", "forecast", "trend", "product"}
+TEST_TOKENS = {"test", "tests", "spec", "specs", "pytest", "unit", "integration"}
 
 
 def _normalize_path(path: object) -> str:
@@ -106,6 +107,13 @@ def score_path_relevance(query: str, file_path: object) -> tuple[float, list[str
     if any(hint in normalized_path for hint in INFRA_PATH_HINTS):
         score -= 0.35
         reasons.append("tooling/internal path")
+    if "/test" in normalized_path or "/tests" in normalized_path or normalized_path.endswith(("_test.py", ".spec.ts", ".spec.tsx", ".test.ts", ".test.tsx", ".test.js", ".test.jsx")):
+        if BUG_TOKENS & tokens and not (TEST_TOKENS & tokens):
+            score -= 0.18
+            reasons.append("test path penalty for vague bug-hunt")
+        elif TEST_TOKENS & tokens:
+            score += 0.08
+            reasons.append("explicit test query boost")
     if FRONTEND_TOKENS & tokens:
         if normalized_path.endswith((".tsx", ".jsx")):
             score += 0.3

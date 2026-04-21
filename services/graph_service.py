@@ -82,11 +82,14 @@ def _filter_edges(
     if mode == "direct":
         filtered = [edge for edge in filtered if edge.get("source") == target or edge.get("target") == target]
     if suppress_common_hubs:
-        filtered = [
+        direct_edges = [edge for edge in filtered if edge.get("source") == target or edge.get("target") == target]
+        expanded_edges = [edge for edge in filtered if edge not in direct_edges]
+        expanded_edges = [
             edge
-            for edge in filtered
+            for edge in expanded_edges
             if _hub_penalty(str(edge.get("source", ""))) < 2 and _hub_penalty(str(edge.get("target", ""))) < 2
         ]
+        filtered = direct_edges + expanded_edges
     sorted_edges = sorted(filtered, key=lambda edge: _edge_sort_key(edge, target), reverse=True)
     if mode == "focused":
         direct_edges = [edge for edge in sorted_edges if edge.get("source") == target or edge.get("target") == target]
