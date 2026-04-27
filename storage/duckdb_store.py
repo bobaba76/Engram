@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +13,17 @@ class DuckDBStore:
     def __init__(self, database_path: Path, read_only: bool = False) -> None:
         self.database_path = database_path
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = duckdb.connect(str(self.database_path), read_only=read_only)
+        self._temp_database_path: Path | None = None
+        try:
+            self.connection = duckdb.connect(str(self.database_path), read_only=read_only)
+        except duckdb.IOException:
+            if not read_only:
+                raise
+            temp_dir = Path(tempfile.mkdtemp(prefix="coder-duckdb-ro-"))
+            temp_path = temp_dir / self.database_path.name
+            shutil.copy2(self.database_path, temp_path)
+            self._temp_database_path = temp_path
+            self.connection = duckdb.connect(str(temp_path), read_only=True)
         if not read_only:
             self._initialize_schema()
 
@@ -148,9 +161,77 @@ class DuckDBStore:
             )
             """
         )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS processes (
+                process_id TEXT PRIMARY KEY,
+                name TEXT,
+                process_type TEXT,
+                entry_symbol TEXT,
+                terminal_symbol TEXT,
+                step_count INTEGER,
+                step_list_json TEXT,
+                module_tags_json TEXT,
+                community_tags_json TEXT,
+                file_paths_json TEXT
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS process_clusters (
+                cluster_id TEXT PRIMARY KEY,
+                name TEXT,
+                process_type TEXT,
+                canonical_entry_symbol TEXT,
+                canonical_terminal_symbol TEXT,
+                process_count INTEGER,
+                avg_step_count DOUBLE,
+                module_tags_json TEXT,
+                community_tags_json TEXT,
+                file_paths_json TEXT,
+                keywords_json TEXT
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS process_symbol_memberships (
+                cluster_id TEXT,
+                process_id TEXT,
+                symbol TEXT,
+                step_index INTEGER,
+                role TEXT,
+                PRIMARY KEY(cluster_id, process_id, symbol, step_index)
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS process_relationships (
+                source_cluster_id TEXT,
+                target_cluster_id TEXT,
+                relation_type TEXT,
+                shared_symbol TEXT,
+                PRIMARY KEY(source_cluster_id, target_cluster_id, relation_type, shared_symbol)
+            )
+            """
+        )
 
     def clear_index_tables(self) -> None:
-        for table in ("files", "symbols", "chunks", "review_jobs", "review_observations", "findings", "review_agent_analyses"):
+        for table in (
+            "files",
+            "symbols",
+            "chunks",
+            "process_relationships",
+            "process_symbol_memberships",
+            "process_clusters",
+            "processes",
+            "review_jobs",
+            "review_observations",
+            "findings",
+            "review_agent_analyses",
+        ):
             self.connection.execute(f"DELETE FROM {table}")
 
     def delete_index_data_for_files(self, file_paths: list[str]) -> None:
@@ -197,6 +278,146 @@ class DuckDBStore:
                 record["end_line"],
                 record["signature"],
                 record["metadata_json"],
+            ],
+        )
+
+    def insert_process_cluster(self, record: dict[str, Any]) -> None:
+        self.connection.execute(
+            """
+            INSERT OR REPLACE INTO process_clusters(
+                cluster_id, name, process_type, canonical_entry_symbol, canonical_terminal_symbol,
+                process_count, avg_step_count, module_tags_json, community_tags_json, file_paths_json, keywords_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                record["cluster_id"],
+                record["name"],
+                record["process_type"],
+                record["canonical_entry_symbol"],
+                record["canonical_terminal_symbol"],
+                record["process_count"],
+                record["avg_step_count"],
+                json.dumps(record.get("module_tags", [])),
+                json.dumps(record.get("community_tags", [])),
+                json.dumps(record.get("file_paths", [])),
+                json.dumps(record.get("keywords", [])),
+            ],
+        )
+
+    def insert_process_symbol_membership(self, record: dict[str, Any]) -> None:
+        self.connection.execute(
+            """
+            INSERT OR REPLACE INTO process_symbol_memberships(cluster_id, process_id, symbol, step_index, role)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [record["cluster_id"], record["process_id"], record["symbol"], record["step_index"], record["role"]],
+        )
+
+    def insert_process_symbol_memberships(self, records: list[dict[str, Any]]) -> None:
+        if not records:
+            return
+        self.connection.executemany(
+            """
+            INSERT OR REPLACE INTO process_symbol_memberships(cluster_id, process_id, symbol, step_index, role)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [[record["cluster_id"], record["process_id"], record["symbol"], record["step_index"], record["role"]] for record in records],
+        )
+
+    def insert_process_relationship(self, record: dict[str, Any]) -> None:
+        self.connection.execute(
+            """
+            INSERT OR REPLACE INTO process_relationships(source_cluster_id, target_cluster_id, relation_type, shared_symbol)
+            VALUES (?, ?, ?, ?)
+            """,
+            [record["source_cluster_id"], record["target_cluster_id"], record["relation_type"], record.get("shared_symbol", "")],
+        )
+
+    def insert_process_relationships(self, records: list[dict[str, Any]]) -> None:
+        if not records:
+            return
+        self.connection.executemany(
+            """
+            INSERT OR REPLACE INTO process_relationships(source_cluster_id, target_cluster_id, relation_type, shared_symbol)
+            VALUES (?, ?, ?, ?)
+            """,
+            [[record["source_cluster_id"], record["target_cluster_id"], record["relation_type"], record.get("shared_symbol", "")] for record in records],
+        )
+
+    def insert_process(self, record: dict[str, Any]) -> None:
+        self.connection.execute(
+            """
+            INSERT OR REPLACE INTO processes(
+                process_id, name, process_type, entry_symbol, terminal_symbol,
+                step_count, step_list_json, module_tags_json, community_tags_json, file_paths_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                record["process_id"],
+                record["name"],
+                record["process_type"],
+                record["entry_symbol"],
+                record["terminal_symbol"],
+                record["step_count"],
+                json.dumps(record.get("step_list", [])),
+                json.dumps(record.get("module_tags", [])),
+                json.dumps(record.get("community_tags", [])),
+                json.dumps(record.get("file_paths", [])),
+            ],
+        )
+
+    def insert_processes(self, records: list[dict[str, Any]]) -> None:
+        if not records:
+            return
+        self.connection.executemany(
+            """
+            INSERT OR REPLACE INTO processes(
+                process_id, name, process_type, entry_symbol, terminal_symbol,
+                step_count, step_list_json, module_tags_json, community_tags_json, file_paths_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                [
+                    record["process_id"],
+                    record["name"],
+                    record["process_type"],
+                    record["entry_symbol"],
+                    record["terminal_symbol"],
+                    record["step_count"],
+                    json.dumps(record.get("step_list", [])),
+                    json.dumps(record.get("module_tags", [])),
+                    json.dumps(record.get("community_tags", [])),
+                    json.dumps(record.get("file_paths", [])),
+                ]
+                for record in records
+            ],
+        )
+
+    def insert_process_clusters(self, records: list[dict[str, Any]]) -> None:
+        if not records:
+            return
+        self.connection.executemany(
+            """
+            INSERT OR REPLACE INTO process_clusters(
+                cluster_id, name, process_type, canonical_entry_symbol, canonical_terminal_symbol,
+                process_count, avg_step_count, module_tags_json, community_tags_json, file_paths_json, keywords_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                [
+                    record["cluster_id"],
+                    record["name"],
+                    record["process_type"],
+                    record["canonical_entry_symbol"],
+                    record["canonical_terminal_symbol"],
+                    record["process_count"],
+                    record["avg_step_count"],
+                    json.dumps(record.get("module_tags", [])),
+                    json.dumps(record.get("community_tags", [])),
+                    json.dumps(record.get("file_paths", [])),
+                    json.dumps(record.get("keywords", [])),
+                ]
+                for record in records
             ],
         )
 
@@ -367,6 +588,89 @@ class DuckDBStore:
         ).fetchall()
         columns = [column[0] for column in self.connection.description]
         return [dict(zip(columns, row)) for row in rows]
+
+    def fetch_process_clusters(self, limit: int = 50, query: str = "") -> list[dict[str, Any]]:
+        normalized = str(query or "").strip()
+        if normalized:
+            pattern = f"%{normalized}%"
+            rows = self.connection.execute(
+                """
+                SELECT * FROM process_clusters
+                WHERE lower(name) LIKE lower(?)
+                   OR lower(canonical_entry_symbol) LIKE lower(?)
+                   OR lower(canonical_terminal_symbol) LIKE lower(?)
+                   OR lower(file_paths_json) LIKE lower(?)
+                   OR lower(module_tags_json) LIKE lower(?)
+                ORDER BY process_count DESC, avg_step_count DESC, name ASC
+                LIMIT ?
+                """,
+                [pattern, pattern, pattern, pattern, pattern, limit],
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM process_clusters ORDER BY process_count DESC, avg_step_count DESC, name ASC LIMIT ?",
+                [limit],
+            ).fetchall()
+        columns = [column[0] for column in self.connection.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def fetch_process_clusters_for_symbol(self, symbol_name: str, limit: int = 50) -> list[dict[str, Any]]:
+        normalized = str(symbol_name or "").strip()
+        if not normalized:
+            return []
+        rows = self.connection.execute(
+            """
+            SELECT DISTINCT c.*
+            FROM process_clusters c
+            JOIN process_symbol_memberships m ON c.cluster_id = m.cluster_id
+            WHERE m.symbol = ?
+               OR c.canonical_entry_symbol = ?
+               OR c.canonical_terminal_symbol = ?
+            ORDER BY c.process_count DESC, c.avg_step_count DESC, c.name ASC
+            LIMIT ?
+            """,
+            [normalized, normalized, normalized, limit],
+        ).fetchall()
+        columns = [column[0] for column in self.connection.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def fetch_process_memberships_for_cluster(self, cluster_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM process_symbol_memberships WHERE cluster_id = ? ORDER BY process_id ASC, step_index ASC LIMIT ?",
+            [cluster_id, limit],
+        ).fetchall()
+        columns = [column[0] for column in self.connection.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def fetch_process_relationships(self, cluster_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM process_relationships
+            WHERE source_cluster_id = ? OR target_cluster_id = ?
+            ORDER BY relation_type ASC, source_cluster_id ASC, target_cluster_id ASC
+            LIMIT ?
+            """,
+            [cluster_id, cluster_id, limit],
+        ).fetchall()
+        columns = [column[0] for column in self.connection.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def fetch_symbol_by_uid(self, uid: str) -> dict[str, Any] | None:
+        normalized = str(uid or "").strip()
+        if not normalized:
+            return None
+        parts = normalized.split(":", 2)
+        if len(parts) != 3:
+            return None
+        _, file_path, qualified_name = parts
+        row = self.connection.execute(
+            "SELECT * FROM symbols WHERE file_path = ? AND qualified_name = ? LIMIT 1",
+            [file_path, qualified_name],
+        ).fetchone()
+        if row is None:
+            return None
+        columns = [column[0] for column in self.connection.description]
+        return dict(zip(columns, row))
 
     def fetch_symbols_for_target(self, target: str, limit: int = 50) -> list[dict[str, Any]]:
         pattern = f"%{target}%"

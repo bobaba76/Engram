@@ -6,6 +6,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.coordinator import Coordinator
+from app.run_modes import FULL, INCREMENTAL
 from config.settings import load_settings
 
 
@@ -68,12 +69,22 @@ def _print_report_paths(summary) -> None:
         print(f"- layperson: {layperson}")
 
 
+def _resolve_run_mode() -> str:
+    if len(sys.argv) <= 2:
+        return INCREMENTAL
+    requested = str(sys.argv[2] or '').strip().lower()
+    if requested == FULL:
+        return FULL
+    return INCREMENTAL
+
+
 def main() -> int:
     project_root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else None
+    run_mode = _resolve_run_mode()
     settings = load_settings(project_root)
     print(f"Starting index run for: {settings.repo_root}", flush=True)
     coordinator = Coordinator(settings)
-    summary = coordinator.run()
+    summary = coordinator.run(run_mode=run_mode)
     print(f"Index run completed: {summary.run_id}")
     for stage in summary.stage_results:
         print(

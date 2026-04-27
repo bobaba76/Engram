@@ -11,6 +11,26 @@ SUPPORTED_EXTENSIONS = {
     ".tsx": "tsx",
     ".js": "typescript",
     ".jsx": "tsx",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".hxx": "cpp",
+    ".cs": "csharp",
+    ".csproj": "csharp_project",
+    ".sln": "csharp_solution",
+    ".vcxproj": "native_project",
+    ".cmake": "native_build",
+    ".json": "json",
+}
+
+SUPPORTED_FILE_NAMES = {
+    "compile_commands.json": "native_build",
+    "cmakelists.txt": "native_build",
+    "makefile": "native_build",
 }
 
 EXCLUDED_FILE_NAMES = {
@@ -65,7 +85,7 @@ def scan_repo(repo_root: Path, excluded_dirs: Iterable[str] = ()) -> list[FileRe
             continue
         if ".venv" in path.parts or "__pycache__" in path.parts or path.parts[-1].startswith("."):
             continue
-        language = SUPPORTED_EXTENSIONS.get(path.suffix.lower())
+        language = SUPPORTED_FILE_NAMES.get(path.name.lower()) or SUPPORTED_EXTENSIONS.get(path.suffix.lower())
         if language is None:
             continue
         payload = path.read_bytes()

@@ -1,29 +1,33 @@
 from storage.duckdb_store import DuckDBStore
-from services.search_ranking import classify_confidence, compact_result_payload, score_symbol_relevance, summarize_relevance
+from services.search_ranking import compact_result_payload
+from services.symbol_resolution_service import resolve_candidates
 
 
-def find_symbols(duckdb_store: DuckDBStore, query: str, limit: int = 10) -> dict[str, object]:
-    scored = []
-    candidate_limit = max(limit * 5, 25)
-    for symbol in duckdb_store.fetch_symbols_for_target(query, limit=candidate_limit):
-        name = symbol["name"] or ""
-        qualified_name = symbol["qualified_name"] or ""
-        score, reasons = score_symbol_relevance(query, name, qualified_name, symbol["file_path"], symbol.get("kind", ""))
-        scored.append(
+def find_symbols(
+    duckdb_store: DuckDBStore,
+    query: str,
+    limit: int = 10,
+    file_path: str | None = None,
+    kind: str | None = None,
+    symbol_uid: str | None = None,
+) -> dict[str, object]:
+    results = []
+    for item in resolve_candidates(duckdb_store, target=query, file_path=file_path, kind=kind, symbol_uid_value=symbol_uid, limit=limit):
+        symbol = item.get("symbol", {}) if isinstance(item, dict) else {}
+        results.append(
             {
-                "score": round(score, 4),
-                "confidence": classify_confidence(score),
-                "relevance": summarize_relevance(reasons),
-                "file_path": symbol["file_path"],
-                "name": name,
-                "qualified_name": qualified_name,
-                "kind": symbol["kind"],
-                "start_line": symbol["start_line"],
-                "end_line": symbol["end_line"],
+                "score": round(float(item.get("score", 0.0) or 0.0), 4),
+                "confidence": item.get("confidence", "low"),
+                "relevance": item.get("relevance", ""),
+                "uid": symbol.get("uid", ""),
+                "file_path": symbol.get("file_path", ""),
+                "name": symbol.get("name", ""),
+                "qualified_name": symbol.get("qualified_name", ""),
+                "kind": symbol.get("kind", ""),
+                "start_line": symbol.get("start_line"),
+                "end_line": symbol.get("end_line"),
             }
         )
-    scored.sort(key=lambda item: (item["score"], item["qualified_name"]), reverse=True)
-    results = scored[:limit]
     return {
         "query": query,
         "results": results,

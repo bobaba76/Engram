@@ -13,9 +13,10 @@ from indexing.chunker import build_chunks
 from indexing.embedder import embed_chunks
 from indexing.embeddings import get_embedding_runtime_info
 from indexing.graph_builder import build_graph
+from indexing.process_builder import build_process_graph_records
 from indexing.planner import plan_incremental_work
 from indexing.scanner import scan_repo
-from indexing.symbol_extractor import extract_symbols
+from indexing.symbol_extractor import extract_symbols_with_status
 from models.entity_models import SymbolRecord
 from models.config_models import RuntimeConfig
 from models.review_models import ReviewAgentAnalysis, ReviewFinding, ReviewObservation, ReviewResult
@@ -232,11 +233,17 @@ class Coordinator:
             "unchanged_files": len(unchanged_files),
             "deleted_files": len(deleted_files),
         }
+        parser_usage: dict[str, int] = defaultdict(int)
+        clang_runtime_summary: dict[str, object] = {}
         for index, file_path in enumerate(changed_files, start=1):
             file_record = file_map[file_path]
             file_path = self.settings.repo_root / file_record.path
-            symbols = extract_symbols(file_path)
+            symbols, parse_status = extract_symbols_with_status(file_path)
             self.symbols_by_file[file_record.path] = symbols
+            parser_name = str(parse_status.get("parser", "unknown"))
+            parser_usage[parser_name] += 1
+            if not clang_runtime_summary and isinstance(parse_status.get("clang"), dict):
+                clang_runtime_summary = dict(parse_status.get("clang") or {})
             self.duckdb.upsert_file(asdict(file_record))
             for symbol in symbols:
                 self.duckdb.insert_symbol(
@@ -252,17 +259,23 @@ class Coordinator:
                     }
                 )
             if self._should_log_index(index, len(changed_files)):
-                self._log_progress(f"parse progress: {index}/{len(changed_files)} files ({file_record.path})")
+                self._log_progress(
+                    f"parse progress: {index}/{len(changed_files)} files ({file_record.path}) parser={parser_name} symbols={len(symbols)}"
+                )
         symbol_count = sum(len(symbols) for symbols in self.symbols_by_file.values())
         parse_stage.output_summary = {
             "parsed_files": len(changed_files),
             "retained_files": len(unchanged_files),
             "symbol_count": symbol_count,
+            "parser_usage": dict(parser_usage),
+            "clang_runtime": clang_runtime_summary,
         }
         parse_stage.status = "completed"
         parse_stage.completed_at = time()
         summary.stage_results.append(parse_stage)
-        self._log_progress(f"parse completed: {len(changed_files)} files, {symbol_count} symbols")
+        self._log_progress(
+            f"parse completed: {len(changed_files)} files, {symbol_count} symbols, parsers={dict(parser_usage)}"
+        )
 
         graph_stage = StageResult(stage_name="graph", status="running")
         graph_files = [file_map[file_path] for file_path in sorted(impacted_files) if file_path in file_map]
@@ -281,6 +294,19 @@ class Coordinator:
         graph_stage.completed_at = time()
         summary.stage_results.append(graph_stage)
         self._log_progress(f"graph completed: {graph_stage.output_summary['edge_count']} edges")
+
+        process_records, process_clusters, process_memberships, process_relationships = build_process_graph_records(
+            self.duckdb,
+            self.kuzu,
+            self.symbols_by_file,
+        )
+        self.duckdb.insert_processes([asdict(process_record) for process_record in process_records])
+        self.duckdb.insert_process_clusters([asdict(process_cluster) for process_cluster in process_clusters])
+        self.duckdb.insert_process_symbol_memberships([asdict(membership) for membership in process_memberships])
+        self.duckdb.insert_process_relationships([asdict(relationship) for relationship in process_relationships])
+        self._log_progress(
+            f"process extraction completed: {len(process_records)} processes, {len(process_clusters)} clusters, {len(process_relationships)} relationships persisted"
+        )
 
         embed_stage = StageResult(stage_name="embed", status="running")
         self._log_progress(f"embed started for {len(changed_files)} files")
@@ -388,6 +414,8 @@ class Coordinator:
                 "files": len(files),
                 "symbols": symbol_count,
                 "chunks": total_chunks,
+                "processes": len(process_records),
+                "process_clusters": len(process_clusters),
                 "findings": len(self.latest_findings),
             },
             "versions": {

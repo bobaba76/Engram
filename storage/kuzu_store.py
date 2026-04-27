@@ -22,6 +22,13 @@ def _safe_get_all(result) -> list[tuple[Any, ...]]:
         return []
 
 
+def _result_columns(result) -> list[str]:
+    try:
+        return [str(name) for name in result.get_column_names()]
+    except Exception:
+        return []
+
+
 class KuzuStore:
     def __init__(self, data_path: Path) -> None:
         self.data_path = data_path
@@ -60,6 +67,16 @@ class KuzuStore:
                 raise
         try:
             self.connection.execute("CREATE REL TABLE REFERENCES(FROM Symbol TO Symbol)")
+        except RuntimeError as exc:
+            if not _is_already_exists_error(exc):
+                raise
+        try:
+            self.connection.execute("CREATE REL TABLE DECLARES(FROM Symbol TO Symbol)")
+        except RuntimeError as exc:
+            if not _is_already_exists_error(exc):
+                raise
+        try:
+            self.connection.execute("CREATE REL TABLE ASSOCIATED_WITH(FROM Symbol TO Symbol)")
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
@@ -161,6 +178,8 @@ class KuzuStore:
             "MATCH (s1:Symbol)-[:IMPORTS]->(s2:Symbol) RETURN COUNT(*)",
             "MATCH (s1:Symbol)-[:CALLS]->(s2:Symbol) RETURN COUNT(*)",
             "MATCH (s1:Symbol)-[:REFERENCES]->(s2:Symbol) RETURN COUNT(*)",
+            "MATCH (s1:Symbol)-[:DECLARES]->(s2:Symbol) RETURN COUNT(*)",
+            "MATCH (s1:Symbol)-[:ASSOCIATED_WITH]->(s2:Symbol) RETURN COUNT(*)",
         ):
             try:
                 rows = _safe_get_all(self.connection.execute(query))
@@ -181,6 +200,10 @@ class KuzuStore:
             "MATCH (s1:Symbol)-[:CALLS]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
             "MATCH (s1:Symbol)-[:REFERENCES]->(s2:Symbol) WHERE s1.file_path = $file_path RETURN DISTINCT s2.file_path",
             "MATCH (s1:Symbol)-[:REFERENCES]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
+            "MATCH (s1:Symbol)-[:DECLARES]->(s2:Symbol) WHERE s1.file_path = $file_path RETURN DISTINCT s2.file_path",
+            "MATCH (s1:Symbol)-[:DECLARES]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
+            "MATCH (s1:Symbol)-[:ASSOCIATED_WITH]->(s2:Symbol) WHERE s1.file_path = $file_path RETURN DISTINCT s2.file_path",
+            "MATCH (s1:Symbol)-[:ASSOCIATED_WITH]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
         )
         for file_path in touched_files:
             for query in relation_queries:
@@ -200,6 +223,8 @@ class KuzuStore:
             "IMPORTS": "MATCH (s1:Symbol)-[:IMPORTS]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
             "CALLS": "MATCH (s1:Symbol)-[:CALLS]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
             "REFERENCES": "MATCH (s1:Symbol)-[:REFERENCES]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
+            "DECLARES": "MATCH (s1:Symbol)-[:DECLARES]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
+            "ASSOCIATED_WITH": "MATCH (s1:Symbol)-[:ASSOCIATED_WITH]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
         }.items():
             try:
                 rows = self.connection.execute(query).get_all()
@@ -212,7 +237,7 @@ class KuzuStore:
         return edges
  
     def edges_for_target(self, target: str, relation: str | None = None) -> list[dict[str, Any]]:
-        relations = [relation] if relation is not None else ["DEFINES", "IMPORTS", "CALLS", "REFERENCES"]
+        relations = [relation] if relation is not None else ["DEFINES", "IMPORTS", "CALLS", "REFERENCES", "DECLARES", "ASSOCIATED_WITH"]
         edges: list[dict[str, Any]] = []
         for relation_name in relations:
             _, target_query = self._relation_queries(relation_name)
@@ -224,7 +249,7 @@ class KuzuStore:
         return edges
  
     def edges_for_source(self, source: str, relation: str | None = None) -> list[dict[str, Any]]:
-        relations = [relation] if relation is not None else ["DEFINES", "IMPORTS", "CALLS", "REFERENCES"]
+        relations = [relation] if relation is not None else ["DEFINES", "IMPORTS", "CALLS", "REFERENCES", "DECLARES", "ASSOCIATED_WITH"]
         edges: list[dict[str, Any]] = []
         for relation_name in relations:
             source_query, _ = self._relation_queries(relation_name)
@@ -260,3 +285,19 @@ class KuzuStore:
             if not frontier:
                 break
         return {"target": target, "depth": depth, "nodes": sorted(seen), "edges": collected}
+
+    def execute_query(self, query: str, parameters: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = self.connection.execute(query, parameters or {})
+        columns = _result_columns(result)
+        rows = _safe_get_all(result)
+        mapped_rows: list[dict[str, Any]] = []
+        if columns:
+            for row in rows:
+                mapped_rows.append({columns[index]: row[index] for index in range(min(len(columns), len(row)))})
+        return {
+            "query": query,
+            "parameters": parameters or {},
+            "columns": columns,
+            "row_count": len(rows),
+            "rows": mapped_rows,
+        }

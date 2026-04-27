@@ -60,7 +60,7 @@ def _build_chunk_records(file_path: str, chunk_id_prefix: str, chunk_kind: str, 
 
 
 def build_chunks(repo_root: Path, file_path: str, symbols: list[SymbolRecord]) -> list[ChunkRecord]:
-    source_lines = (repo_root / file_path).read_text(encoding="utf-8").splitlines()
+    source_lines = (repo_root / file_path).read_text(encoding="utf-8", errors="ignore").splitlines()
     if _is_non_core_blob(source_lines):
         return [
             ChunkRecord(

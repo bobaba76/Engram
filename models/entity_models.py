@@ -32,3 +32,49 @@ class ChunkRecord:
     symbol_name: str = ""
     qualified_name: str = ""
     content: str = ""
+
+
+@dataclass(slots=True)
+class ProcessRecord:
+    process_id: str
+    name: str
+    process_type: str
+    entry_symbol: str
+    terminal_symbol: str
+    step_count: int
+    step_list: list[dict[str, Any]] = field(default_factory=list)
+    module_tags: list[str] = field(default_factory=list)
+    community_tags: list[str] = field(default_factory=list)
+    file_paths: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ProcessClusterRecord:
+    cluster_id: str
+    name: str
+    process_type: str
+    canonical_entry_symbol: str
+    canonical_terminal_symbol: str
+    process_count: int
+    avg_step_count: float
+    module_tags: list[str] = field(default_factory=list)
+    community_tags: list[str] = field(default_factory=list)
+    file_paths: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ProcessSymbolMembershipRecord:
+    cluster_id: str
+    process_id: str
+    symbol: str
+    step_index: int
+    role: str
+
+
+@dataclass(slots=True)
+class ProcessRelationshipRecord:
+    source_cluster_id: str
+    target_cluster_id: str
+    relation_type: str
+    shared_symbol: str = ""

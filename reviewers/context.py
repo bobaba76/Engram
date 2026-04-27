@@ -14,7 +14,7 @@ def build_review_context(
     target: str,
 ) -> dict[str, object]:
     relative_path = str(target).replace('\\', '/')
-    source_text = file_path.read_text(encoding="utf-8")
+    source_text = file_path.read_text(encoding="utf-8", errors="replace")
     symbols = [row for row in duckdb_store.fetch_all("symbols") if row["file_path"] == relative_path]
     chunks = duckdb_store.fetch_chunks_for_target(relative_path, limit=20)
     findings = duckdb_store.fetch_findings_for_target(relative_path)
