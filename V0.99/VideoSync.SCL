@@ -1,0 +1,280 @@
+configuration for "dsPIC33FJ64GP204" is
+    constant Minus1ns : time := 18446744073709551615 ns;	
+--SCL uses 64 bit integer math for everything, thus -1ns = h'FFFFFFFFFFFFFFFF'
+-- = 18446744073709551615 decimal.
+    constant ComparatorDelay : time := 300 ns;
+    constant StartLine : integer := 50;					
+    constant StartDelay : time := 22 us;
+    constant TLine : time := 64 us;
+    constant THLine : time :=  32 us;
+    constant TSync : time := 4.75 us;
+    constant TEgPulse : time := 2 us;
+    constant TMaxPosLineError : integer := 0;  -- us
+    constant TMaxNegLineError : integer := 0; --us ..If negative put -const SCL does not handle negate of constant in runtime.
+    constant TLinePosJitter : integer := 1000; -- ns 
+    constant TLineNegJitter : integer := -1000; -- ns .. SCL does not handle -constant
+
+    --Calcs for 56pF / 22K RC filter on RB4, driven from RB3
+    constant Vcc : integer   := 3300000;    -- 3V3 = 3.3e6 uV 
+    constant Vhigh : integer := 2640000;    -- 0.8 Vcc
+    constant Vlow  : integer :=  660000;    -- 0.2 Vcc
+    
+    constant ExpT	: integer := 3333;		-- (Vcc/1e3)/(1-exp(-t/T)) where t = Dt step size (250n), 
+                                            --  T = RC time constant.
+    constant ExpT2 : integer := 1667; 		-- ExpT /2
+end configuration;
+
+
+testbench for "dsPIC33FJ64GP204" is
+begin
+
+    -- RB0  - sync_in (video)    C2In-  (RB0)
+ 	-- RB12 - sync_sep           C2Out  (RB12)
+    -- RB1  - sync_slice         C2In+  (RA2)
+    
+    INIT: process is
+    begin
+        RB1 <= '0';	-- Sync Slice	
+        RB0 <= '1'; -- Sync_in
+        wait;
+    end process;
+
+    -- Load A-D
+    process is
+    begin
+        accessin("SIMULATOR_AD_VALUE.TXT", hex_mode, ADC1BUF0, true);
+    print("A-D loaded");
+        wait;
+    end process;
+
+//    COMP2: process is
+//    begin
+//        wait until RB0 == '0';
+//        wait until RB0 == '1';
+//        wait for 200 ns;
+//        RC2 <= '0';
+//        wait for 2 us;
+//        RC2 <= '1';
+//        wait for 5 us;	-- In case program has in meantime cleared RC2 (DC-clamp code)
+//        RC2 <= '1';
+//    end process;
+    
+    // Register Trace
+    process is
+    begin
+        accessout("null", hex_mode, SPI1BUF);
+        wait;
+    end process;
+
+    SPI_RUN_TEST: process is
+        variable SPI_Run : boolean := false;
+    begin
+    	print("Start");
+    	loop
+	    	wait until SPI1STAT.SPIEN == '1';
+	    	print("SPI started");
+			SPI_Run := true;
+			wait until SPI1STAT.SPIEN == '0';
+			SPI_Run := false;
+			print ("SPI stopped");
+		end loop;
+    end process;
+       
+
+    SPI_TX: process is
+        variable SPI_Data : integer;
+    begin
+         loop
+            exit when SPI_Run == false;
+  
+---- DOES NOT WORK dsPIC            
+//            SPI1STAT.SPIBEC := B"111";
+            
+//            if SPI1STAT.SPIBEC /= B"000" then
+//                SPI_Data := SPI1BUF;
+//                wait for 2 us;
+//            end if;
+            
+            wait for 1 ic;
+            
+        end loop;
+        
+            wait for 1 ic;
+    end process;        
+    
+	SPI_GET: process is
+      	file SPI_File : text;
+		variable SPI_file_status : file_open_status;
+        variable SPI_Int : integer;       
+		variable SPI_L : line;
+        variable SPI_FileOpen : boolean := false;
+        variable SPI_Start : time := 0 us;
+        variable SPI_Temp : integer;
+        -- Loop counters
+        variable SPI_I : integer;
+        variable SPI_J : integer;
+	begin
+		if SPI_Run == true then
+			SPI_Start := now();
+	        if SPI_FileOpen /= true then
+			    file_open(SPI_file_status, SPI_File, "null", read_mode);
+	            if SPI_file_status == open_ok then
+	            wait for 1 ic;
+	            
+	            SPI_FileOpen := true;
+	            end if;
+	        end if;
+	
+	         if SPI_file_status == open_ok then
+				while endfile(SPI_File) == false loop
+	    			readline(SPI_File, SPI_L);
+	    			read(SPI_L, SPI_Int);				
+print(">>>",SPI_Int);
+//					SPI1BUF <= SPI_Int;
+//					SPI1STAT.SPIRBF <= '1';
+//					IFS0.SPI1IF <= '1';					
+//					wait for 1 ic;
+//					IFS0.SPI1IF <= '0';
+//					SPI1STAT.SPIRBF <= '0';
+				end loop;
+				RP8 <= '1';
+			end if;
+	
+			-- Set the Rx full flag.
+	 //		SPI1STAT.SPIRBF <= '1';
+			//file_close(SPI_File);
+			//SPI_FileOpen := false;
+      		
+	
+
+		end if;
+        wait for 1 ic;
+	end process SPI_GET;
+    
+//    -- Simulate RC filter from RB3 to RB4
+//    SYNC_FILTER: process is
+//        variable Vc : integer := 0;
+//        variable Dv : integer := 0;
+//        variable VI : integer := 0;
+//    begin
+//        if RB3 == '1'  then
+//            VI := Vcc;
+//        else
+//            VI := 0;
+//        end if;
+//        Dv := VI - Vc;
+//        Dv := (Dv*100);
+//        Dv := Dv + ExpT2;
+//        Dv := Dv / ExpT;
+//        Dv := Dv * 10;
+//        Vc := Vc + Dv;
+//        if Vc >= Vhigh then
+//            RB4 <= '1';
+//        end if;
+//        if Vc <= Vlow then
+//            RB4 <= '0';
+//        end if;
+//        wait for 250 ns;
+//    end process;
+    
+    LINE_STATE_MACHINE: process is
+        variable LineError : time := 0;
+        variable LineTime : time;
+        variable LineCntr : integer;
+        variable Tm : time := 0;
+    begin
+        wait for 1 ic;
+        wait for StartDelay;
+        LineCntr := StartLine;
+        while true loop   
+            while LineCntr < 5 loop		--Even Field pulses
+                RB0 <= '0';
+                RB1 <= '1';
+                wait for (THLine - TSync);
+                RB0 <= '1';
+                RB1 <= '0';
+                wait for TSync;
+                LineCntr := LineCntr + 1;
+            end loop;
+
+            while LineCntr < 10 loop	--Even field start equalisation
+                RB0 <= '0';
+                RB1 <= '1';
+                wait for TEgPulse;
+                RB0 <= '1';
+                RB1 <= '0';
+                wait for (THLine - TEgPulse);
+                LineCntr := LineCntr + 1;
+            end loop;
+
+            while LineCntr < 620 loop	--Even Lines
+                RB0 <= '0';
+                RB1 <= '1';
+                wait for TSync;
+                RB0 <= '1';
+                RB1 <= '0';
+                wait for (TLine - TSync);
+                LineCntr := LineCntr + 2;
+            end loop;
+
+            while LineCntr < 625 loop	--Even field end equalisation
+                RB0 <= '0';
+                RB1 <= '1';
+                wait for TEgPulse;
+                RB0 <= '1';
+                RB1 <= '0';
+                wait for (THLine - TEgPulse);
+                LineCntr := LineCntr + 1;
+            end loop;
+
+            while LineCntr < 630 loop	--Odd field sync
+                RB0 <= '0';
+                RB1 <= '1';
+                wait for (THLine - TSync);
+                RB0 <= '1';
+                RB1 <= '0';
+                wait for TSync;
+                LineCntr := LineCntr + 1;
+            end loop;
+
+            while LineCntr < 634 loop	--Odd field start equalisation
+                RB0 <= '0';
+                RB1 <= '1';
+                wait for TEgPulse;
+                RB0 <= '1';
+                RB1 <= '0';
+                wait for (THLine - TEgPulse);
+                LineCntr := LineCntr + 1;
+            end loop;
+            
+
+            while LineCntr < 1244 loop  --Odd Lines
+                RB0 <= '0';
+                RB1 <= '1';
+                wait for TSync;
+                RB0 <= '1';
+                RB1 <= '0';
+                wait for (THLine - TSync);
+                LineCntr := LineCntr + 1;
+                if LineCntr < 1244 then
+                    wait for (THLine);
+                end if;
+                LineCntr := LineCntr +1;
+            end loop;
+
+            while LineCntr < 1250 loop
+                RB0 <= '0';
+                RB1 <= '1';
+                wait for TEgPulse;
+                RB0 <= '1';
+                RB1 <= '0';
+                wait for (THLine - TEgPulse);
+                LineCntr := LineCntr + 1;
+            end loop;
+
+            LineCntr := 0;
+        end loop;
+    end process;
+
+end testbench;
+

@@ -5,7 +5,7 @@ from storage.kuzu_store import KuzuStore
 from services.dependency_service import get_dependencies
 from services.graph_service import get_callers_and_callees, get_graph_neighborhood_with_options
 from services.search_ranking import compact_result_payload
-from services.symbol_resolution_service import ambiguity_status, resolve_candidates
+from services.symbol_resolution_service import ambiguity_status, resolve_candidates, symbol_uid_from_target
 
 
 def _dependency_counts(dependencies: dict[str, object]) -> dict[str, int]:
@@ -30,12 +30,16 @@ def get_unified_context(
     symbol_uid: str | None = None,
 ) -> dict[str, object]:
     top_matches = []
+    resolved_symbol_uid = symbol_uid_from_target(target, symbol_uid)
+    lookup_target = str(target or "").strip()
+    if resolved_symbol_uid and resolved_symbol_uid == lookup_target:
+        lookup_target = ""
     for item in resolve_candidates(
         duckdb_store,
-        target=target,
+        target=lookup_target,
         file_path=file_path,
         kind=kind,
-        symbol_uid_value=symbol_uid,
+        symbol_uid_value=resolved_symbol_uid,
         limit=max_matches,
     ):
         symbol = item.get("symbol", {}) if isinstance(item, dict) else {}
