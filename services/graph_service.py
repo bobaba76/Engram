@@ -1,4 +1,5 @@
 from storage.kuzu_store import KuzuStore
+from services.symbol_resolution_service import graph_target_from_uid_target
 
 
 COMMON_HUB_TOKENS = {
@@ -21,6 +22,10 @@ COMMON_HUB_TOKENS = {
     "get_db_connection",
     "get_db_path",
 }
+
+
+def _normalize_graph_target(target: str) -> str:
+    return graph_target_from_uid_target(target)
 
 
 def _tokenize(value: str) -> set[str]:
@@ -178,14 +183,15 @@ def _expansion_warnings(target: str, depth: int, node_count: int, edge_count: in
 
 
 def get_callers_and_callees(kuzu_store: KuzuStore, target: str) -> dict[str, object]:
-    callers = kuzu_store.edges_for_target(target, relation="CALLS")
-    callees = kuzu_store.edges_for_source(target, relation="CALLS")
+    resolved_target = _normalize_graph_target(target)
+    callers = kuzu_store.edges_for_target(resolved_target, relation="CALLS")
+    callees = kuzu_store.edges_for_source(resolved_target, relation="CALLS")
     return {
-        "target": target,
+        "target": resolved_target,
         "callers": callers,
         "callees": callees,
         "compact_summary": {
-            "target": target,
+            "target": resolved_target,
             "caller_count": len(callers),
             "callee_count": len(callees),
             "top_callers": callers[:5],
@@ -210,13 +216,14 @@ def get_graph_neighborhood_with_options(
     suppress_common_hubs: bool = False,
 ) -> dict[str, object]:
     normalized_mode = mode if mode in {"full", "focused", "direct"} else "full"
-    neighborhood = kuzu_store.neighborhood(target=target, depth=depth)
+    resolved_target = _normalize_graph_target(target)
+    neighborhood = kuzu_store.neighborhood(target=resolved_target, depth=depth)
     all_edges = neighborhood.get("edges", [])
-    filtered_edges = _filter_edges(all_edges, target=target, relation=relation, mode=normalized_mode, max_edges=max_edges, suppress_common_hubs=suppress_common_hubs)
-    direct_edges = [edge for edge in filtered_edges if edge.get("source") == target or edge.get("target") == target]
-    filtered_nodes = _nodes_for_edges(target, filtered_edges)
+    filtered_edges = _filter_edges(all_edges, target=resolved_target, relation=relation, mode=normalized_mode, max_edges=max_edges, suppress_common_hubs=suppress_common_hubs)
+    direct_edges = [edge for edge in filtered_edges if edge.get("source") == resolved_target or edge.get("target") == resolved_target]
+    filtered_nodes = _nodes_for_edges(resolved_target, filtered_edges)
     return {
-        "target": target,
+        "target": resolved_target,
         "depth": depth,
         "mode": normalized_mode,
         "relation_filter": relation,
@@ -229,7 +236,7 @@ def get_graph_neighborhood_with_options(
             "edge_count": len(all_edges),
         },
         "compact_summary": {
-            "target": target,
+            "target": resolved_target,
             "depth": depth,
             "mode": normalized_mode,
             "relation_filter": relation,
@@ -241,8 +248,8 @@ def get_graph_neighborhood_with_options(
             "raw_edge_count": len(all_edges),
             "top_edges": filtered_edges[:8],
             "top_direct_edges": direct_edges[:8],
-            "top_neighbors": _top_neighbors(filtered_edges, target),
+            "top_neighbors": _top_neighbors(filtered_edges, resolved_target),
             "relation_breakdown": _relation_breakdown(filtered_edges),
-            "warnings": _expansion_warnings(target, depth, len(filtered_nodes), len(filtered_edges), normalized_mode, relation, suppress_common_hubs),
+            "warnings": _expansion_warnings(resolved_target, depth, len(filtered_nodes), len(filtered_edges), normalized_mode, relation, suppress_common_hubs),
         },
     }

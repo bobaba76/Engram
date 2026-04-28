@@ -9,6 +9,41 @@ def symbol_uid(file_path: str, qualified_name: str, kind: str) -> str:
     return f"{normalized_kind}:{file_path}:{qualified_name}"
 
 
+def parse_symbol_uid(value: str | None) -> dict[str, str] | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    parts = normalized.split(":", 2)
+    if len(parts) != 3:
+        return None
+    kind, file_path, qualified_name = parts
+    if not kind or not file_path or not qualified_name:
+        return None
+    if "/" not in file_path and "\\" not in file_path:
+        return None
+    return {
+        "kind": kind,
+        "file_path": file_path,
+        "qualified_name": qualified_name,
+        "uid": normalized,
+    }
+
+
+def symbol_uid_from_target(target: str | None, symbol_uid_value: str | None = None) -> str | None:
+    explicit_uid = str(symbol_uid_value or "").strip()
+    if explicit_uid:
+        return explicit_uid
+    parsed = parse_symbol_uid(target)
+    return parsed["uid"] if parsed else None
+
+
+def graph_target_from_uid_target(target: str | None) -> str:
+    parsed = parse_symbol_uid(target)
+    if parsed:
+        return parsed["qualified_name"]
+    return str(target or "").strip()
+
+
 def attach_symbol_uid(symbol: dict[str, object]) -> dict[str, object]:
     enriched = dict(symbol)
     enriched["uid"] = symbol_uid(
