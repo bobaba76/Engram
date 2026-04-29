@@ -27,6 +27,13 @@ FRONTEND_TOKENS = {"component", "page", "button", "drawer", "modal", "frontend",
 BACKEND_TOKENS = {"backend", "endpoint", "api", "service", "repository", "store", "database", "db", "ingest", "ingestion", "router"}
 BUG_TOKENS = {"wrong", "bug", "broken", "issue", "incorrect", "missing", "failing", "error", "totals", "shape", "payload", "incoming", "monthly", "stock", "forecast", "trend", "product"}
 TEST_TOKENS = {"test", "tests", "spec", "specs", "pytest", "unit", "integration"}
+SOURCE_WEIGHTS = {
+    "vector": 0.18,
+    "symbol": 0.34,
+    "chunk": 0.18,
+    "regex": 0.24,
+    "graph": 0.22,
+}
 
 
 def _normalize_path(path: object) -> str:
@@ -88,7 +95,78 @@ def compact_result_payload(result: dict[str, Any]) -> dict[str, Any]:
         "confidence": result.get("confidence", "low"),
         "why_relevant": result.get("relevance", "semantic or fuzzy match"),
         "score": result.get("score", 0.0),
+        "sources": result.get("retrieval_sources", [result.get("retrieval_source", "unknown")]),
     }
+
+
+def _source_score(result: dict[str, Any]) -> tuple[float, list[str]]:
+    raw_sources = result.get("retrieval_sources", [result.get("retrieval_source", "")])
+    if not isinstance(raw_sources, list):
+        raw_sources = [raw_sources]
+    sources = {str(source).split("_", 1)[0] for source in raw_sources if str(source or "").strip()}
+    score = sum(SOURCE_WEIGHTS.get(source, 0.0) for source in sources)
+    reasons = [f"{source} retrieval" for source in sorted(sources) if source]
+    return min(score, 0.75), reasons
+
+
+def _content_score(query: str, content: object) -> tuple[float, list[str]]:
+    query_tokens = _query_tokens(query)
+    content_tokens = _text_tokens(content)
+    if not query_tokens or not content_tokens:
+        return 0.0, []
+    overlap = query_tokens & content_tokens
+    if not overlap:
+        return 0.0, []
+    score = min(len(overlap) * 0.08, 0.4)
+    return score, ["content token match"]
+
+
+def _graph_score(result: dict[str, Any]) -> tuple[float, list[str]]:
+    distance = result.get("graph_distance")
+    relation = str(result.get("graph_relation", "")).upper()
+    if distance is None and not relation:
+        return 0.0, []
+    try:
+        normalized_distance = max(int(distance), 1)
+    except (TypeError, ValueError):
+        normalized_distance = 2
+    relation_boosts = {
+        "CALLS": 0.22,
+        "REFERENCES": 0.16,
+        "IMPORTS": 0.12,
+        "DECLARES": 0.1,
+        "ASSOCIATED_WITH": 0.08,
+    }
+    score = relation_boosts.get(relation, 0.1) / normalized_distance
+    return score, [f"graph {relation.lower() or 'neighbor'}"]
+
+
+def _frontend_graph_score(query: str, result: dict[str, Any]) -> tuple[float, list[str]]:
+    file_path = _normalize_path(result.get("file_path", ""))
+    if not file_path.endswith((".ts", ".tsx", ".js", ".jsx")):
+        return 0.0, []
+    raw_sources = result.get("retrieval_sources", [result.get("retrieval_source", "")])
+    if not isinstance(raw_sources, list):
+        raw_sources = [raw_sources]
+    sources = {str(source or "").strip().lower() for source in raw_sources if str(source or "").strip()}
+    relation = str(result.get("graph_relation", "") or "").upper()
+    tokens = _query_tokens(query)
+    frontend_path = any(hint in file_path for hint in ("/frontend", "/components", "/pages", "/views", "/screens", "/hooks", "/ui"))
+    score = 0.0
+    reasons: list[str] = []
+    if "graph" in sources:
+        score += 0.14
+        reasons.append("graph-backed frontend path")
+    if relation in {"CALLS", "IMPORTS", "REFERENCES"}:
+        score += 0.08
+        reasons.append("frontend implementation relation")
+    if frontend_path and (FRONTEND_TOKENS & tokens or "graph" in sources):
+        score += 0.08
+        reasons.append("frontend path context")
+    if file_path.endswith((".tsx", ".jsx")) and (FRONTEND_TOKENS & tokens):
+        score += 0.06
+        reasons.append("component implementation candidate")
+    return min(score, 0.28), reasons
 
 
 def score_path_relevance(query: str, file_path: object) -> tuple[float, list[str]]:
@@ -194,13 +272,17 @@ def rerank_search_results(task: str, results: list[dict[str, Any]], limit: int) 
         qualified_name = result.get("qualified_name", symbol_name)
         path_score, path_reasons = score_path_relevance(task, file_path)
         symbol_score, symbol_reasons = score_symbol_relevance(task, symbol_name, qualified_name, file_path)
-        final_score = base_score + path_score + (symbol_score * 0.45)
+        source_score, source_reasons = _source_score(result)
+        content_score, content_reasons = _content_score(task, result.get("content", ""))
+        graph_score, graph_reasons = _graph_score(result)
+        frontend_graph_score, frontend_graph_reasons = _frontend_graph_score(task, result)
+        final_score = base_score + source_score + path_score + (symbol_score * 0.45) + content_score + graph_score + frontend_graph_score
         reranked.append(
             {
                 **result,
                 "score": round(final_score, 4),
                 "confidence": classify_confidence(final_score),
-                "relevance": summarize_relevance(path_reasons + symbol_reasons),
+                "relevance": summarize_relevance(frontend_graph_reasons + source_reasons + path_reasons + symbol_reasons + content_reasons + graph_reasons),
             }
         )
     reranked.sort(key=lambda item: (item.get("score", 0.0), item.get("file_path", "")), reverse=True)

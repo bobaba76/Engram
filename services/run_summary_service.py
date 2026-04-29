@@ -388,6 +388,8 @@ def generate_run_summary(
     analyses: list[ReviewAgentAnalysis],
     audience: str = "technical",
 ) -> dict[str, Any]:
+    if not settings.llm_features_enabled:
+        return _fallback_summary(audience, "LLM features are disabled.")
     if not settings.openrouter_api_key:
         return _fallback_summary(audience, "OPENROUTER_API_KEY is not configured.")
     prompt_payload = build_run_summary_payload(summary, findings, analyses)

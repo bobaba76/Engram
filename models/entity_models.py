@@ -32,6 +32,11 @@ class ChunkRecord:
     symbol_name: str = ""
     qualified_name: str = ""
     content: str = ""
+    content_hash: str = ""
+    source_hash: str = ""
+    parser_name: str = ""
+    chunking_version: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

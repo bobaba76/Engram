@@ -1,6 +1,8 @@
 import hashlib
+import fnmatch
+import os
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from models.entity_models import FileRecord
 
@@ -49,6 +51,45 @@ EXCLUDED_PATH_PARTS = {
 }
 
 
+def _split_env_patterns(name: str) -> tuple[str, ...]:
+    raw_value = os.environ.get(name, "")
+    return tuple(part.strip() for part in raw_value.split(",") if part.strip())
+
+
+def _load_gitignore_patterns(repo_root: Path) -> list[str]:
+    patterns: list[str] = []
+    gitignore = repo_root / ".gitignore"
+    if not gitignore.exists():
+        return patterns
+    for line in gitignore.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("!"):
+            continue
+        patterns.append(stripped)
+    return patterns
+
+
+def _matches_pattern(path: Path, repo_root: Path, pattern: str) -> bool:
+    relative = path.relative_to(repo_root).as_posix()
+    normalized = pattern.strip().replace("\\", "/")
+    if not normalized:
+        return False
+    if normalized.endswith("/"):
+        prefix = normalized.strip("/")
+        return relative == prefix or relative.startswith(f"{prefix}/")
+    if normalized.startswith("/"):
+        return fnmatch.fnmatch(relative, normalized.lstrip("/"))
+    return (
+        fnmatch.fnmatch(relative, normalized)
+        or fnmatch.fnmatch(path.name, normalized)
+        or any(fnmatch.fnmatch(part, normalized) for part in path.parts)
+    )
+
+
+def _is_ignored(path: Path, repo_root: Path, patterns: Iterable[str]) -> bool:
+    return any(_matches_pattern(path, repo_root, pattern) for pattern in patterns)
+
+
 def _looks_minified(path: Path, payload: bytes) -> bool:
     suffix = path.suffix.lower()
     name = path.name.lower()
@@ -75,31 +116,57 @@ def _should_exclude_file(path: Path, payload: bytes) -> bool:
     return _looks_minified(path, payload)
 
 
-def scan_repo(repo_root: Path, excluded_dirs: Iterable[str] = ()) -> list[FileRecord]:
+def scan_repo(repo_root: Path, excluded_dirs: Iterable[str] = (), progress_callback: Callable[[str], None] | None = None) -> list[FileRecord]:
     excluded = {part for part in excluded_dirs if part}
+    configured_includes = _split_env_patterns("CODER_SCAN_INCLUDE_PATTERNS")
+    configured_excludes = (*_split_env_patterns("CODER_SCAN_EXCLUDE_PATTERNS"), *_load_gitignore_patterns(repo_root))
     records: list[FileRecord] = []
-    for path in repo_root.rglob("*"):
-        if not path.is_file():
+    visited_dirs = 0
+    candidate_files = 0
+    for root, dir_names, file_names in os.walk(repo_root):
+        visited_dirs += 1
+        root_path = Path(root)
+        if configured_excludes and root_path != repo_root and _is_ignored(root_path, repo_root, configured_excludes):
+            dir_names[:] = []
             continue
-        if excluded.intersection(path.parts):
-            continue
-        if ".venv" in path.parts or "__pycache__" in path.parts or path.parts[-1].startswith("."):
-            continue
-        language = SUPPORTED_FILE_NAMES.get(path.name.lower()) or SUPPORTED_EXTENSIONS.get(path.suffix.lower())
-        if language is None:
-            continue
-        payload = path.read_bytes()
-        if _should_exclude_file(path, payload):
-            continue
-        stat = path.stat()
-        records.append(
-            FileRecord(
-                path=str(path.relative_to(repo_root)).replace("\\", "/"),
-                language=language,
-                size_bytes=stat.st_size,
-                sha256=hashlib.sha256(payload).hexdigest(),
-                modified_time=stat.st_mtime,
+        dir_names[:] = [
+            dir_name
+            for dir_name in dir_names
+            if dir_name not in excluded
+            and dir_name != "__pycache__"
+            and not dir_name.startswith(".")
+            and not _is_ignored(root_path / dir_name, repo_root, configured_excludes)
+        ]
+        for file_name in file_names:
+            candidate_files += 1
+            path = root_path / file_name
+            if file_name.startswith("."):
+                continue
+            if excluded.intersection(path.parts):
+                continue
+            if configured_excludes and _is_ignored(path, repo_root, configured_excludes):
+                continue
+            language = SUPPORTED_FILE_NAMES.get(path.name.lower()) or SUPPORTED_EXTENSIONS.get(path.suffix.lower())
+            if language is None:
+                continue
+            if configured_includes and not _is_ignored(path, repo_root, configured_includes):
+                continue
+            payload = path.read_bytes()
+            if _should_exclude_file(path, payload):
+                continue
+            stat = path.stat()
+            records.append(
+                FileRecord(
+                    path=str(path.relative_to(repo_root)).replace("\\", "/"),
+                    language=language,
+                    size_bytes=stat.st_size,
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                    modified_time=stat.st_mtime,
+                )
             )
-        )
+        if progress_callback is not None and (visited_dirs == 1 or visited_dirs % 100 == 0):
+            progress_callback(f"scan progress: {visited_dirs} directories visited, {candidate_files} files checked, {len(records)} indexable")
     records.sort(key=lambda record: record.path)
+    if progress_callback is not None:
+        progress_callback(f"scan progress: {visited_dirs} directories visited, {candidate_files} files checked, {len(records)} indexable")
     return records

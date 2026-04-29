@@ -27,6 +27,16 @@ def _batched_file_path_predicates(file_paths: list[str], batch_size: int = DELET
     return predicates
 
 
+def _batched_chunk_id_predicates(chunk_ids: list[str], batch_size: int = DELETE_BATCH_SIZE) -> list[str]:
+    predicates: list[str] = []
+    for start in range(0, len(chunk_ids), batch_size):
+        batch = chunk_ids[start:start + batch_size]
+        if not batch:
+            continue
+        predicates.append(" OR ".join(f"chunk_id = {_quote_lancedb_string(chunk_id)}" for chunk_id in batch))
+    return predicates
+
+
 class VectorStore:
     def __init__(self, data_path: Path) -> None:
         self.data_path = data_path
@@ -87,6 +97,17 @@ class VectorStore:
         if self.table is None:
             return
         for predicate in _batched_file_path_predicates(sorted(file_path_set)):
+            self.table.delete(predicate)
+
+    def delete_items_for_chunk_ids(self, chunk_ids: list[str]) -> None:
+        if not chunk_ids:
+            return
+        chunk_id_set = set(chunk_ids)
+        if self.items is not None:
+            self.items = [item for item in self.items if item.get("chunk_id") not in chunk_id_set]
+        if self.table is None:
+            return
+        for predicate in _batched_chunk_id_predicates(sorted(chunk_id_set)):
             self.table.delete(predicate)
 
     def add_item(self, item: dict[str, Any]) -> None:

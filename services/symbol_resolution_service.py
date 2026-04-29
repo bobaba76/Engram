@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from storage.duckdb_store import DuckDBStore
+from typing import TYPE_CHECKING
+
 from services.search_ranking import classify_confidence, score_symbol_relevance, summarize_relevance
+
+if TYPE_CHECKING:
+    from storage.duckdb_store import DuckDBStore
 
 
 def symbol_uid(file_path: str, qualified_name: str, kind: str) -> str:

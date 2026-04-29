@@ -1,0 +1,129 @@
+from pathlib import Path
+
+from indexing.symbol_extractor import extract_symbols_with_status
+
+
+def test_python_parser_module_is_registered(tmp_path: Path) -> None:
+    source = tmp_path / "sample.py"
+    source.write_text(
+        "class CustomerService:\n"
+        "    def assign(self):\n"
+        "        return helper()\n"
+        "\n"
+        "def helper():\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+
+    symbols, status = extract_symbols_with_status(source)
+
+    assert status["parser"] == "ast"
+    assert status["language"] == "python"
+    assert {symbol.qualified_name for symbol in symbols} >= {"CustomerService", "CustomerService.assign", "helper"}
+
+
+def test_typescript_parser_module_falls_back_to_regex(tmp_path: Path) -> None:
+    source = tmp_path / "sample.ts"
+    source.write_text(
+        "export interface Customer { id: string }\n"
+        "export function normalizeCustomer(customer: Customer) {\n"
+        "  return customer.id\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    symbols, status = extract_symbols_with_status(source)
+
+    assert status["language"] == "typescript"
+    assert {symbol.name for symbol in symbols} >= {"Customer", "normalizeCustomer"}
+
+
+def test_typescript_parser_records_module_qualified_names(tmp_path: Path) -> None:
+    source = tmp_path / "ui" / "CustomerView.tsx"
+    source.parent.mkdir()
+    source.write_text(
+        "import CustomerPanel, { useCustomer as useBoundCustomer } from '../hooks/useCustomer'\n"
+        "export class CustomerView {\n"
+        "  renderCard() {\n"
+        "    return useBoundCustomer() + CustomerPanel();\n"
+        "  }\n"
+        "}\n"
+        "export default function useCustomer() {\n"
+        "  return 1;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    symbols, status = extract_symbols_with_status(source)
+    qualified_names = {symbol.qualified_name for symbol in symbols}
+    customer_view = next(symbol for symbol in symbols if symbol.name == "CustomerView")
+
+    assert status["language"] == "typescript"
+    assert "ui.CustomerView.CustomerView" in qualified_names or "ui.CustomerView" in qualified_names
+    assert "ui.CustomerView.renderCard" in qualified_names
+    assert any(symbol.name == "useCustomer" and symbol.metadata.get("module") == "ui.CustomerView" for symbol in symbols)
+    assert "../hooks/useCustomer" in customer_view.metadata.get("imports", [])
+    assert "useCustomer" in customer_view.metadata.get("imports", [])
+    assert "useBoundCustomer" in customer_view.metadata.get("imports", [])
+    assert "CustomerPanel" in customer_view.metadata.get("imports", [])
+    assert customer_view.metadata.get("import_aliases", {}).get("useBoundCustomer") == "useCustomer"
+
+
+def test_typescript_parser_tracks_reexport_paths_and_barrel_metadata(tmp_path: Path) -> None:
+    source = tmp_path / "ui" / "index.ts"
+    source.parent.mkdir()
+    source.write_text(
+        "export { useCustomer as useCustomerHook } from '../hooks/useCustomer'\n"
+        "export * from '../components/CustomerPanel'\n",
+        encoding="utf-8",
+    )
+
+    symbols, status = extract_symbols_with_status(source)
+    export_symbol = next(symbol for symbol in symbols if symbol.name == "exports")
+
+    assert status["language"] == "typescript"
+    assert export_symbol.kind == "module"
+    assert "ui/index.ts" not in export_symbol.metadata.get("source_associations", [])
+    assert any(path.endswith("hooks/useCustomer.ts") for path in export_symbol.metadata.get("source_associations", []))
+    assert any(path.endswith("components/CustomerPanel.ts") for path in export_symbol.metadata.get("source_associations", []))
+    re_exports = export_symbol.metadata.get("re_exports", [])
+    assert len(re_exports) == 2
+    assert re_exports[0]["aliases"]["useCustomerHook"] == "useCustomer"
+    assert re_exports[1]["export_all"] is True
+
+
+def test_typescript_parser_tracks_default_and_namespace_bindings(tmp_path: Path) -> None:
+    source = tmp_path / "ui" / "CustomerView.tsx"
+    source.parent.mkdir()
+    source.write_text(
+        "import CustomerPanel, * as CustomerHooks from '../hooks/useCustomer'\n"
+        "export function CustomerView() {\n"
+        "  return CustomerPanel() + CustomerHooks.useCustomer()\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    symbols, _ = extract_symbols_with_status(source)
+    customer_view = next(symbol for symbol in symbols if symbol.name == "CustomerView")
+
+    assert customer_view.metadata.get("import_aliases", {}).get("CustomerPanel") == "default"
+    assert customer_view.metadata.get("import_aliases", {}).get("CustomerHooks") == "__namespace__"
+    assert "CustomerHooks.useCustomer" in customer_view.metadata.get("calls", [])
+    assert "CustomerHooks.useCustomer" in customer_view.metadata.get("references", [])
+
+
+def test_typescript_parser_tracks_namespace_reexport_alias(tmp_path: Path) -> None:
+    source = tmp_path / "ui" / "index.ts"
+    source.parent.mkdir()
+    source.write_text(
+        "export * as CustomerHooks from '../hooks/useCustomer'\n",
+        encoding="utf-8",
+    )
+
+    symbols, _ = extract_symbols_with_status(source)
+    export_symbol = next(symbol for symbol in symbols if symbol.name == "exports")
+    re_exports = export_symbol.metadata.get("re_exports", [])
+
+    assert re_exports[0]["namespace_export"] is True
+    assert re_exports[0]["aliases"]["CustomerHooks"] == "__namespace__"
+    assert "CustomerHooks" in export_symbol.metadata.get("export_names", [])

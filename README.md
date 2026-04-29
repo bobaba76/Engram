@@ -309,6 +309,14 @@ python scripts/run_index.py C:\path\to\repo
 python scripts/run_mcp.py C:\path\to\repo
 ```
 
+### Run realtime indexing
+
+```powershell
+python scripts/run_realtime_index.py C:\path\to\repo --debounce 2 --poll-interval 2
+```
+
+Realtime indexing watches indexable source files, applies the same scanner-style ignore rules, debounces noisy save events, and runs the normal incremental indexer after changes settle. If the `watchdog` package is unavailable, it falls back to polling.
+
 ### Run indexing and then serve MCP
 
 ```powershell

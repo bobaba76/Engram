@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from storage.duckdb_store import DuckDBStore
+if TYPE_CHECKING:
+    from storage.duckdb_store import DuckDBStore
 
 
 BACKEND_ROUTE_DECORATOR_PATTERN = re.compile(

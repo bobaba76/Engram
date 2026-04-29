@@ -12,8 +12,11 @@ DEFAULT_SCAN_EXCLUDED_DIRS = (
     ".idea",
     ".vscode",
     ".venv",
+    ".uv-cache",
+    ".uv-python",
     "venv",
     "env",
+    "__pycache__",
     "node_modules",
     "vendor",
     "dist",
@@ -23,6 +26,9 @@ DEFAULT_SCAN_EXCLUDED_DIRS = (
     ".svelte-kit",
     ".turbo",
     ".cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
     "coverage",
     "tmp",
     "temp",
@@ -49,6 +55,16 @@ def _get_bool_env(name: str, default: bool) -> bool:
     if raw_value in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _get_float_env(name: str, default: float) -> float:
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        return max(float(raw_value), 0.0)
+    except ValueError:
+        return default
 
 
 def _load_scan_excluded_dirs() -> tuple[str, ...]:
@@ -78,9 +94,25 @@ def load_settings(project_root: Path | None = None) -> RuntimeConfig:
         scan_excluded_dirs=_load_scan_excluded_dirs(),
         review_analysis_provider=review_analysis_provider,
         review_analysis_model=os.environ.get("CODER_REVIEW_ANALYSIS_MODEL", "mistralai/devstral-small"),
+        embedding_provider=os.environ.get("CODER_EMBED_PROVIDER", "local").strip().lower() or "local",
+        embedding_model=os.environ.get("CODER_EMBED_MODEL", "jinaai/jina-embeddings-v2-base-code").strip() or "jinaai/jina-embeddings-v2-base-code",
         embedding_batch_size=_get_int_env("CODER_EMBED_BATCH_SIZE", 24),
         embedding_max_length=_get_int_env("CODER_EMBED_MAX_LENGTH", 512),
+        embedding_max_batch_tokens=_get_int_env("CODER_EMBED_MAX_BATCH_TOKENS", 12000),
         embedding_device=os.environ.get("CODER_EMBED_DEVICE", "cuda").strip().lower() or "cuda",
+        embedding_api_key=os.environ.get("CODER_EMBED_API_KEY", os.environ.get("OPENAI_API_KEY", "")),
+        embedding_base_url=os.environ.get("CODER_EMBED_BASE_URL", ""),
+        embedding_retry_attempts=_get_int_env("CODER_EMBED_RETRY_ATTEMPTS", 3),
+        embedding_retry_backoff_seconds=_get_float_env("CODER_EMBED_RETRY_BACKOFF_SECONDS", 1.0),
+        embedding_max_concurrent_batches=_get_int_env("CODER_EMBED_MAX_CONCURRENT_BATCHES", 4),
+        process_extraction_enabled=_get_bool_env("CODER_PROCESS_EXTRACTION_ENABLED", True),
+        process_max_depth=_get_int_env("CODER_PROCESS_MAX_DEPTH", 3),
+        process_max_entrypoints=_get_int_env("CODER_PROCESS_MAX_ENTRYPOINTS", 600),
+        process_max_flows_per_entrypoint=_get_int_env("CODER_PROCESS_MAX_FLOWS_PER_ENTRYPOINT", 6),
+        process_max_records=_get_int_env("CODER_PROCESS_MAX_RECORDS", 2500),
+        process_max_relationships=_get_int_env("CODER_PROCESS_MAX_RELATIONSHIPS", 5000),
+        llm_features_enabled=_get_bool_env("CODER_LLM_FEATURES_ENABLED", False),
+        review_enabled=_get_bool_env("CODER_REVIEW_ENABLED", True),
         max_review_workers=_get_int_env("CODER_MAX_REVIEW_WORKERS", 3),
         max_concurrent_llm_reviews=_get_int_env("CODER_MAX_CONCURRENT_LLM_REVIEWS", 10),
         review_max_source_chars=_get_int_env("CODER_REVIEW_MAX_SOURCE_CHARS", 12000),

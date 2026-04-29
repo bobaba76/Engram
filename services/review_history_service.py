@@ -1,9 +1,14 @@
-from storage.duckdb_store import DuckDBStore
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from storage.duckdb_store import DuckDBStore
  
  
 def get_review_history(duckdb_store: DuckDBStore, target: str) -> dict[str, object]:
-    matched = duckdb_store.fetch_findings_for_target(target)
-    analyses = duckdb_store.fetch_agent_analyses_for_target(target)
+    matched = duckdb_store.reviews.fetch_findings_for_target(target)
+    analyses = duckdb_store.reviews.fetch_agent_analyses_for_target(target)
     history = {
         "target": target,
         "findings": matched,
