@@ -1,104 +1,192 @@
-# Coder
+# Engram
 
-Local-first code intelligence and review engine for Python and TypeScript repositories.
+Engram is a local-first code intelligence engine for IDE agents.
 
-Coder indexes a repo into a hybrid retrieval stack, builds a structural graph, runs grouped code review, and exposes the result through MCP so IDE agents can query your local codebase with semantic, graph, and review-aware context.
+Its job is simple: give tools like Windsurf Cascade or other MCP-capable assistants deep, durable access to a real codebase instead of forcing them to rely on shallow file search and short chat memory.
 
-## Why this exists
+Engram indexes a repository into local stores, builds structural and process context, and exposes that through MCP so an assistant can answer questions like:
 
-Most editor assistants are good at chatting about code and bad at maintaining durable context across a real repository.
+- where is this handled?
+- what will this affect?
+- what tests should I run?
+- what files are most related to this target?
 
-Coder is designed to close that gap.
+## What Engram is for
 
-It gives an LLM a local context engine with:
+Engram is aimed at day-to-day coding help, especially for someone working inside an IDE with an agent doing the querying.
 
-- **Incremental indexing**
-- **Semantic retrieval**
-- **Dependency and call graph traversal**
-- **Persisted review history**
-- **MCP-native IDE integration**
-- **Grouped LLM review with structured findings**
+That means the most important qualities are:
 
-## What it does
+- local context
+- durable indexing
+- predictable tool outputs
+- safe handling of broad questions
+- useful next-step guidance for coding tasks
 
-- **Indexes** Python and TypeScript/TSX/JS/JSX repositories into durable local stores
-- **Extracts symbols** and builds code chunks for retrieval
-- **Builds a graph** of files, symbols, imports, calls, references, and dependencies
-- **Embeds chunks** with Jina embeddings when available, with graceful fallback behavior
-- **Runs grouped review** over related files before extracting structured findings
-- **Persists findings and agent analyses** so review history can be queried later
-- **Generates technical and layperson summaries** for each run
-- **Serves the indexed repo over MCP** for tools such as Cursor and Windsurf
+The goal is not to be a chat bot with a few search tricks. The goal is to be a reliable context backend for real software work.
 
-## Architecture
+## What it does today
 
-Coder uses a hybrid local-first storage model.
+- indexes Python and TypeScript/JavaScript repositories into local stores
+- extracts files, symbols, chunks, and graph relationships
+- stores semantic vectors for chunk retrieval when enabled
+- builds dependency and call-style graph context
+- builds inferred process and execution-flow records
+- runs grouped review and persists findings
+- exposes repo intelligence through an MCP server
+- supports investigation-style queries that combine:
+  - search
+  - symbol resolution
+  - source snippets
+  - graph context
+  - app context
+  - change/test guidance
 
-### Storage layer
+## Core capabilities
 
-- **DuckDB**
-  - files
-  - symbols
-  - chunks
-  - review jobs
-  - review agent analyses
-  - review observations
-  - review findings
-  - run metadata
+### Indexing
 
-- **KuzuDB**
-  - file nodes
-  - symbol nodes
-  - `DEFINES`, `IMPORTS`, `CALLS`, and `REFERENCES` edges
+Engram supports incremental indexing by default.
 
-- **LanceDB**
-  - semantic vectors for code chunks
+An index run can:
 
-### Review layer
+- scan the repo
+- detect changed vs unchanged files
+- parse changed files
+- rebuild graph state where needed
+- rebuild process records
+- chunk code for retrieval
+- embed chunks
+- run review workflows
+- persist reports and run metadata
 
-The review pipeline is now centered on grouped LLM review.
+### MCP tools
 
-- **Related files are grouped together**
-- **Pass 1** produces a conversational synthesis of what those files are doing together
-- **Pass 2** extracts concrete, structured findings from that synthesis
-- Findings are merged and deduplicated before being summarized into final reports
+Engram exposes a fairly broad MCP surface for IDE agents. The most important tools include:
 
-This produces more useful output than a strict one-file-at-a-time audit pass.
-
-### MCP layer
-
-Coder exposes the indexed repo through an MCP server with tools including:
-
-- `index_status`
+- `resolve_target`
 - `semantic_code_search`
+- `investigate_codebase`
+- `get_source_context`
+- `unified_context`
+- `impact_analysis`
+- `app_context`
+- `change_impact_report`
+- `find_tests_for_target`
+- `suggest_tests_for_change`
+- `test_impact`
+- `feature_context`
+- `index_status`
+- `index_health`
+- `detect_changes`
 - `get_dependencies`
-- `get_review_history`
-- `get_symbol_context`
 - `find_symbols`
 - `get_callers_and_callees`
 - `get_graph_neighborhood`
 - `get_file_summary`
-- `get_source_context`
+- `get_review_history`
+- `get_symbol_context`
 
-## How indexing works
+### Investigation workflow
 
-Incremental runs:
+`investigate_codebase` is the main orchestration-style tool.
 
-- compare discovered files against the persisted file index
-- parse only changed files
-- rebuild graph state only where needed
-- re-embed changed chunks
-- review changed files
-- preserve state for unchanged files
+It is designed to answer natural questions safely and predictably, especially when an IDE agent is the caller.
 
-The CLI prints stage timings and compact run summaries so you can see what changed in each run.
+Recent work in this area has focused on:
+
+- broad-query safety
+- target resolution quality
+- consistent MCP response shape
+- change-help style answers
+- lightweight ambiguity handling for weak UI-ish terms
+
+It now returns structured agent-friendly fields such as:
+
+- `status`
+- `warnings`
+- `confidence`
+- `next_tools`
+- `top_files`
+- `top_symbols`
+- `partial`
+
+and investigation payloads also include useful extras like:
+
+- `change_guidance.related_files`
+- `change_guidance.recommended_tests`
+- `change_guidance.likely_impact_targets`
+
+## Architecture
+
+Engram uses a hybrid local storage model.
+
+### DuckDB
+
+DuckDB stores durable structured index data such as:
+
+- files
+- symbols
+- chunks
+- review data
+- run metadata
+- process metadata
+
+### Kuzu
+
+Kuzu stores graph relationships, including things like:
+
+- file and symbol nodes
+- `DEFINES`
+- `IMPORTS`
+- `CALLS`
+- `REFERENCES`
+
+### LanceDB
+
+LanceDB stores vector embeddings for chunk retrieval.
+
+### Review and summary layer
+
+Engram can run grouped review, persist findings, and generate technical / layperson summaries for index runs.
+
+### MCP server
+
+The MCP server is the interface an IDE agent actually talks to.
+
+## Repository structure
+
+- `app/`
+  - orchestration, coordinator, run modes
+- `config/`
+  - runtime settings
+- `indexing/`
+  - scanner, parser, chunker, embeddings, graph and process builders
+- `mcp_server/`
+  - MCP server wiring, formatters, resolvers
+- `models/`
+  - config, entity, run, review, stage models
+- `reviewers/`
+  - review pipeline and aggregation logic
+- `scripts/`
+  - CLI and MCP entry points
+- `services/`
+  - search, investigation, graph, app context, change/test intelligence, summaries
+- `storage/`
+  - DuckDB, Kuzu, LanceDB, manifests
+- `tests/`
+  - focused unit and behavior tests
 
 ## Requirements
 
 - Python 3.11+
-- Windows is the primary tested environment right now
-- Optional OpenRouter API key for LLM-backed review and run summaries
-- Optional CUDA-enabled PyTorch install if you want GPU embeddings
+- Windows is the main tested environment right now
+- local filesystem access to the repo you want to index
+
+Optional:
+
+- OpenRouter API key for LLM-backed review/summaries
+- CUDA-enabled PyTorch environment if you want GPU embeddings
 
 ## Installation
 
@@ -110,197 +198,116 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-If you want GPU embeddings, install a CUDA-enabled PyTorch build separately.
-
-Then copy the environment template and fill in any values you need:
+Copy the environment template:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-## Configuration
+Then fill in any values you care about.
 
-Coder is mostly driven by environment variables.
+## Important configuration
 
-For a minimal LLM-backed setup, the main thing you need is:
+Engram is mostly configured through environment variables.
 
-- `OPENROUTER_API_KEY`
-
-Everything else can usually stay at the defaults in `.env.example` to get started.
-
-### Common environment variables
+Some important ones from `.env.example`:
 
 - `OPENROUTER_API_KEY`
-  - Enables OpenRouter-backed grouped review and run summaries
-
-- `CODER_PROJECT_ROOT`
-  - Optional project root override for MCP startup
-
-- `CODER_REVIEW_ANALYSIS_PROVIDER`
-  - Override the review provider
-
-- `CODER_REVIEW_ANALYSIS_MODEL`
-  - Override the OpenRouter model used for review/summaries
-
-- `CODER_EMBED_DEVICE`
-  - Requested embedding device, for example `cuda` or `cpu`
-
-- `CODER_REVIEW_RUN_LEGACY_HEURISTICS_WITH_LLM`
-  - Set to `true` only if you explicitly want the old heuristic review pass to run alongside grouped LLM review
+- `OPENROUTER_BASE_URL`
+- `Engram_PROJECT_ROOT`
+- `Engram_SCAN_EXCLUDED_DIRS`
+- `Engram_SCAN_INCLUDE_PATTERNS`
+- `Engram_SCAN_EXCLUDE_PATTERNS`
+- `Engram_REVIEW_ENABLED`
+- `Engram_REVIEW_ANALYSIS_MODEL`
+- `Engram_REVIEW_GROUP_SIZE`
+- `Engram_MAX_CONCURRENT_LLM_REVIEWS`
+- `Engram_EMBED_PROVIDER`
+- `Engram_EMBED_MODEL`
+- `Engram_EMBED_DEVICE`
+- `Engram_EMBED_BATCH_SIZE`
+- `Engram_PROCESS_EXTRACTION_ENABLED`
+- `Engram_PROCESS_MAX_DEPTH`
+- `Engram_PROCESS_MAX_ENTRYPOINTS`
+- `Engram_PROCESS_MAX_RECORDS`
 
 ## Quick start
 
-### 1. Index a repository
+### 1. Index a repo
+
+Incremental index:
 
 ```powershell
-python scripts/run_index.py C:\path\to\your\repo
+python scripts/run_index.py C:\path\to\repo incremental
 ```
 
-This writes local index state under that repo’s `data/` directory and produces:
-
-- structured index data
-- persisted findings
-- technical and layperson markdown reports
-
-If you want to test Coder against itself, a good first run is:
+Default index run:
 
 ```powershell
-python scripts/run_index.py .
+python scripts/run_index.py C:\path\to\repo
+```
+
+Optional full rebuild:
+
+```powershell
+python scripts/run_index.py C:\path\to\repo full
 ```
 
 ### 2. Start the MCP server
 
 ```powershell
-python scripts/run_mcp.py C:\path\to\your\repo
+python scripts/run_mcp.py C:\path\to\repo
 ```
 
-If you do not pass a project root, Coder will try to resolve one from:
+If no repo is passed, Engram can fall back to:
 
 - command-line args
-- `CODER_PROJECT_ROOT`
+- `Engram_PROJECT_ROOT`
 - current working directory
 - the most recently indexed sibling repo
 
-### 3. Ask an MCP-capable IDE questions
+### 3. Point your IDE agent at Engram
+
+The main workflow is:
+
+1. index the repo
+2. run the MCP server
+3. let your IDE assistant query Engram instead of relying only on native search
+
+## Typical Windsurf / Cascade usage
+
+This is the intended shape of use:
+
+- your dad is coding in the IDE
+- Cascade calls Engram tools when it needs deeper repo context
+- Engram resolves symbols, retrieves snippets, maps related files, and suggests tests or impact follow-ups
+
+The strongest question styles right now are:
+
+- exact symbol or method lookups
+- implementation-location questions
+- impact-style questions
+- test-guidance questions
 
 Examples:
 
-- **Semantic search**
-  - “Use `semantic_code_search` to find where we handle LLM rate limiting.”
+- `where is Coordinator.run handled`
+- `what will Coordinator.run affect`
+- `what tests should I run for Coordinator.run`
+- `where is ProcessRepository.insert_relationships handled`
 
-- **Graph impact analysis**
-  - “Use the graph to show what might break if I change this function.”
-
-- **Review history**
-  - “Show me prior findings for `backend/config.py`.”
-
-## Typical workflow with Cursor or Windsurf
-
-- **Step 1**
-  - Run `python scripts/run_index.py C:\path\to\repo`
-
-- **Step 2**
-  - Configure the IDE to launch `python scripts/run_mcp.py C:\path\to\repo`
-
-- **Step 3**
-  - Ask the assistant to use MCP tools instead of relying on shallow file search alone
-
-## MCP setup example
-
-Your editor-specific config will vary, but the core command should point at:
-
-```powershell
-python scripts/run_mcp.py C:\path\to\your\repo
-```
-
-Run it from the `Coder` repo root so imports resolve correctly.
-
-## Output
-
-Each run produces:
- 
- - a run id
- - stage timings
- - a persisted manifest
- - merged findings
- - report files:
-  - `data/reports/<run_id>/technical_summary.md`
-  - `data/reports/<run_id>/layperson_summary.md`
-
-The `data/` directory is intentionally gitignored because it contains local indexes, manifests, vector data, and generated reports.
-
-## Example output
-
-After a run, you should expect artifacts like:
-
-```text
-data/
-  manifests/current_manifest.json
-  reports/<run_id>/technical_summary.md
-  reports/<run_id>/layperson_summary.md
-```
-
-And a CLI summary shaped roughly like:
-
-```text
-Index run completed: <run_id>
-- scan: 28.73s | ...
-- parse: 10.00s | ...
-- graph: 23.99s | ...
-- embed: 165.64s | ...
-- review: 108.88s | ...
-Report files:
-- technical: .../technical_summary.md
-- layperson: .../layperson_summary.md
-```
-
-## Current strengths
-
-- **Local-first**
-  - Your code intelligence stays on your machine
-
-- **Hybrid retrieval**
-  - Semantic, relational, and graph context all work together
-
-- **Grouped review flow**
-  - Related files are reviewed together before findings are extracted
-
-- **Durable review history**
-  - Findings and analyses are persisted across runs
-
-- **MCP-native integration**
-  - Works well as a local context backend for IDE agents
-
-## Current limitations
-
-- **Python parsing** currently relies on built-in `ast`
-- **TypeScript extraction** still needs deeper structural improvements
-- **Frontend and Electron review quality** can lag behind backend-heavy repos
-- **Markdown files are not indexed**
-  - changing `README.md` will not affect `run_index.py`
-- **GPU embeddings** depend on a valid CUDA-enabled PyTorch install
-
-## Repository structure
-
-- `app/`
-  - indexing/review orchestration
-- `indexing/`
-  - scanner, chunker, embeddings, graph building, planning
-- `reviewers/`
-  - providers, context assembly, aggregation, legacy reviewer implementations
-- `services/`
-  - semantic search, graph queries, summaries, source retrieval, symbol lookup
-- `storage/`
-  - DuckDB, Kuzu, LanceDB, manifest persistence
-- `scripts/`
-  - CLI entry points
-
-## Useful commands
+## Useful scripts
 
 ### Run indexing
 
 ```powershell
 python scripts/run_index.py C:\path\to\repo
+```
+
+### Run incremental indexing explicitly
+
+```powershell
+python scripts/run_index.py C:\path\to\repo incremental
 ```
 
 ### Run MCP only
@@ -315,29 +322,97 @@ python scripts/run_mcp.py C:\path\to\repo
 python scripts/run_realtime_index.py C:\path\to\repo --debounce 2 --poll-interval 2
 ```
 
-Realtime indexing watches indexable source files, applies the same scanner-style ignore rules, debounces noisy save events, and runs the normal incremental indexer after changes settle. If the `watchdog` package is unavailable, it falls back to polling.
-
 ### Run indexing and then serve MCP
 
 ```powershell
 python scripts/run_all.py
 ```
 
-### Windows shortcut
+### Run smoke checks
 
-```bat
-start.bat
+```powershell
+python scripts/smoke_mcp.py
 ```
 
-## Open source readiness notes
+### Run the investigation evaluation set
 
-If you plan to publish this repo, the next cleanup passes are probably:
+```powershell
+python scripts/evaluate_investigate.py
+```
 
-- **Pin and document PyTorch install paths** for CPU vs CUDA users
-- **Add screenshots or GIFs** of MCP usage in Cursor/Windsurf
-- **Add sample reports** to show technical vs layperson output
-- **Document data directory behavior** more explicitly
-- **Add tests around ranking and grouped review selection**
+This evaluates a small set of realistic investigation questions and scores them for:
+
+- latency
+- target correctness
+- top-file quality
+- next-tool quality
+- expected partial behavior
+
+## Output and local data
+
+Engram writes local index state under the repo's `data/` directory.
+
+That local data can include:
+
+- manifests
+- reports
+- DuckDB data
+- Kuzu graph data
+- LanceDB vector data
+
+Example artifacts:
+
+```text
+data/
+  manifests/current_manifest.json
+  reports/<run_id>/technical_summary.md
+  reports/<run_id>/layperson_summary.md
+```
+
+`data/` is intentionally gitignored.
+
+## Current strengths
+
+- local-first indexing and retrieval
+- good symbol resolution for grounded code questions
+- safe handling of broad investigation prompts
+- useful MCP surface for IDE agents
+- change/test guidance built into investigation results
+- repeatable evaluation harness for investigation quality
+
+## Current limitations
+
+- weak UI-ish concepts can still be harder than grounded symbols
+- test recommendation quality is useful but still somewhat lexical
+- frontend concept mapping is improving but not perfect
+- retrieval quality still depends heavily on the indexed code and symbol structure
+- live MCP behavior can briefly lag behind repo changes until the server reloads
+
+## Good prompts to try
+
+If you want to sanity-check Engram in an IDE, these are good prompts:
+
+- `Use investigate_codebase for: where is Coordinator.run handled`
+- `Use investigate_codebase for: what will Coordinator.run affect`
+- `Use investigate_codebase for: what tests should I run for Coordinator.run`
+- `Use resolve_target for Coordinator.run`
+- `Use app_context for Coordinator.run`
+- `Use impact_analysis for ProcessRepository.insert_relationships`
+
+## Notes for contributors
+
+If you are improving Engram, prioritize:
+
+- agent reliability over cleverness
+- predictable output shape
+- safe broad-query behavior
+- better ranking and ambiguity handling
+- improvements proven by real eval cases
+
+The best place to extend quality checks right now is the investigation evaluation set in:
+
+- `scripts/investigate_eval_cases.json`
+- `scripts/evaluate_investigate.py`
 
 ## License
 
