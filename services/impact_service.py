@@ -10,10 +10,29 @@ from services.symbol_resolution_service import ambiguity_status, resolve_candida
 
 DEFAULT_RELATIONS = ("CALLS", "IMPORTS", "REFERENCES")
 RELATION_WEIGHTS = {"CALLS": 1.0, "IMPORTS": 0.85, "REFERENCES": 0.45}
+DEFAULT_EDGE_LIMIT_PER_RELATION = 80
+BROAD_EDGE_LIMIT_PER_RELATION = 18
+DEFAULT_NODE_BUDGET = 240
+BROAD_NODE_BUDGET = 80
 
 
 def _normalize_symbol_uid(target: str, symbol_uid: str | None) -> str | None:
     return symbol_uid_from_target(target, symbol_uid)
+
+
+def _target_shape(target: str, file_path: str | None = None, kind: str | None = None) -> dict[str, object]:
+    normalized = str(target or "").strip()
+    tokens = [token for token in normalized.replace("::", ".").replace("/", " ").replace("_", " ").split() if token]
+    is_file_like = bool(file_path) or "/" in normalized or normalized.lower().endswith((".py", ".ts", ".tsx", ".js", ".jsx"))
+    is_symbol_like = bool(kind) or "." in normalized or "::" in normalized or ":" in normalized
+    is_broad = bool(normalized) and not is_file_like and not is_symbol_like and len(tokens) <= 2
+    return {
+        "normalized": normalized,
+        "is_file_like": is_file_like,
+        "is_symbol_like": is_symbol_like,
+        "is_broad": is_broad,
+        "tokens": tokens,
+    }
 
 
 def _graph_target_for_symbol(symbol: dict[str, object], fallback: str) -> str:
@@ -22,13 +41,13 @@ def _graph_target_for_symbol(symbol: dict[str, object], fallback: str) -> str:
     return qualified_name or name or fallback
 
 
-def _relation_edges(kuzu_store: KuzuStore, node: str, direction: str, relation_types: tuple[str, ...]) -> list[dict[str, object]]:
+def _relation_edges(kuzu_store: KuzuStore, node: str, direction: str, relation_types: tuple[str, ...], per_relation_limit: int = DEFAULT_EDGE_LIMIT_PER_RELATION) -> list[dict[str, object]]:
     edges = []
     for relation in relation_types:
         if direction == "upstream":
-            edges.extend(kuzu_store.edges_for_target(node, relation=relation))
+            edges.extend(kuzu_store.edges_for_target(node, relation=relation)[:per_relation_limit])
         else:
-            edges.extend(kuzu_store.edges_for_source(node, relation=relation))
+            edges.extend(kuzu_store.edges_for_source(node, relation=relation)[:per_relation_limit])
     unique: dict[tuple[str, str, str], dict[str, object]] = {}
     for edge in edges:
         unique[(str(edge.get("source")), str(edge.get("relation")), str(edge.get("target")))] = edge
@@ -89,6 +108,42 @@ def _affected_flows(items: list[dict[str, object]]) -> list[dict[str, object]]:
     return flows
 
 
+def _is_frontend_path(file_path: str) -> bool:
+    normalized = str(file_path or "").replace("\\", "/").lower()
+    return normalized.endswith((".ts", ".tsx", ".js", ".jsx")) and any(
+        hint in normalized for hint in ("/frontend", "/components", "/pages", "/views", "/screens", "/hooks", "/ui")
+    )
+
+
+def _frontend_graph_summary(target_file_path: str, items: list[dict[str, object]]) -> dict[str, object]:
+    frontend_files: list[str] = []
+    relation_counts: dict[str, int] = {}
+    if _is_frontend_path(target_file_path):
+        frontend_files.append(str(target_file_path).replace("\\", "/"))
+    for item in items:
+        file_path = str(item.get("file_path", "") or "").replace("\\", "/")
+        if not _is_frontend_path(file_path):
+            continue
+        if file_path not in frontend_files:
+            frontend_files.append(file_path)
+        relation = str(item.get("relation", "") or "").strip().upper()
+        if relation:
+            relation_counts[relation] = relation_counts.get(relation, 0) + 1
+    summary = ""
+    if frontend_files and relation_counts:
+        summary = "Impact includes graph-linked frontend TS/TSX paths, so implementation fallout may be indirect rather than lexical."
+    elif frontend_files:
+        summary = "Impact touches frontend TS/TSX files, but the graph path is weak or shallow."
+    return {
+        "frontend_file_count": len(frontend_files),
+        "top_frontend_files": frontend_files[:6],
+        "frontend_graph_edge_count": sum(relation_counts.values()),
+        "top_relations": relation_counts,
+        "has_indirect_frontend_path": bool(frontend_files and relation_counts),
+        "summary": summary,
+    }
+
+
 def analyze_impact(
     duckdb_store: DuckDBStore,
     kuzu_store: KuzuStore,
@@ -101,6 +156,7 @@ def analyze_impact(
     symbol_uid: str | None = None,
 ) -> dict[str, object]:
     normalized_direction = direction if direction in {"upstream", "downstream"} else "upstream"
+    target_shape = _target_shape(target, file_path=file_path, kind=kind)
     resolved_symbol_uid = _normalize_symbol_uid(target, symbol_uid)
     lookup_target = str(target or "").strip()
     if resolved_symbol_uid and resolved_symbol_uid == lookup_target:
@@ -129,15 +185,22 @@ def analyze_impact(
     resolved_target = target_symbol.get("qualified_name") or target_symbol.get("name") or target
     graph_target = _graph_target_for_symbol(target_symbol, resolved_target)
     ambiguous = ambiguity_status(candidate_rows)
+    broad_query = bool(target_shape["is_broad"]) or ambiguous
+    per_relation_limit = BROAD_EDGE_LIMIT_PER_RELATION if broad_query else DEFAULT_EDGE_LIMIT_PER_RELATION
+    node_budget = BROAD_NODE_BUDGET if broad_query else DEFAULT_NODE_BUDGET
     queue = deque([(graph_target, 0)])
     seen = {graph_target}
     by_depth: dict[str, list[dict[str, object]]] = {}
     all_impacted: list[dict[str, object]] = []
+    traversal_truncated = False
     while queue:
+        if len(all_impacted) >= node_budget:
+            traversal_truncated = True
+            break
         current, depth = queue.popleft()
         if depth >= max_depth:
             continue
-        for edge in _relation_edges(kuzu_store, current, direction=normalized_direction, relation_types=relation_types):
+        for edge in _relation_edges(kuzu_store, current, direction=normalized_direction, relation_types=relation_types, per_relation_limit=per_relation_limit):
             neighbor = str(edge.get("source")) if normalized_direction == "upstream" else str(edge.get("target"))
             if not neighbor or neighbor in seen:
                 continue
@@ -153,6 +216,9 @@ def analyze_impact(
             }
             by_depth.setdefault(f"d={depth + 1}", []).append(item)
             all_impacted.append(item)
+            if len(all_impacted) >= node_budget:
+                traversal_truncated = True
+                break
             queue.append((neighbor, depth + 1))
     impacted_count = len(all_impacted)
     direct_count = len(by_depth.get("d=1", []))
@@ -160,6 +226,12 @@ def analyze_impact(
     semantic_weight = _semantic_weight(all_impacted)
     risk = _risk_level(direct_count, impacted_count, files_affected, ambiguous)
     process_participation = _process_participation(duckdb_store, graph_target)
+    frontend_graph = _frontend_graph_summary(str(target_symbol.get("file_path", "") or ""), all_impacted)
+    warnings = ["Target resolution is ambiguous; pass file_path or kind to narrow it."] if ambiguous else []
+    if broad_query:
+        warnings.append("Target is broad; impact traversal was capped to avoid an expensive fan-out.")
+    if traversal_truncated:
+        warnings.append("Impact traversal hit a safety cap; results are partial but still useful for narrowing.")
     return {
         "target": {
             "name": target_symbol.get("name", target),
@@ -174,11 +246,18 @@ def analyze_impact(
         "relation_types": list(relation_types),
         "impacted_count": impacted_count,
         "risk": risk,
-        "status": "ambiguous" if ambiguous else "found",
-        "warnings": ["Target resolution is ambiguous; pass file_path or kind to narrow it."] if ambiguous else [],
+        "status": "partial" if traversal_truncated else "ambiguous" if ambiguous else "found",
+        "warnings": warnings,
+        "guardrail": {
+            "broad_query": broad_query,
+            "per_relation_limit": per_relation_limit,
+            "node_budget": node_budget,
+            "traversal_truncated": traversal_truncated,
+        },
         "candidate_matches": candidate_matches,
         "affected_modules": _affected_modules(all_impacted),
         "affected_flows": _affected_flows(all_impacted),
+        "frontend_graph": frontend_graph,
         "participating_processes": process_participation,
         "process_explanation": {
             "top_relations": [item.get("relation", "") for item in all_impacted[:8]],
@@ -197,9 +276,11 @@ def analyze_impact(
             "target": resolved_target,
             "direction": normalized_direction,
             "risk": risk,
-            "status": "ambiguous" if ambiguous else "found",
+            "status": "partial" if traversal_truncated else "ambiguous" if ambiguous else "found",
             "impacted_count": impacted_count,
             "direct": direct_count,
             "top_impacted": [item["symbol"] for item in all_impacted[:8]],
+            "frontend_graph": frontend_graph,
+            "warnings": warnings,
         },
     }

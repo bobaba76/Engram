@@ -30,12 +30,18 @@ def _result_columns(result) -> list[str]:
 
 
 class KuzuStore:
-    def __init__(self, data_path: Path) -> None:
+    def __init__(self, data_path: Path, read_only: bool = False) -> None:
         self.data_path = data_path
+        self.read_only = read_only
         self.data_path.parent.mkdir(parents=True, exist_ok=True)
-        self.database = kuzu.Database(str(self.data_path))
+        self.database = kuzu.Database(str(self.data_path), read_only=read_only)
         self.connection = kuzu.Connection(self.database)
-        self._initialize_schema()
+        if not self.read_only:
+            self._initialize_schema()
+
+    def close(self) -> None:
+        self.connection = None
+        self.database = None
  
     def _initialize_schema(self) -> None:
         try:
@@ -190,32 +196,44 @@ class KuzuStore:
         return total
 
     def get_impacted_files(self, touched_files: list[str]) -> set[str]:
+        details = self.get_impacted_file_details(touched_files)
+        return set(str(path) for path in details.get("impacted_files", []))
+
+    def get_impacted_file_details(self, touched_files: list[str]) -> dict[str, Any]:
         impacted = set(touched_files)
         if not touched_files:
-            return impacted
-        relation_queries = (
-            "MATCH (s1:Symbol)-[:IMPORTS]->(s2:Symbol) WHERE s1.file_path = $file_path RETURN DISTINCT s2.file_path",
-            "MATCH (s1:Symbol)-[:IMPORTS]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
-            "MATCH (s1:Symbol)-[:CALLS]->(s2:Symbol) WHERE s1.file_path = $file_path RETURN DISTINCT s2.file_path",
-            "MATCH (s1:Symbol)-[:CALLS]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
-            "MATCH (s1:Symbol)-[:REFERENCES]->(s2:Symbol) WHERE s1.file_path = $file_path RETURN DISTINCT s2.file_path",
-            "MATCH (s1:Symbol)-[:REFERENCES]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
-            "MATCH (s1:Symbol)-[:DECLARES]->(s2:Symbol) WHERE s1.file_path = $file_path RETURN DISTINCT s2.file_path",
-            "MATCH (s1:Symbol)-[:DECLARES]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
-            "MATCH (s1:Symbol)-[:ASSOCIATED_WITH]->(s2:Symbol) WHERE s1.file_path = $file_path RETURN DISTINCT s2.file_path",
-            "MATCH (s1:Symbol)-[:ASSOCIATED_WITH]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
-        )
+            return {
+                "impacted_files": [],
+                "by_touched_file": {},
+                "relation_totals": {},
+            }
+        relation_queries = {
+            "IMPORTS": "MATCH (s1:Symbol)-[:IMPORTS]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
+            "CALLS": "MATCH (s1:Symbol)-[:CALLS]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
+            "REFERENCES": "MATCH (s1:Symbol)-[:REFERENCES]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
+            "DECLARES": "MATCH (s1:Symbol)-[:DECLARES]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
+            "ASSOCIATED_WITH": "MATCH (s1:Symbol)-[:ASSOCIATED_WITH]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
+        }
+        by_touched_file: dict[str, dict[str, list[str]]] = {}
+        relation_totals: dict[str, set[str]] = {name: set() for name in relation_queries}
         for file_path in touched_files:
-            for query in relation_queries:
+            file_breakdown: dict[str, list[str]] = {}
+            for relation_name, query in relation_queries.items():
                 try:
                     rows = _safe_get_all(self.connection.execute(query, {"file_path": file_path}))
                 except RuntimeError:
                     rows = []
-                for row in rows:
-                    if row and row[0]:
-                        impacted.add(str(row[0]))
-        return impacted
- 
+                related_files = sorted({str(row[0]) for row in rows if row and row[0]})
+                file_breakdown[relation_name] = related_files
+                impacted.update(related_files)
+                relation_totals[relation_name].update(related_files)
+            by_touched_file[file_path] = file_breakdown
+        return {
+            "impacted_files": sorted(impacted),
+            "by_touched_file": by_touched_file,
+            "relation_totals": {name: sorted(paths) for name, paths in relation_totals.items()},
+        }
+
     def all_edges(self) -> list[dict[str, Any]]:
         edges: list[dict[str, Any]] = []
         for relation, query in {
@@ -235,6 +253,28 @@ class KuzuStore:
                 for row in rows
             )
         return edges
+
+    def edges_for_relation(self, relation: str) -> list[dict[str, Any]]:
+        queries = {
+            "DEFINES": "MATCH (f:File)-[:DEFINES]->(s:Symbol) RETURN f.path, s.qualified_name",
+            "IMPORTS": "MATCH (s1:Symbol)-[:IMPORTS]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
+            "CALLS": "MATCH (s1:Symbol)-[:CALLS]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
+            "REFERENCES": "MATCH (s1:Symbol)-[:REFERENCES]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
+            "DECLARES": "MATCH (s1:Symbol)-[:DECLARES]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
+            "ASSOCIATED_WITH": "MATCH (s1:Symbol)-[:ASSOCIATED_WITH]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
+        }
+        relation_name = relation.upper()
+        query = queries.get(relation_name)
+        if query is None:
+            return []
+        try:
+            rows = self.connection.execute(query).get_all()
+        except RuntimeError:
+            rows = []
+        return [
+            {"source": row[0], "relation": relation_name, "target": row[1]}
+            for row in rows
+        ]
  
     def edges_for_target(self, target: str, relation: str | None = None) -> list[dict[str, Any]]:
         relations = [relation] if relation is not None else ["DEFINES", "IMPORTS", "CALLS", "REFERENCES", "DECLARES", "ASSOCIATED_WITH"]

@@ -21,8 +21,8 @@ class MCPServer:
         self.name = name
         self._fastmcp = FastMCP(name, json_response=True) if FastMCP is not None else None
 
-    def register_tool(self, name: str, handler: Callable[..., Any]) -> None:
-        self.registry.register(name, handler)
+    def register_tool(self, name: str, handler: Callable[..., Any], description: str = "") -> None:
+        self.registry.register(name, handler, description=description)
         if self._fastmcp is not None:
             handler_signature = inspect.signature(handler)
 
@@ -37,7 +37,7 @@ class MCPServer:
     def describe(self) -> dict[str, object]:
         return {
             "transport": "stdio" if self._fastmcp is not None else "fallback",
-            "tools": self.registry.list_tools(),
+            "tools": self.registry.describe_tools(),
         }
 
     def run(self) -> None:

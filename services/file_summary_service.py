@@ -1,11 +1,15 @@
-from storage.duckdb_store import DuckDBStore
+from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from storage.duckdb_store import DuckDBStore
 
 
 def get_file_summary(duckdb_store: DuckDBStore, target: str) -> dict[str, object]:
-    symbols = duckdb_store.fetch_symbols_for_file(target)
-    chunks = duckdb_store.fetch_chunks_for_target(target, limit=1000)
-    findings = duckdb_store.fetch_findings_for_target(target)
+    symbols = duckdb_store.symbols.fetch_for_file(target)
+    chunks = duckdb_store.chunks.fetch_for_target(target, limit=1000)
+    findings = duckdb_store.reviews.fetch_findings_for_target(target)
     return {
         "target": target,
         "symbol_count": len(symbols),

@@ -12,6 +12,8 @@ __pycache__/
 coverage/
 htmlcov/
 .cache/
+.uv-cache/
+.uv-python/
 tmp/
 temp/
 *.log
@@ -19,6 +21,7 @@ temp/
 .env.*
 !.env.example
 data/
+V0.99/
 *.duckdb
 *.wal
 *.kuzu/

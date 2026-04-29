@@ -17,6 +17,7 @@ from services.semantic_search import semantic_code_search
 from services.source_retrieval_service import get_source_context
 from services.symbol_lookup_service import find_symbols
 from services.symbol_context_service import get_symbol_context
+from storage.kuzu_store import KuzuStore
 
 
 def main() -> int:
@@ -25,6 +26,8 @@ def main() -> int:
     coordinator.run()
 
     manifest = coordinator.manifest_store.read_current()
+    coordinator.kuzu.close()
+    kuzu_reader = KuzuStore(settings.kuzu_path, read_only=True)
     server = MCPServer()
     server.register_tool("index_status", lambda: get_index_status(manifest))
     server.register_tool(
@@ -34,11 +37,16 @@ def main() -> int:
             task=task,
             model_name=settings.embedding_model,
             limit=limit,
+            max_length=settings.embedding_max_length,
+            device=settings.embedding_device,
+            provider_name=settings.embedding_provider,
+            api_key=settings.embedding_api_key,
+            base_url=settings.embedding_base_url,
         ),
     )
     server.register_tool(
         "get_dependencies",
-        lambda target: get_dependencies(coordinator.kuzu, target=target),
+        lambda target: get_dependencies(kuzu_reader, target=target),
     )
     server.register_tool(
         "get_review_history",
@@ -54,12 +62,12 @@ def main() -> int:
     )
     server.register_tool(
         "get_callers_and_callees",
-        lambda target: get_callers_and_callees(coordinator.kuzu, target=target),
+        lambda target: get_callers_and_callees(kuzu_reader, target=target),
     )
     server.register_tool(
         "get_graph_neighborhood",
         lambda target, depth=1, relation="", max_edges=0, mode="full", suppress_common_hubs=False: get_graph_neighborhood_with_options(
-            coordinator.kuzu,
+            kuzu_reader,
             target=target,
             depth=depth,
             relation=relation or None,

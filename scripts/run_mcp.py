@@ -9,15 +9,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config.settings import load_settings
+from mcp_server.resolvers import resolve_tool_target
 from mcp_server.server import MCPServer
 from services.api_impact_service import api_impact
+from services.app_context_service import app_context
+from services.change_report_service import change_impact_report
 from services.detect_changes_service import detect_changes
 from services.dependency_service import get_dependencies
+from services.feature_context_service import feature_context
 from services.file_summary_service import get_file_summary
 from services.graph_query_service import execute_graph_query
 from services.graph_service import get_callers_and_callees, get_graph_neighborhood_with_options
 from services.impact_service import analyze_impact
-from services.index_status_service import get_index_status
+from services.index_health_service import index_health
+from services.index_status_service import get_index_status, get_recent_runs, get_run_metrics
+from services.investigation_service import investigate_codebase, investigation_search_task
 from services.process_catalog_service import get_symbol_process_participation, list_processes
 from services.process_service import trace_execution_flows
 from services.rename_service import preview_rename
@@ -28,6 +34,7 @@ from services.semantic_search import semantic_code_search
 from services.source_retrieval_service import get_source_context
 from services.symbol_lookup_service import find_symbols
 from services.symbol_context_service import get_symbol_context
+from services.test_intelligence_service import find_tests_for_target, suggest_tests_for_change, test_impact
 from services.unified_context_service import get_unified_context
 from app.run_modes import FULL, INCREMENTAL
 from storage.duckdb_store import DuckDBStore
@@ -133,9 +140,10 @@ def main() -> int:
     manifest.setdefault("mcp_resolution_source", resolved_by)
     server = MCPServer()
     repo_context_cache: dict[Path, dict[str, Any]] = {}
+    selected_repo_root = settings.repo_root.resolve()
 
     def _get_repo_context(repo: str = "") -> dict[str, Any]:
-        repo_root = resolve_indexed_repo(settings.repo_root, repo or None)
+        repo_root = resolve_indexed_repo(selected_repo_root, repo or None) if str(repo or "").strip() else selected_repo_root
         cached = repo_context_cache.get(repo_root)
         if cached is not None:
             return cached
@@ -147,12 +155,29 @@ def main() -> int:
             "repo_root": repo_root,
             "settings": repo_settings,
             "duckdb_store": DuckDBStore(repo_settings.duckdb_path, read_only=True),
-            "kuzu_store": KuzuStore(repo_settings.kuzu_path),
+            "kuzu_store": None,
             "vector_store": VectorStore(repo_settings.lancedb_path),
             "manifest": repo_manifest,
         }
         repo_context_cache[repo_root] = context
         return context
+
+    def _get_kuzu_store(repo: str = "") -> KuzuStore:
+        context = _get_repo_context(repo)
+        cached_store = context.get("kuzu_store")
+        if isinstance(cached_store, KuzuStore):
+            return cached_store
+        kuzu_store = KuzuStore(context["settings"].kuzu_path, read_only=True)
+        context["kuzu_store"] = kuzu_store
+        return kuzu_store
+
+    def _close_repo_context(context: dict[str, Any]) -> None:
+        for key in ("kuzu_store", "duckdb_store"):
+            store = context.get(key)
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
+        context["kuzu_store"] = None
 
     _get_repo_context()
 
@@ -161,16 +186,41 @@ def main() -> int:
         return get_index_status(context["manifest"])
 
     def list_repos_tool() -> dict[str, object]:
-        return list_indexed_repos(settings.repo_root)
+        payload = list_indexed_repos(selected_repo_root)
+        payload["selected_repo"] = str(selected_repo_root)
+        payload["compact_summary"]["selected_repo"] = selected_repo_root.name
+        return payload
+
+    def select_repo_tool(repo: str) -> dict[str, object]:
+        nonlocal selected_repo_root
+        resolved_repo_root = resolve_indexed_repo(selected_repo_root, repo)
+        selected_repo_root = resolved_repo_root
+        context = _get_repo_context()
+        return {
+            "selected_repo": str(selected_repo_root),
+            "repo_name": selected_repo_root.name,
+            "manifest": context["manifest"],
+            "summary_text": f"Selected repo: {selected_repo_root}",
+            "highlights": [f"Selected repo: {selected_repo_root.name}"],
+        }
+
+    def get_recent_runs_tool(limit: int = 10, repo: str = "") -> dict[str, object]:
+        context = _get_repo_context(repo)
+        return get_recent_runs(context["duckdb_store"], limit=limit)
+
+    def get_run_metrics_tool(run_id: str, repo: str = "") -> dict[str, object]:
+        context = _get_repo_context(repo)
+        return get_run_metrics(context["duckdb_store"], run_id=run_id)
 
     def reindex_project_tool(project_root: str = "", run_mode: str = INCREMENTAL) -> dict[str, object]:
         target_root = Path(project_root).resolve() if str(project_root or '').strip() else settings.repo_root
+        for cached_context in list(repo_context_cache.values()):
+            _close_repo_context(cached_context)
+        repo_context_cache.clear()
         result = _index_project(target_root, run_mode=run_mode)
         if target_root == settings.repo_root:
             manifest.clear()
             manifest.update(result["manifest"] if isinstance(result["manifest"], dict) else {})
-            repo_context_cache.pop(settings.repo_root, None)
-        repo_context_cache.pop(target_root.resolve(), None)
         return result
 
     def unified_context_tool(
@@ -185,7 +235,7 @@ def main() -> int:
         context = _get_repo_context(repo)
         return get_unified_context(
             context["duckdb_store"],
-            context["kuzu_store"],
+            _get_kuzu_store(repo),
             target=target,
             max_matches=max_matches,
             neighborhood_depth=neighborhood_depth,
@@ -206,7 +256,7 @@ def main() -> int:
         context = _get_repo_context(repo)
         return analyze_impact(
             context["duckdb_store"],
-            context["kuzu_store"],
+            _get_kuzu_store(repo),
             target=target,
             direction=direction,
             max_depth=max_depth,
@@ -216,15 +266,14 @@ def main() -> int:
         )
 
     def graph_query_tool(query: str, limit: int = 100, repo: str = "") -> dict[str, object]:
-        context = _get_repo_context(repo)
-        return execute_graph_query(context["kuzu_store"], query=query, limit=limit)
+        return execute_graph_query(_get_kuzu_store(repo), query=query, limit=limit)
 
     def detect_changes_tool(scope: str = "unstaged", base_ref: str = "", repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
         return detect_changes(
             context["repo_root"],
             context["duckdb_store"],
-            context["kuzu_store"],
+            _get_kuzu_store(repo),
             scope=scope,
             base_ref=base_ref or None,
         )
@@ -236,6 +285,35 @@ def main() -> int:
     def api_impact_tool(route: str = "", repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
         return api_impact(context["repo_root"], context["duckdb_store"], route=route)
+
+    def app_context_tool(target: str = "", limit: int = 12, repo: str = "") -> dict[str, object]:
+        context = _get_repo_context(repo)
+        return app_context(
+            context["repo_root"],
+            context["duckdb_store"],
+            _get_kuzu_store(repo),
+            target=target,
+            limit=limit,
+        )
+
+    def resolve_target_tool(
+        target: str = "",
+        file_path: str = "",
+        kind: str = "",
+        symbol_uid: str = "",
+        limit: int = 5,
+        repo: str = "",
+    ) -> dict[str, object]:
+        context = _get_repo_context(repo)
+        return resolve_tool_target(
+            context["duckdb_store"],
+            context["repo_root"],
+            target=target,
+            file_path=file_path or None,
+            kind=kind or None,
+            symbol_uid=symbol_uid or None,
+            limit=limit,
+        )
 
     def trace_processes_tool(
         target: str,
@@ -249,7 +327,7 @@ def main() -> int:
         context = _get_repo_context(repo)
         return trace_execution_flows(
             context["duckdb_store"],
-            context["kuzu_store"],
+            _get_kuzu_store(repo),
             target=target,
             file_path=file_path or None,
             kind=kind or None,
@@ -285,7 +363,7 @@ def main() -> int:
         return preview_rename(
             context["repo_root"],
             context["duckdb_store"],
-            context["kuzu_store"],
+            _get_kuzu_store(repo),
             symbol_name=symbol_name,
             new_name=new_name,
             file_path=file_path or None,
@@ -299,12 +377,76 @@ def main() -> int:
             task=task,
             model_name=context["settings"].embedding_model,
             duckdb_store=context["duckdb_store"],
+            kuzu_store=_get_kuzu_store(repo),
+            limit=limit,
+            max_length=context["settings"].embedding_max_length,
+            device=context["settings"].embedding_device,
+            provider_name=context["settings"].embedding_provider,
+            api_key=context["settings"].embedding_api_key,
+            base_url=context["settings"].embedding_base_url,
+        )
+
+    def investigate_codebase_tool(question: str, limit: int = 5, repo: str = "") -> dict[str, object]:
+        context = _get_repo_context(repo)
+        search_task, search_plan = investigation_search_task(question, limit=limit)
+        search_limit = int(search_plan.get("guardrails", {}).get("search_limit", limit) or limit) if isinstance(search_plan.get("guardrails", {}), dict) else limit
+        search_payload = semantic_code_search(
+            context["vector_store"],
+            task=search_task,
+            model_name=context["settings"].embedding_model,
+            duckdb_store=context["duckdb_store"],
+            kuzu_store=_get_kuzu_store(repo),
+            limit=search_limit,
+            max_length=context["settings"].embedding_max_length,
+            device=context["settings"].embedding_device,
+            provider_name=context["settings"].embedding_provider,
+            api_key=context["settings"].embedding_api_key,
+            base_url=context["settings"].embedding_base_url,
+        )
+        if isinstance(search_payload, dict):
+            search_payload.setdefault("investigation_search_plan", search_plan)
+        return investigate_codebase(
+            context["repo_root"],
+            context["duckdb_store"],
+            _get_kuzu_store(repo),
+            question=question,
+            search_payload=search_payload,
             limit=limit,
         )
 
-    def get_dependencies_tool(target: str, repo: str = "") -> dict[str, object]:
+    def change_impact_report_tool(scope: str = "unstaged", base_ref: str = "", max_symbols: int = 5, repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
-        return get_dependencies(context["kuzu_store"], target=target)
+        return change_impact_report(
+            context["repo_root"],
+            context["duckdb_store"],
+            _get_kuzu_store(repo),
+            scope=scope,
+            base_ref=base_ref,
+            max_symbols=max_symbols,
+        )
+
+    def find_tests_for_target_tool(target: str, limit: int = 10, repo: str = "") -> dict[str, object]:
+        context = _get_repo_context(repo)
+        return find_tests_for_target(context["duckdb_store"], target=target, limit=limit)
+
+    def suggest_tests_for_change_tool(scope: str = "unstaged", base_ref: str = "", repo: str = "") -> dict[str, object]:
+        context = _get_repo_context(repo)
+        return suggest_tests_for_change(context["repo_root"], context["duckdb_store"], _get_kuzu_store(repo), scope=scope, base_ref=base_ref)
+
+    def test_impact_tool(scope: str = "unstaged", base_ref: str = "", repo: str = "") -> dict[str, object]:
+        context = _get_repo_context(repo)
+        return test_impact(context["repo_root"], context["duckdb_store"], _get_kuzu_store(repo), scope=scope, base_ref=base_ref)
+
+    def feature_context_tool(feature: str, limit: int = 12, repo: str = "") -> dict[str, object]:
+        context = _get_repo_context(repo)
+        return feature_context(context["repo_root"], context["duckdb_store"], _get_kuzu_store(repo), feature=feature, limit=limit)
+
+    def index_health_tool(repo: str = "") -> dict[str, object]:
+        context = _get_repo_context(repo)
+        return index_health(context["repo_root"], context["duckdb_store"], _get_kuzu_store(repo))
+
+    def get_dependencies_tool(target: str, repo: str = "") -> dict[str, object]:
+        return get_dependencies(_get_kuzu_store(repo), target=target)
 
     def get_review_history_tool(target: str, repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
@@ -319,8 +461,7 @@ def main() -> int:
         return find_symbols(context["duckdb_store"], query=query, limit=limit, file_path=file_path or None, kind=kind or None, symbol_uid=symbol_uid or None)
 
     def get_callers_and_callees_tool(target: str, repo: str = "") -> dict[str, object]:
-        context = _get_repo_context(repo)
-        return get_callers_and_callees(context["kuzu_store"], target=target)
+        return get_callers_and_callees(_get_kuzu_store(repo), target=target)
 
     def get_graph_neighborhood_tool(
         target: str,
@@ -331,9 +472,8 @@ def main() -> int:
         suppress_common_hubs: bool = False,
         repo: str = "",
     ) -> dict[str, object]:
-        context = _get_repo_context(repo)
         return get_graph_neighborhood_with_options(
-            context["kuzu_store"],
+            _get_kuzu_store(repo),
             target=target,
             depth=depth,
             relation=relation or None,
@@ -348,30 +488,46 @@ def main() -> int:
 
     def get_source_context_tool(target: str, limit: int = 5, repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
-        return get_source_context(context["duckdb_store"], target=target, limit=limit)
+        return get_source_context(context["duckdb_store"], target=target, limit=limit, repo_root=context["repo_root"])
 
-    server.register_tool("index_status", index_status)
-    server.register_tool("list_repos", list_repos_tool)
-    server.register_tool("reindex_project", reindex_project_tool)
-    server.register_tool("unified_context", unified_context_tool)
-    server.register_tool("impact_analysis", impact_analysis_tool)
-    server.register_tool("graph_query", graph_query_tool)
-    server.register_tool("detect_changes", detect_changes_tool)
-    server.register_tool("route_map", route_map_tool)
-    server.register_tool("api_impact", api_impact_tool)
-    server.register_tool("trace_processes", trace_processes_tool)
-    server.register_tool("list_processes", list_processes_tool)
-    server.register_tool("symbol_process_participation", symbol_process_participation_tool)
-    server.register_tool("preview_rename", preview_rename_tool)
-    server.register_tool("semantic_code_search", semantic_code_search_tool)
-    server.register_tool("get_dependencies", get_dependencies_tool)
-    server.register_tool("get_review_history", get_review_history_tool)
-    server.register_tool("get_symbol_context", get_symbol_context_tool)
-    server.register_tool("find_symbols", find_symbols_tool)
-    server.register_tool("get_callers_and_callees", get_callers_and_callees_tool)
-    server.register_tool("get_graph_neighborhood", get_graph_neighborhood_tool)
-    server.register_tool("get_file_summary", get_file_summary_tool)
-    server.register_tool("get_source_context", get_source_context_tool)
+    tool_definitions = [
+        ("index_status", index_status, "Show index readiness, counts, versions, and resolved repository metadata."),
+        ("list_repos", list_repos_tool, "List indexed sibling repositories Coder can serve."),
+        ("select_repo", select_repo_tool, "Select the default repo target for this MCP session."),
+        ("get_recent_runs", get_recent_runs_tool, "List recent persisted index runs including parsed stage summaries."),
+        ("get_run_metrics", get_run_metrics_tool, "Show parsed persisted stage metrics for a specific run ID."),
+        ("reindex_project", reindex_project_tool, "Run an incremental or full index refresh for a repository."),
+        ("unified_context", unified_context_tool, "Resolve a target and return matches, callers/callees, dependencies, and graph neighborhood."),
+        ("impact_analysis", impact_analysis_tool, "Estimate upstream or downstream impact for a symbol target."),
+        ("graph_query", graph_query_tool, "Execute a read-only graph query against the indexed Kuzu graph."),
+        ("detect_changes", detect_changes_tool, "Analyze changed files and related graph impact for the working tree or git ref."),
+        ("route_map", route_map_tool, "Map API/frontend route strings to likely files and symbols."),
+        ("api_impact", api_impact_tool, "Estimate code impact for an API route."),
+        ("app_context", app_context_tool, "Map app-level context across routes, files, tables, graph edges, and processes."),
+        ("resolve_target", resolve_target_tool, "Resolve a file, symbol name, or symbol UID to the indexed target Coder will use."),
+        ("trace_processes", trace_processes_tool, "Trace execution/process flows around a target symbol."),
+        ("list_processes", list_processes_tool, "List inferred process clusters from the indexed codebase."),
+        ("symbol_process_participation", symbol_process_participation_tool, "Show process clusters involving a target symbol."),
+        ("preview_rename", preview_rename_tool, "Preview references that may need edits for a symbol rename."),
+        ("semantic_code_search", semantic_code_search_tool, "Search indexed chunks semantically for a natural language task."),
+        ("investigate_codebase", investigate_codebase_tool, "Investigate a natural-language codebase question using search, symbols, snippets, graph, and app context."),
+        ("change_impact_report", change_impact_report_tool, "Summarize git changes, likely impact, app context, and recommended tests."),
+        ("find_tests_for_target", find_tests_for_target_tool, "Find likely tests for a symbol, file, or feature target."),
+        ("suggest_tests_for_change", suggest_tests_for_change_tool, "Suggest tests for current git changes."),
+        ("test_impact", test_impact_tool, "Estimate testing impact and risk for current git changes."),
+        ("feature_context", feature_context_tool, "Map a feature to related files, routes, tables, processes, and graph context."),
+        ("index_health", index_health_tool, "Report index health, counts, parser/chunk distribution, recent runs, and warnings."),
+        ("get_dependencies", get_dependencies_tool, "Show dependency graph context for a target."),
+        ("get_review_history", get_review_history_tool, "Show persisted review findings and analyses for a target file."),
+        ("get_symbol_context", get_symbol_context_tool, "Show direct symbol metadata and related source context."),
+        ("find_symbols", find_symbols_tool, "Find symbols by query, file, kind, or symbol UID."),
+        ("get_callers_and_callees", get_callers_and_callees_tool, "Show direct CALLS callers and callees for a symbol target."),
+        ("get_graph_neighborhood", get_graph_neighborhood_tool, "Show filtered graph neighborhood for a target."),
+        ("get_file_summary", get_file_summary_tool, "Summarize indexed symbols and chunks for a file."),
+        ("get_source_context", get_source_context_tool, "Return source chunks and previews for a target."),
+    ]
+    for tool_name, handler, description in tool_definitions:
+        server.register_tool(tool_name, handler, description=description)
     server.run()
     return 0
 

@@ -519,6 +519,8 @@ class OpenRouterMultiAgentProvider(BaseReviewAnalysisProvider):
 
 
 def build_review_analysis_provider(provider_name: str, settings: RuntimeConfig) -> BaseReviewAnalysisProvider:
+    if not settings.llm_features_enabled:
+        return HeuristicMultiAgentProvider()
     if provider_name == "heuristic-multi-agent":
         return HeuristicMultiAgentProvider()
     if provider_name == "openrouter-multi-agent":

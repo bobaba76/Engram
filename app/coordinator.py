@@ -9,9 +9,9 @@ from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, as_completed
  
 from app.run_modes import FULL, INCREMENTAL
-from indexing.chunker import build_chunks
+from indexing.chunker import build_chunks, diff_chunk_ids, summarize_chunks
 from indexing.embedder import embed_chunks
-from indexing.embeddings import get_embedding_runtime_info
+from indexing.embedding_providers import EmbeddingRequest, embedding_runtime_info
 from indexing.graph_builder import build_graph
 from indexing.process_builder import build_process_graph_records
 from indexing.planner import plan_incremental_work
@@ -31,6 +31,7 @@ from reviewers.providers import build_review_analysis_provider
 from reviewers.scheduler import build_review_jobs
 from reviewers.security_reviewer import SecurityReviewer
 from services.run_summary_service import generate_run_summary, write_run_reports
+from services.index_pipeline_stages import persist_chunk_records, persist_parse_records
 from storage.duckdb_store import DuckDBStore
 from storage.kuzu_store import KuzuStore
 from storage.manifest_store import ManifestStore
@@ -132,7 +133,7 @@ class Coordinator:
                     record = asdict(analysis)
                     record["output_json"] = json.dumps(record["output_json"])
                     record["input_context_json"] = json.dumps(record["input_context_json"])
-                    self.duckdb.insert_review_agent_analysis(record)
+                    self.duckdb.reviews.insert_agent_analysis(record)
                 completed += 1
                 group = future_to_group[future]
                 if self._should_log_index(completed, len(grouped_prepared_jobs)):
@@ -148,7 +149,7 @@ class Coordinator:
  
     def _load_persisted_symbols(self) -> dict[str, list[SymbolRecord]]:
         loaded: dict[str, list[SymbolRecord]] = {}
-        for file_path, rows in self.duckdb.fetch_symbols_by_file().items():
+        for file_path, rows in self.duckdb.symbols.fetch_by_file().items():
             loaded[file_path] = [
                 SymbolRecord(
                     name=row["name"],
@@ -167,7 +168,7 @@ class Coordinator:
         summary = RunSummary(run_id=uuid4().hex[:8], run_mode=run_mode)
         self._log_progress(f"run {summary.run_id} started for {self.settings.repo_root} ({run_mode})")
         full_rebuild = run_mode == FULL
-        existing_files = self.duckdb.fetch_files_index() if not full_rebuild else {}
+        existing_files = self.duckdb.files.fetch_index() if not full_rebuild else {}
         if full_rebuild:
             self.duckdb.clear_index_tables()
             self.kuzu.reset()
@@ -178,7 +179,7 @@ class Coordinator:
  
         scan_stage = StageResult(stage_name="scan", status="running")
         self._log_progress("scan started")
-        files = scan_repo(self.settings.repo_root, excluded_dirs=self.settings.scan_excluded_dirs)
+        files = scan_repo(self.settings.repo_root, excluded_dirs=self.settings.scan_excluded_dirs, progress_callback=self._log_progress)
         repo_profile = _build_repo_profile(files)
         scan_stage.output_summary = {
             "file_count": len(files),
@@ -213,12 +214,19 @@ class Coordinator:
         changed_files = plan["files_to_parse"]
         deleted_files = plan.get("deleted_files", [])
         unchanged_files = plan.get("unchanged_files", [])
+        previous_chunks_by_file: dict[str, list[dict[str, object]]] = {}
+        if not full_rebuild and changed_files:
+            for chunk in self.duckdb.fetch_chunks_for_files(changed_files):
+                previous_chunks_by_file.setdefault(str(chunk.get("file_path", "")), []).append(chunk)
+        impacted_file_details: dict[str, object] = {"impacted_files": [], "by_touched_file": {}, "relation_totals": {}}
         touched_files = sorted(set(changed_files) | set(deleted_files))
         if touched_files and not full_rebuild:
-            self.duckdb.resolve_findings_for_files(touched_files)
-            self.duckdb.delete_index_data_for_files(touched_files)
-            self.vector_store.delete_items_for_files(touched_files)
-            impacted_files = self.kuzu.get_impacted_files(touched_files)
+            self.duckdb.reviews.resolve_findings_for_files(touched_files)
+            self.duckdb.files.delete_index_data_for_files(touched_files)
+            if deleted_files:
+                self.vector_store.delete_items_for_files(deleted_files)
+            impacted_file_details = self.kuzu.get_impacted_file_details(touched_files)
+            impacted_files = set(str(path) for path in impacted_file_details.get("impacted_files", []))
             impacted_files = {file_path for file_path in impacted_files if file_path in file_map or file_path in self.symbols_by_file}
             self.kuzu.delete_index_data_for_files(sorted(impacted_files))
             for file_path in touched_files:
@@ -235,6 +243,7 @@ class Coordinator:
         }
         parser_usage: dict[str, int] = defaultdict(int)
         clang_runtime_summary: dict[str, object] = {}
+        file_records_to_upsert = []
         for index, file_path in enumerate(changed_files, start=1):
             file_record = file_map[file_path]
             file_path = self.settings.repo_root / file_record.path
@@ -244,24 +253,14 @@ class Coordinator:
             parser_usage[parser_name] += 1
             if not clang_runtime_summary and isinstance(parse_status.get("clang"), dict):
                 clang_runtime_summary = dict(parse_status.get("clang") or {})
-            self.duckdb.upsert_file(asdict(file_record))
-            for symbol in symbols:
-                self.duckdb.insert_symbol(
-                    {
-                        "file_path": file_record.path,
-                        "qualified_name": symbol.qualified_name,
-                        "name": symbol.name,
-                        "kind": symbol.kind,
-                        "start_line": symbol.start_line,
-                        "end_line": symbol.end_line,
-                        "signature": symbol.signature,
-                        "metadata_json": json.dumps(symbol.metadata),
-                    }
-                )
+            file_records_to_upsert.append(file_record)
             if self._should_log_index(index, len(changed_files)):
                 self._log_progress(
                     f"parse progress: {index}/{len(changed_files)} files ({file_record.path}) parser={parser_name} symbols={len(symbols)}"
                 )
+        if file_records_to_upsert:
+            persisted = persist_parse_records(self.duckdb, file_records_to_upsert, self.symbols_by_file)
+            self._log_progress(f"parse DB write completed: {persisted['files']} files, {persisted['symbols']} symbols")
         symbol_count = sum(len(symbols) for symbols in self.symbols_by_file.values())
         parse_stage.output_summary = {
             "parsed_files": len(changed_files),
@@ -284,8 +283,16 @@ class Coordinator:
             "impacted_files": len(graph_files),
             "touched_files": len(touched_files),
         }
+        if not full_rebuild and touched_files:
+            graph_stage.diagnostics.append({
+                "impacted_file_details": {
+                    "impacted_files": sorted(impacted_files),
+                    "by_touched_file": impacted_file_details.get("by_touched_file", {}),
+                    "relation_totals": impacted_file_details.get("relation_totals", {}),
+                }
+            })
         if graph_files:
-            build_graph(self.kuzu, graph_files, self.symbols_by_file)
+            build_graph(self.kuzu, graph_files, self.symbols_by_file, progress_callback=self._log_progress)
         graph_stage.output_summary = {
             "edge_count": self.kuzu.count_edges(),
             "rebuilt_files": len(graph_files),
@@ -295,51 +302,174 @@ class Coordinator:
         summary.stage_results.append(graph_stage)
         self._log_progress(f"graph completed: {graph_stage.output_summary['edge_count']} edges")
 
-        process_records, process_clusters, process_memberships, process_relationships = build_process_graph_records(
-            self.duckdb,
-            self.kuzu,
-            self.symbols_by_file,
-        )
-        self.duckdb.insert_processes([asdict(process_record) for process_record in process_records])
-        self.duckdb.insert_process_clusters([asdict(process_cluster) for process_cluster in process_clusters])
-        self.duckdb.insert_process_symbol_memberships([asdict(membership) for membership in process_memberships])
-        self.duckdb.insert_process_relationships([asdict(relationship) for relationship in process_relationships])
-        self._log_progress(
-            f"process extraction completed: {len(process_records)} processes, {len(process_clusters)} clusters, {len(process_relationships)} relationships persisted"
-        )
+        process_stage = StageResult(stage_name="process", status="running")
+        process_scope_files = sorted(set(file_map) if full_rebuild else impacted_files)
+        process_symbols_by_file = {
+            file_path: self.symbols_by_file[file_path]
+            for file_path in process_scope_files
+            if file_path in self.symbols_by_file
+        }
+        process_stage.input_summary = {
+            "symbol_count": symbol_count,
+            "scoped_symbol_count": sum(len(symbols) for symbols in process_symbols_by_file.values()),
+            "scoped_file_count": len(process_symbols_by_file),
+            "max_depth": self.settings.process_max_depth,
+            "max_entrypoints": self.settings.process_max_entrypoints,
+            "max_flows_per_entrypoint": self.settings.process_max_flows_per_entrypoint,
+            "max_records": self.settings.process_max_records,
+            "max_relationships": self.settings.process_max_relationships,
+        }
+        if self.settings.process_extraction_enabled:
+            process_started_at = time()
+            self._log_progress(
+                f"process extraction started for {sum(len(symbols) for symbols in process_symbols_by_file.values())} scoped symbols across {len(process_symbols_by_file)} files"
+            )
+            if not full_rebuild and process_scope_files:
+                self.duckdb.processes.delete_for_files(process_scope_files)
+            process_records, process_clusters, process_memberships, process_relationships = build_process_graph_records(
+                self.duckdb,
+                self.kuzu,
+                process_symbols_by_file,
+                max_depth=self.settings.process_max_depth,
+                max_flows_per_target=self.settings.process_max_flows_per_entrypoint,
+                max_entrypoints=self.settings.process_max_entrypoints,
+                max_processes=self.settings.process_max_records,
+                max_relationships=self.settings.process_max_relationships,
+                progress_callback=self._log_progress,
+            )
+            self._log_progress(f"process write started: {len(process_records)} processes")
+            self.duckdb.processes.insert_processes([asdict(process_record) for process_record in process_records])
+            self._log_progress(f"process cluster write started: {len(process_clusters)} clusters")
+            self.duckdb.processes.insert_clusters([asdict(process_cluster) for process_cluster in process_clusters])
+            self._log_progress(f"process membership write started: {len(process_memberships)} memberships")
+            self.duckdb.processes.insert_symbol_memberships([asdict(membership) for membership in process_memberships])
+            self._log_progress(f"process relationship write started: {len(process_relationships)} relationships")
+            self.duckdb.processes.insert_relationships([asdict(relationship) for relationship in process_relationships])
+            self._log_progress(
+                f"process extraction completed in {round(time() - process_started_at, 2)}s: {len(process_records)} processes, {len(process_clusters)} clusters, {len(process_relationships)} relationships persisted"
+            )
+        else:
+            process_records = []
+            process_clusters = []
+            process_memberships = []
+            process_relationships = []
+            self._log_progress("process extraction skipped because CODER_PROCESS_EXTRACTION_ENABLED=false")
+        process_stage.output_summary = {
+            "enabled": self.settings.process_extraction_enabled,
+            "processes": len(process_records),
+            "clusters": len(process_clusters),
+            "memberships": len(process_memberships),
+            "relationships": len(process_relationships),
+        }
+        process_stage.status = "completed"
+        process_stage.completed_at = time()
+        summary.stage_results.append(process_stage)
 
         embed_stage = StageResult(stage_name="embed", status="running")
         self._log_progress(f"embed started for {len(changed_files)} files")
-        existing_chunk_count = len(self.duckdb.fetch_all("chunks"))
+        existing_chunk_count = self.duckdb.chunks.count()
         new_chunk_count = 0
-        embedding_runtime = get_embedding_runtime_info(self.settings.embedding_model, self.settings.embedding_device)
+        chunks_to_embed = []
+        chunk_records_to_insert: list[dict[str, object]] = []
+        stale_chunk_ids: list[str] = []
+        embedding_request = EmbeddingRequest(
+            model_name=self.settings.embedding_model,
+            provider_name=self.settings.embedding_provider,
+            batch_size=self.settings.embedding_batch_size,
+            max_length=self.settings.embedding_max_length,
+            device=self.settings.embedding_device,
+            max_batch_tokens=self.settings.embedding_max_batch_tokens,
+            api_key=self.settings.embedding_api_key,
+            base_url=self.settings.embedding_base_url,
+            retry_attempts=self.settings.embedding_retry_attempts,
+            retry_backoff_seconds=self.settings.embedding_retry_backoff_seconds,
+            max_concurrent_batches=self.settings.embedding_max_concurrent_batches,
+        )
+        embedding_runtime = embedding_runtime_info(embedding_request)
         self._log_progress(
             f"embedding runtime: backend={embedding_runtime['backend']} requested={embedding_runtime['requested_device']} resolved={embedding_runtime['resolved_device']}"
         )
         embed_stage.input_summary = {"files_to_embed": len(changed_files)}
+        reused_embedding_count = 0
+        new_embedding_count = 0
+        chunk_module_count = 0
+        chunk_omitted_content_count = 0
+        chunk_duplicate_content_count = 0
+        aggregate_chunk_kind_counts: dict[str, int] = defaultdict(int)
+        embed_result: dict[str, object] = {}
         for index, file_path in enumerate(changed_files, start=1):
             file_record = file_map[file_path]
             chunks = build_chunks(self.settings.repo_root, file_record.path, self.symbols_by_file.get(file_record.path, []))
+            chunk_summary = summarize_chunks(chunks)
             new_chunk_count += len(chunks)
-            for chunk in chunks:
-                self.duckdb.insert_chunk(asdict(chunk))
-            embed_chunks(
+            if not full_rebuild:
+                chunk_diff = diff_chunk_ids(previous_chunks_by_file.get(file_record.path, []), chunks)
+                stale_chunk_ids.extend(sorted(chunk_diff["stale"]))
+            chunk_module_count += int(chunk_summary.get("module_chunk_count", 0))
+            chunk_omitted_content_count += int(chunk_summary.get("omitted_content_chunk_count", 0))
+            chunk_duplicate_content_count += int(chunk_summary.get("duplicate_content_chunk_count", 0))
+            for kind, count in dict(chunk_summary.get("chunk_kind_counts", {})).items():
+                aggregate_chunk_kind_counts[str(kind)] += int(count)
+            if chunks and self._should_log_index(index, len(changed_files)):
+                self._log_progress(
+                    f"chunk write progress: writing {len(chunks)} chunks for {file_record.path} module={chunk_summary.get('module_chunk_count', 0)} omitted={chunk_summary.get('omitted_content_chunk_count', 0)} dup_content={chunk_summary.get('duplicate_content_chunk_count', 0)}"
+                )
+            chunk_records_to_insert.extend(asdict(chunk) for chunk in chunks)
+            chunks_to_embed.extend(chunks)
+            if self._should_log_index(index, len(changed_files)):
+                self._log_progress(
+                    f"chunk progress: {index}/{len(changed_files)} files, {new_chunk_count} new chunks prepared ({file_record.path})"
+                )
+        if stale_chunk_ids:
+            self._log_progress(f"chunk diff cleanup started: deleting {len(stale_chunk_ids)} stale vector chunks")
+            self.vector_store.delete_items_for_chunk_ids(stale_chunk_ids)
+        if chunk_records_to_insert:
+            self._log_progress(f"chunk DB write started: {len(chunk_records_to_insert)} chunks")
+            persist_chunk_records(self.duckdb, chunks_to_embed)
+        if chunks_to_embed:
+            vector_started_at = time()
+            self._log_progress(f"embedding vectors started for {len(chunks_to_embed)} chunks")
+            embed_result = embed_chunks(
                 self.vector_store,
-                chunks,
+                chunks_to_embed,
                 model_name=self.settings.embedding_model,
                 batch_size=self.settings.embedding_batch_size,
                 max_length=self.settings.embedding_max_length,
                 device=self.settings.embedding_device,
+                max_batch_tokens=self.settings.embedding_max_batch_tokens,
+                provider_name=self.settings.embedding_provider,
+                api_key=self.settings.embedding_api_key,
+                base_url=self.settings.embedding_base_url,
+                retry_attempts=self.settings.embedding_retry_attempts,
+                retry_backoff_seconds=self.settings.embedding_retry_backoff_seconds,
+                max_concurrent_batches=self.settings.embedding_max_concurrent_batches,
             )
-            if self._should_log_index(index, len(changed_files)):
-                self._log_progress(
-                    f"embed progress: {index}/{len(changed_files)} files, {new_chunk_count} new chunks so far ({file_record.path})"
-                )
+            reused_embedding_count += int(embed_result.get("reused_embedding_count", 0))
+            new_embedding_count += int(embed_result.get("new_embedding_count", 0))
+            self._log_progress(
+                f"embedding vectors completed in {round(time() - vector_started_at, 2)}s: reused={reused_embedding_count}, new={new_embedding_count}, cache_hits={embed_result.get('cache_hit_count', 0)}, cache_misses={embed_result.get('cache_miss_count', 0)}, dup_reuse={embed_result.get('duplicate_content_reuse_count', 0)}, batches~={embed_result.get('planned_batch_count', 0)}/{embed_result.get('token_budget_batch_estimate', 0)}, missing_tokens~={embed_result.get('approx_missing_token_count', 0)}"
+            )
         total_chunks = existing_chunk_count + new_chunk_count
         embed_stage.output_summary = {
             "chunk_count": total_chunks,
             "updated_files": len(changed_files),
             "new_chunks": new_chunk_count,
+            "module_chunks": chunk_module_count,
+            "omitted_content_chunks": chunk_omitted_content_count,
+            "duplicate_content_chunks": chunk_duplicate_content_count,
+            "chunk_kind_counts": dict(aggregate_chunk_kind_counts),
+            "reused_embeddings": reused_embedding_count,
+            "new_embeddings": new_embedding_count,
+            "embedding_cache_hits": int(embed_result.get("cache_hit_count", 0)),
+            "embedding_cache_misses": int(embed_result.get("cache_miss_count", 0)),
+            "embedding_duplicate_content_reuse": int(embed_result.get("duplicate_content_reuse_count", 0)),
+            "embedding_unique_content_hashes": int(embed_result.get("unique_content_hash_count", 0)),
+            "embedding_requested_batch_size": int(embed_result.get("requested_batch_size", 0)),
+            "embedding_max_batch_tokens": int(embed_result.get("max_batch_tokens", 0)),
+            "embedding_planned_batch_count": int(embed_result.get("planned_batch_count", 0)),
+            "embedding_token_budget_batch_estimate": int(embed_result.get("token_budget_batch_estimate", 0)),
+            "embedding_approx_missing_token_count": int(embed_result.get("approx_missing_token_count", 0)),
+            "embedding_provider": str(embed_result.get("provider", "")),
             "embedding_runtime": embedding_runtime,
         }
         embed_stage.status = "completed"
@@ -348,61 +478,86 @@ class Coordinator:
         self._log_progress(f"embed completed: {new_chunk_count} new chunks, {total_chunks} total chunks")
 
         review_stage = StageResult(stage_name="review", status="running")
+        self._log_progress(f"review planning started for {len(plan['files_to_review'])} files")
         review_jobs = build_review_jobs(plan["files_to_review"], run_id=summary.run_id)
-        self._log_progress(f"review started for {len(review_jobs)} jobs")
         review_stage.input_summary = {
             "files_to_review": len(plan["files_to_review"]),
             "review_types": len(self.reviewers),
+            "enabled": self.settings.review_enabled,
         }
-        for job in review_jobs:
-            self.duckdb.insert_review_job(asdict(job))
-        analysis_provider = build_review_analysis_provider(self.settings.review_analysis_provider, self.settings)
-        analysis_provider_requested = self.settings.review_analysis_provider
-        analysis_provider_used = analysis_provider.provider_name
-        analysis_model_used = analysis_provider.model_name
-        analysis_provider_fallback = analysis_provider_requested != analysis_provider_used
-        self.latest_agent_analyses = []
-        if review_jobs:
-            self._log_progress(f"agent analysis provider: {analysis_provider_used} ({analysis_model_used})")
-        self.latest_agent_analyses = self._run_agent_analyses(review_jobs, analysis_provider)
-        run_legacy_review_jobs = self._should_run_legacy_review_jobs(analysis_provider_used)
-        if run_legacy_review_jobs:
-            review_results = self._run_review_jobs(review_jobs)
+        if not self.settings.review_enabled:
+            self.latest_agent_analyses = []
+            self.latest_observations = []
+            self.latest_findings = []
+            review_stage.output_summary = {
+                "job_count": len(review_jobs),
+                "reviewed_files": 0,
+                "enabled": False,
+                "agent_analysis_count": 0,
+                "observation_count": 0,
+                "finding_count": 0,
+            }
+            review_stage.status = "completed"
+            review_stage.completed_at = time()
+            summary.stage_results.append(review_stage)
+            self._log_progress(f"review skipped for {len(review_jobs)} jobs because CODER_REVIEW_ENABLED=false")
         else:
-            review_results = []
-            self._log_progress("legacy heuristic review skipped because grouped LLM review is active")
-        review_results.extend(synthesize_findings_from_agent_analyses(self.latest_agent_analyses, review_jobs))
-        self.latest_observations, self.latest_findings = merge_findings(review_results)
-        for observation in self.latest_observations:
-            self.duckdb.insert_review_observation(asdict(observation))
-        for finding in self.latest_findings:
-            record = asdict(finding)
-            existing = self.duckdb.fetch_finding_by_fingerprint(record["fingerprint"])
-            if existing is not None:
-                record["finding_id"] = existing["finding_id"]
-                record["first_seen_at"] = existing["first_seen_at"]
-                record["occurrence_count"] = existing["occurrence_count"] + record["occurrence_count"]
-            record["source_review_types"] = json.dumps(record["source_review_types"])
-            self.duckdb.upsert_finding(record)
-        review_stage.output_summary = {
-            "job_count": len(review_jobs),
-            "reviewed_files": len(plan["files_to_review"]),
-            "analysis_provider_requested": analysis_provider_requested,
-            "analysis_provider_used": analysis_provider_used,
-            "analysis_model": analysis_model_used,
-            "analysis_provider_fallback": analysis_provider_fallback,
-            "legacy_heuristic_review_enabled": run_legacy_review_jobs,
-            "agent_analysis_count": len(self.latest_agent_analyses),
-            "observation_count": len(self.latest_observations),
-            "finding_count": len(self.latest_findings),
-        }
-        review_stage.status = "completed"
-        review_stage.completed_at = time()
-        summary.stage_results.append(review_stage)
-        self._log_progress(
-            f"review completed: jobs={len(review_jobs)}, analyses={len(self.latest_agent_analyses)}, findings={len(self.latest_findings)}"
-        )
+            self._log_progress(f"review started for {len(review_jobs)} jobs")
+            self._log_progress(f"review job write started for {len(review_jobs)} jobs")
+            for job in review_jobs:
+                self.duckdb.reviews.insert_job(asdict(job))
+            self._log_progress("review job write completed")
+            analysis_provider = build_review_analysis_provider(self.settings.review_analysis_provider, self.settings)
+            analysis_provider_requested = self.settings.review_analysis_provider
+            analysis_provider_used = analysis_provider.provider_name
+            analysis_model_used = analysis_provider.model_name
+            analysis_provider_fallback = analysis_provider_requested != analysis_provider_used
+            self.latest_agent_analyses = []
+            if review_jobs:
+                self._log_progress(f"agent analysis provider: {analysis_provider_used} ({analysis_model_used})")
+            self.latest_agent_analyses = self._run_agent_analyses(review_jobs, analysis_provider)
+            run_legacy_review_jobs = self._should_run_legacy_review_jobs(analysis_provider_used)
+            if run_legacy_review_jobs:
+                review_results = self._run_review_jobs(review_jobs)
+            else:
+                review_results = []
+                self._log_progress("legacy heuristic review skipped because grouped LLM review is active")
+            review_results.extend(synthesize_findings_from_agent_analyses(self.latest_agent_analyses, review_jobs))
+            self._log_progress(f"review result merge started for {len(review_results)} results")
+            self.latest_observations, self.latest_findings = merge_findings(review_results)
+            self._log_progress(f"review persistence started: {len(self.latest_observations)} observations, {len(self.latest_findings)} findings")
+            for observation in self.latest_observations:
+                self.duckdb.reviews.insert_observation(asdict(observation))
+            for finding in self.latest_findings:
+                record = asdict(finding)
+                existing = self.duckdb.reviews.fetch_finding_by_fingerprint(record["fingerprint"])
+                if existing is not None:
+                    record["finding_id"] = existing["finding_id"]
+                    record["first_seen_at"] = existing["first_seen_at"]
+                    record["occurrence_count"] = existing["occurrence_count"] + record["occurrence_count"]
+                record["source_review_types"] = json.dumps(record["source_review_types"])
+                self.duckdb.reviews.upsert_finding(record)
+            review_stage.output_summary = {
+                "job_count": len(review_jobs),
+                "reviewed_files": len(plan["files_to_review"]),
+                "enabled": True,
+                "analysis_provider_requested": analysis_provider_requested,
+                "analysis_provider_used": analysis_provider_used,
+                "analysis_model": analysis_model_used,
+                "analysis_provider_fallback": analysis_provider_fallback,
+                "legacy_heuristic_review_enabled": run_legacy_review_jobs,
+                "agent_analysis_count": len(self.latest_agent_analyses),
+                "observation_count": len(self.latest_observations),
+                "finding_count": len(self.latest_findings),
+            }
+            review_stage.status = "completed"
+            review_stage.completed_at = time()
+            summary.stage_results.append(review_stage)
+            self._log_progress(
+                f"review completed: jobs={len(review_jobs)}, analyses={len(self.latest_agent_analyses)}, findings={len(self.latest_findings)}"
+            )
  
+        self._log_progress("manifest write started")
         manifest = {
             "status": "ready",
             "run_id": summary.run_id,
@@ -427,7 +582,8 @@ class Coordinator:
             },
         }
         self.manifest_store.write_current(manifest)
-        self.duckdb.upsert_run(
+        self._log_progress("run metadata write started")
+        self.duckdb.runs.upsert(
             {
                 "run_id": summary.run_id,
                 "run_mode": summary.run_mode,
@@ -438,6 +594,7 @@ class Coordinator:
                 "finding_count": len(self.latest_findings),
             }
         )
+        self._log_progress("technical summary generation started")
         summary.technical_summary = generate_run_summary(
             self.settings,
             summary,
@@ -446,6 +603,7 @@ class Coordinator:
             audience="technical",
         )
         summary.llm_summary = summary.technical_summary
+        self._log_progress("layperson summary generation started")
         summary.layperson_summary = generate_run_summary(
             self.settings,
             summary,
@@ -453,6 +611,7 @@ class Coordinator:
             self.latest_agent_analyses,
             audience="layperson",
         )
+        self._log_progress("report write started")
         summary.report_paths = write_run_reports(
             self.settings.data_dir,
             summary.run_id,
@@ -460,6 +619,35 @@ class Coordinator:
             summary.layperson_summary,
         )
         self._log_progress(f"reports written: {summary.report_paths}")
+        self._log_progress("run metadata refresh started")
+        self.duckdb.runs.upsert(
+            {
+                "run_id": summary.run_id,
+                "run_mode": summary.run_mode,
+                "status": "completed",
+                "file_count": len(files),
+                "symbol_count": symbol_count,
+                "chunk_count": total_chunks,
+                "finding_count": len(self.latest_findings),
+                "stage_results_json": json.dumps(
+                    [
+                        {
+                            "stage_name": stage.stage_name,
+                            "status": stage.status,
+                            "input_summary": stage.input_summary,
+                            "output_summary": stage.output_summary,
+                            "diagnostics": stage.diagnostics,
+                            "started_at": stage.started_at,
+                            "completed_at": stage.completed_at,
+                        }
+                        for stage in summary.stage_results
+                    ]
+                ),
+                "warnings_json": json.dumps(summary.warnings),
+                "errors_json": json.dumps(summary.errors),
+                "report_paths_json": json.dumps(summary.report_paths),
+            }
+        )
         summary.promoted = True
         self._log_progress(f"run {summary.run_id} completed")
         return summary

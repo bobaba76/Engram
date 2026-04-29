@@ -6,11 +6,21 @@ def _compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _render_target(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("qualified_name", "name", "target", "file_path"):
+            rendered = str(value.get(key) or "").strip()
+            if rendered:
+                return rendered
+        return ""
+    return str(value or "")
+
+
 def _format_summary_lines(payload: dict[str, Any]) -> list[str]:
     compact_summary = payload.get("compact_summary", {})
     if not isinstance(compact_summary, dict):
         compact_summary = {}
-    target = str(payload.get("target") or compact_summary.get("target") or "")
+    target = _render_target(payload.get("target") or compact_summary.get("target") or "")
     lines: list[str] = []
     task = str(payload.get("task") or "")
     compact_results = payload.get("compact_results")
@@ -95,13 +105,14 @@ def _format_summary_lines(payload: dict[str, Any]) -> list[str]:
                 lines.append(f"Symbol: {symbol} [{kind}]")
                 if file_path:
                     lines.append(f"  File: {file_path}")
-        if isinstance(compact_results, list):
-            lines.append(f"Snippet matches: {len(compact_results)}")
-            for item in compact_results[:3]:
+        snippet_items = compact_results if isinstance(compact_results, list) else snippet_results
+        if isinstance(snippet_items, list):
+            lines.append(f"Snippet matches: {len(snippet_items)}")
+            for item in snippet_items[:3]:
                 if not isinstance(item, dict):
                     continue
                 snippet_target = item.get("target") or item.get("file") or target
-                file_path = item.get("file") or ""
+                file_path = item.get("file") or item.get("file_path") or ""
                 chunk_kind = item.get("chunk_kind") or "chunk"
                 lines.append(f"Snippet: {snippet_target} [{chunk_kind}]")
                 if file_path:
@@ -109,6 +120,12 @@ def _format_summary_lines(payload: dict[str, Any]) -> list[str]:
         return lines
     if target:
         lines.append(f"Target: {target}")
+    answer = str(payload.get("answer") or "").strip()
+    if answer:
+        lines.append(f"Answer: {answer[:280]}")
+    confidence = payload.get("confidence") or compact_summary.get("confidence")
+    if confidence:
+        lines.append(f"Confidence: {confidence}")
     symbol_count = payload.get("symbol_count")
     chunk_count = payload.get("chunk_count")
     finding_count = payload.get("finding_count")
@@ -148,6 +165,70 @@ def _format_summary_lines(payload: dict[str, Any]) -> list[str]:
             count_bits.append(f"direct_edges={direct_edge_count}")
         if count_bits:
             lines.append("Counts: " + ", ".join(count_bits))
+    if "route_count" in compact_summary or "file_count" in compact_summary:
+        route_count = compact_summary.get("route_count")
+        file_count = compact_summary.get("file_count")
+        graph_edge_count = compact_summary.get("graph_edge_count")
+        count_bits = []
+        if route_count is not None:
+            count_bits.append(f"routes={route_count}")
+        if file_count is not None:
+            count_bits.append(f"files={file_count}")
+        if graph_edge_count is not None:
+            count_bits.append(f"graph_edges={graph_edge_count}")
+        if count_bits:
+            lines.append("App context: " + ", ".join(count_bits))
+    frontend_graph = compact_summary.get("frontend_graph") or payload.get("frontend_graph") or compact_summary.get("graph_signal") or payload.get("graph_signal")
+    if isinstance(frontend_graph, dict) and frontend_graph:
+        frontend_bits = []
+        frontend_file_count = frontend_graph.get("frontend_file_count")
+        if frontend_file_count is not None:
+            frontend_bits.append(f"frontend_files={frontend_file_count}")
+        frontend_graph_edge_count = frontend_graph.get("frontend_graph_edge_count")
+        if frontend_graph_edge_count is None:
+            frontend_graph_edge_count = frontend_graph.get("frontend_graph_hit_count")
+        if frontend_graph_edge_count is not None:
+            frontend_bits.append(f"frontend_graph={frontend_graph_edge_count}")
+        if frontend_graph.get("has_indirect_frontend_path"):
+            frontend_bits.append("indirect_frontend_path=yes")
+        if frontend_bits:
+            lines.append("Frontend graph: " + ", ".join(frontend_bits))
+        top_frontend_files = frontend_graph.get("top_frontend_files")
+        if not isinstance(top_frontend_files, list) or not top_frontend_files:
+            top_frontend_files = frontend_graph.get("frontend_graph_files")
+        if isinstance(top_frontend_files, list) and top_frontend_files:
+            lines.append("Frontend files: " + ", ".join(str(value) for value in top_frontend_files[:5]))
+        top_relations = frontend_graph.get("top_relations")
+        if isinstance(top_relations, dict) and top_relations:
+            lines.append("Frontend relations: " + ", ".join(f"{key}={value}" for key, value in list(top_relations.items())[:5]))
+        summary = str(frontend_graph.get("summary") or "").strip()
+        if summary:
+            lines.append(f"Frontend summary: {summary}")
+    if any(key in compact_summary for key in ("changed_file_count", "changed_symbol_count", "test_count", "snippet_count")):
+        count_bits = []
+        for key, label in (
+            ("changed_file_count", "changed_files"),
+            ("changed_symbol_count", "changed_symbols"),
+            ("test_count", "tests"),
+            ("snippet_count", "snippets"),
+        ):
+            value = compact_summary.get(key)
+            if value is not None:
+                count_bits.append(f"{label}={value}")
+        risk = compact_summary.get("risk")
+        if risk:
+            count_bits.append(f"risk={risk}")
+        if count_bits:
+            lines.append("Workflow: " + ", ".join(count_bits))
+    parser_counts = compact_summary.get("parser_counts")
+    if isinstance(parser_counts, dict) and parser_counts:
+        lines.append("Parsers: " + ", ".join(f"{key or 'unknown'}={value}" for key, value in list(parser_counts.items())[:6]))
+    file_kinds = compact_summary.get("file_kinds")
+    if isinstance(file_kinds, dict) and file_kinds:
+        lines.append("File kinds: " + ", ".join(f"{key}={value}" for key, value in list(file_kinds.items())[:6]))
+    db_tables = compact_summary.get("db_tables")
+    if isinstance(db_tables, list) and db_tables:
+        lines.append("DB tables: " + ", ".join(str(table) for table in db_tables[:8]))
     groups = compact_summary.get("groups")
     if isinstance(groups, dict) and groups:
         group_bits = []
@@ -167,6 +248,9 @@ def _format_summary_lines(payload: dict[str, Any]) -> list[str]:
         ("top_call_targets", "Calls"),
         ("top_reference_targets", "References"),
         ("top_inbound_sources", "Dependents"),
+        ("top_routes", "Routes"),
+        ("top_files", "Files"),
+        ("top_processes", "Processes"),
     ):
         values = compact_summary.get(key)
         if isinstance(values, list) and values:

@@ -4,6 +4,9 @@ import hashlib
 from functools import lru_cache
 from typing import Iterable
 
+EMBEDDER_VERSION = "2"
+CHARS_PER_TOKEN_ESTIMATE = 4
+
 torch = None
 torch_functional = None
 AutoModel = None
@@ -74,6 +77,7 @@ def get_embedding_runtime_info(model_name: str, requested_device: str) -> dict[s
         "torch_version": "",
         "torch_cuda_build": "",
         "dependencies_loaded": False,
+        "embedder_version": EMBEDDER_VERSION,
         "reason": "embedding dependencies unavailable",
     }
     if not model_name.startswith("jinaai/"):
@@ -88,11 +92,10 @@ def get_embedding_runtime_info(model_name: str, requested_device: str) -> dict[s
         info["cuda_available"] = bool(torch.cuda.is_available())
     resolved_device = _resolve_device(requested_device)
     info["resolved_device"] = resolved_device
-    tokenizer, model = _load_jina_model(model_name)
-    if tokenizer is None or model is None or torch is None or torch_functional is None:
-        info["reason"] = "transformer model load failed; using deterministic fallback"
+    if torch is None or torch_functional is None:
+        info["reason"] = "transformer dependencies unavailable; using deterministic fallback"
         return info
-    info["backend"] = "jina_transformers"
+    info["backend"] = "jina_transformers_available"
     if requested_device and requested_device.strip().lower() == "cuda" and not info["torch_cuda_build"]:
         info["reason"] = "PyTorch CPU-only build detected; install a CUDA-enabled torch build"
         return info
@@ -116,6 +119,34 @@ def embedding_backend_name(model_name: str) -> str:
     return "deterministic_fallback"
 
 
+def embedding_cache_namespace(model_name: str, max_length: int, device: str = "") -> str:
+    normalized_device = (device or "auto").strip().lower()
+    return f"v{EMBEDDER_VERSION}:{model_name}:maxlen={max_length}:device={normalized_device}"
+
+
+def estimate_tokens(text: str) -> int:
+    return max(1, len(text or "") // CHARS_PER_TOKEN_ESTIMATE)
+
+
+def _token_aware_batches(texts: list[str], batch_size: int, max_batch_tokens: int) -> list[list[str]]:
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    safe_batch_size = max(int(batch_size or 1), 1)
+    safe_token_limit = max(int(max_batch_tokens or 1), 1)
+    for text in texts:
+        token_count = estimate_tokens(text)
+        if current and (len(current) >= safe_batch_size or current_tokens + token_count > safe_token_limit):
+            batches.append(current)
+            current = []
+            current_tokens = 0
+        current.append(text)
+        current_tokens += token_count
+    if current:
+        batches.append(current)
+    return batches
+
+
 @lru_cache(maxsize=2)
 def _load_jina_model(model_name: str):
     if not _load_embedding_dependencies():
@@ -137,17 +168,16 @@ def embed_texts(
     batch_size: int = 24,
     max_length: int = 512,
     device: str = "cpu",
+    max_batch_tokens: int = 12000,
 ) -> list[list[float]]:
     text_list = list(texts)
-    info = get_embedding_runtime_info(model_name, device)
     if model_name.startswith("jinaai/"):
         tokenizer, model = _load_jina_model(model_name)
         if tokenizer is not None and model is not None and torch is not None and torch_functional is not None:
             resolved_device = _resolve_device(device)
             model = model.to(resolved_device)
             embeddings_batches = []
-            for start in range(0, len(text_list), batch_size):
-                batch = text_list[start:start + batch_size]
+            for batch in _token_aware_batches(text_list, batch_size=batch_size, max_batch_tokens=max_batch_tokens):
                 encoded_input = tokenizer(batch, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
                 encoded_input = {key: value.to(resolved_device) for key, value in encoded_input.items()}
                 with torch.inference_mode():

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from storage.duckdb_store import DuckDBStore
 from services.route_map_service import route_map
+
+if TYPE_CHECKING:
+    from storage.duckdb_store import DuckDBStore
 
 
 def api_impact(repo_root: Path, duckdb_store: DuckDBStore, route: str = "") -> dict[str, object]:
