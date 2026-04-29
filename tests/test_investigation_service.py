@@ -373,6 +373,16 @@ def test_investigate_codebase_impact_intent_prefers_impact_guidance(monkeypatch)
     assert any(tool["tool"] == "impact_analysis" for tool in payload["next_tools"])
 
 
+def test_investigation_search_task_recognizes_affect_as_impact_intent() -> None:
+    task, plan = investigation_service.investigation_search_task(
+        "what will Coordinator.run affect",
+        limit=5,
+    )
+
+    assert task == "Coordinator.run"
+    assert plan["intent"]["primary"] == "impact"
+
+
 def test_investigate_codebase_exposes_query_rewrite_metadata(monkeypatch) -> None:
     repo_root = Path("C:/repo")
 
@@ -684,6 +694,118 @@ def test_investigation_search_task_narrows_broad_question() -> None:
     assert plan["guardrails"]["search_limit"] == 4
 
 
+def test_should_allow_broad_vector_fallback_rejects_vague_camel_case_term() -> None:
+    task, plan = investigation_service.investigation_search_task(
+        "where is defaultView behavior handled",
+        limit=5,
+    )
+
+    assert task == "defaultView"
+    assert investigation_service.should_allow_broad_vector_fallback(task, plan["query_rewrite"]) is False
+
+
+def test_should_allow_broad_vector_fallback_allows_specific_symbol_like_target() -> None:
+    task, plan = investigation_service.investigation_search_task(
+        "where is resolveCustomer implemented",
+        limit=5,
+    )
+
+    assert task == "resolveCustomer"
+    assert investigation_service.should_allow_broad_vector_fallback(task, plan["query_rewrite"]) is True
+
+
+def test_should_allow_broad_vector_fallback_allows_route_like_target() -> None:
+    task, plan = investigation_service.investigation_search_task(
+        "where is /api/customers handled",
+        limit=5,
+    )
+
+    assert task == "/api/customers"
+    assert investigation_service.should_allow_broad_vector_fallback(task, plan["query_rewrite"]) is True
+
+
+def test_broad_lexical_search_terms_keeps_safe_specific_terms_only() -> None:
+    task, plan = investigation_service.investigation_search_task(
+        "where is defaultView behavior handled in /api/customers",
+        limit=5,
+    )
+
+    terms = investigation_service.broad_lexical_search_terms(task, plan["query_rewrite"], limit=4)
+
+    assert "api/customers" in terms or "/api/customers" in terms
+    assert "behavior" not in terms
+    assert "handled" not in terms
+
+
+def test_broad_lexical_search_terms_adds_split_camel_case_variant() -> None:
+    task, plan = investigation_service.investigation_search_task(
+        "where is resolveCustomer implemented",
+        limit=5,
+    )
+
+    terms = investigation_service.broad_lexical_search_terms(task, plan["query_rewrite"], limit=4)
+
+    assert "resolveCustomer" in terms
+    assert "resolve Customer" in terms
+
+
+def test_prioritize_search_hits_prefers_exact_target_over_generic_neighbor() -> None:
+    prioritized = investigation_service._prioritize_search_hits(
+        [
+            {
+                "target": "main",
+                "file": "app/main.py",
+                "score": 1.3,
+                "sources": ["chunk", "regex"],
+            },
+            {
+                "target": "Coordinator.run",
+                "file": "app/coordinator.py",
+                "score": 1.2,
+                "sources": ["chunk", "regex"],
+            },
+        ],
+        seed_target="Coordinator.run",
+        resolved_target="Coordinator.run",
+    )
+
+    assert prioritized[0]["target"] == "Coordinator.run"
+
+
+def test_guidance_next_tools_dedupes_same_tool_and_target() -> None:
+    tools = investigation_service._guidance_next_tools(
+        {
+            "ambiguous": False,
+            "has_graph_context": False,
+            "has_routes": False,
+            "has_processes": False,
+            "weak_primary": False,
+            "intent": {"primary": "location"},
+        },
+        resolved_target="Coordinator.run",
+        question="where is Coordinator.run handled",
+    )
+
+    source_tools = [item for item in tools if item["tool"] == "get_source_context" and item["target"] == "Coordinator.run"]
+    assert len(source_tools) == 1
+
+
+def test_alternate_discovery_anchors_prefers_specific_safe_candidates() -> None:
+    anchors = investigation_service.alternate_discovery_anchors(
+        "defaultView",
+        {
+            "symbol_terms": ["defaultView", "useSavedViews", "behavior"],
+            "route_terms": [],
+            "file_terms": ["frontend/src/hooks/useSavedViews.ts"],
+            "search_seeds": ["defaultView", "useSavedViews"],
+            "core_terms": ["defaultview", "savedviews", "behavior"],
+        },
+        limit=2,
+    )
+
+    assert anchors == ["frontend/src/hooks/useSavedViews.ts", "useSavedViews"]
+
+
 def test_investigate_codebase_skips_retry_for_broad_questions(monkeypatch) -> None:
     repo_root = Path("C:/repo")
     attempts = []
@@ -796,3 +918,264 @@ def test_investigate_codebase_replaces_generic_target_with_narrowed_term(monkeyp
     assert attempts == ["defaultView", "defaultView"]
     assert payload["target"] == "defaultView"
     assert any("Generic target resolution was replaced" in warning for warning in payload["warnings"])
+
+
+def test_investigate_codebase_uses_cheap_symbol_discovery_when_search_is_empty(monkeypatch) -> None:
+    repo_root = Path("C:/repo")
+
+    class _DiscoveryStore(_Store):
+        def fetch_symbols_for_target(self, target, limit=50):
+            if str(target) == "defaultView":
+                return [
+                    {
+                        "qualified_name": "frontend.saved_views.defaultViewState",
+                        "name": "defaultViewState",
+                        "file_path": "frontend/src/hooks/useSavedViews.ts",
+                        "kind": "function",
+                        "start_line": 10,
+                        "end_line": 30,
+                    }
+                ]
+            if str(target) == "defaultview":
+                return [
+                    {
+                        "qualified_name": "frontend.saved_views.defaultViewLabel",
+                        "name": "defaultViewLabel",
+                        "file_path": "frontend/src/components/SavedViewsToolbar.tsx",
+                        "kind": "const",
+                        "start_line": 3,
+                        "end_line": 8,
+                    }
+                ]
+            return []
+
+    monkeypatch.setattr(
+        investigation_service,
+        "resolve_tool_target",
+        lambda duckdb_store, repo_root, target="", limit=5: {
+            "status": "not_found",
+            "resolved_target": target,
+            "compact_summary": {"warnings": []},
+        },
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_source_context",
+        lambda duckdb_store, target, limit=3, repo_root=None: {"compact_results": []},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_unified_context",
+        lambda duckdb_store, kuzu_store, target, max_matches=3, neighborhood_depth=1: {"compact_summary": {"caller_count": 0, "callee_count": 0, "dependency_counts": {}, "top_neighbors": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "app_context",
+        lambda repo_root, duckdb_store, kuzu_store, target="", limit=6: {"compact_summary": {"top_routes": [], "top_files": [], "top_processes": [], "file_kinds": {}, "graph_edge_count": 0}},
+    )
+
+    payload = investigation_service.investigate_codebase(
+        repo_root=repo_root,
+        duckdb_store=_DiscoveryStore(),
+        kuzu_store=_Kuzu(),
+        question="where is defaultView behavior handled",
+        search_payload={"compact_results": []},
+        limit=5,
+    )
+
+    assert len(payload["discovered_symbols"]) == 2
+    assert "cheap lexical discovery" in " ".join(payload["warnings"]).lower()
+    assert "nearby candidates" in payload["answer"]
+    assert payload["compact_summary"]["discovered_symbols"]
+
+
+def test_investigate_codebase_tries_alternate_discovery_anchors_when_primary_is_empty(monkeypatch) -> None:
+    repo_root = Path("C:/repo")
+
+    class _DiscoveryStore(_Store):
+        def fetch_symbols_for_target(self, target, limit=50):
+            if str(target) == "useSavedViews":
+                return [
+                    {
+                        "qualified_name": "frontend.saved_views.useSavedViews",
+                        "name": "useSavedViews",
+                        "file_path": "frontend/src/hooks/useSavedViews.ts",
+                        "kind": "function",
+                        "start_line": 5,
+                        "end_line": 35,
+                    }
+                ]
+            return []
+
+    monkeypatch.setattr(
+        investigation_service,
+        "resolve_tool_target",
+        lambda duckdb_store, repo_root, target="", limit=5: {
+            "status": "not_found",
+            "resolved_target": target,
+            "compact_summary": {"warnings": []},
+        },
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_source_context",
+        lambda duckdb_store, target, limit=3, repo_root=None: {"compact_results": []},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_unified_context",
+        lambda duckdb_store, kuzu_store, target, max_matches=3, neighborhood_depth=1: {"compact_summary": {"caller_count": 0, "callee_count": 0, "dependency_counts": {}, "top_neighbors": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "app_context",
+        lambda repo_root, duckdb_store, kuzu_store, target="", limit=6: {"compact_summary": {"top_routes": [], "top_files": [], "top_processes": [], "file_kinds": {}, "graph_edge_count": 0}},
+    )
+
+    payload = investigation_service.investigate_codebase(
+        repo_root=repo_root,
+        duckdb_store=_DiscoveryStore(),
+        kuzu_store=_Kuzu(),
+        question="where is defaultView behavior handled",
+        search_payload={
+            "compact_results": [],
+            "investigation_search_plan": {
+                "query_rewrite": {
+                    "core_terms": ["defaultview", "savedviews", "behavior"],
+                    "symbol_terms": ["defaultView", "useSavedViews", "behavior"],
+                    "route_terms": [],
+                    "file_terms": [],
+                    "search_seeds": ["defaultView", "useSavedViews"],
+                    "rewritten_queries": ["where is defaultView behavior handled"],
+                }
+            },
+        },
+        limit=5,
+    )
+
+    assert payload["discovered_symbols"]
+    assert payload["discovered_symbols"][0]["qualified_name"] == "frontend.saved_views.useSavedViews"
+    assert payload["investigation_passes"]["alternate_discovery_anchors"] == ["useSavedViews", "savedviews"]
+    assert "alternate anchors" in " ".join(payload["warnings"]).lower()
+
+
+def test_investigate_codebase_uses_chunk_text_for_weak_ui_target(monkeypatch) -> None:
+    repo_root = Path("C:/repo")
+
+    class _UiStore(_Store):
+        def fetch_symbols_for_target(self, target, limit=50):
+            return []
+
+        def search_chunks_content(self, query, limit=20):
+            if str(query).strip().lower() in {"default view", "defaultview"}:
+                return [{"file_path": "frontend/src/hooks/useSavedViews.ts"}]
+            return []
+
+        def fetch_symbols_for_file(self, file_path):
+            if file_path == "frontend/src/hooks/useSavedViews.ts":
+                return [
+                    {
+                        "qualified_name": "frontend.saved_views.useSavedViews",
+                        "name": "useSavedViews",
+                        "file_path": file_path,
+                        "kind": "function",
+                        "start_line": 5,
+                        "end_line": 35,
+                    }
+                ]
+            return []
+
+    monkeypatch.setattr(
+        investigation_service,
+        "resolve_tool_target",
+        lambda duckdb_store, repo_root, target="", limit=5: {
+            "status": "not_found",
+            "resolved_target": target,
+            "compact_summary": {"warnings": []},
+        },
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_source_context",
+        lambda duckdb_store, target, limit=3, repo_root=None: {"compact_results": []},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_unified_context",
+        lambda duckdb_store, kuzu_store, target, max_matches=3, neighborhood_depth=1: {"compact_summary": {"caller_count": 0, "callee_count": 0, "dependency_counts": {}, "top_neighbors": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "app_context",
+        lambda repo_root, duckdb_store, kuzu_store, target="", limit=6: {"compact_summary": {"top_routes": [], "top_files": [], "top_processes": [], "file_kinds": {}, "graph_edge_count": 0}},
+    )
+
+    payload = investigation_service.investigate_codebase(
+        repo_root=repo_root,
+        duckdb_store=_UiStore(),
+        kuzu_store=_Kuzu(),
+        question="where is defaultView behavior handled",
+        search_payload={"compact_results": []},
+        limit=5,
+    )
+
+    assert payload["discovered_symbols"]
+    assert payload["discovered_symbols"][0]["qualified_name"] == "frontend.saved_views.useSavedViews"
+    assert any("weak ui-like target" in warning.lower() for warning in payload["warnings"])
+
+
+def test_investigate_codebase_includes_change_guidance(monkeypatch) -> None:
+    repo_root = Path("C:/repo")
+
+    monkeypatch.setattr(
+        investigation_service,
+        "resolve_tool_target",
+        lambda duckdb_store, repo_root, target="", limit=5: {
+            "status": "found",
+            "resolved_target": "Coordinator.run",
+            "compact_summary": {"warnings": []},
+        },
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_source_context",
+        lambda duckdb_store, target, limit=3, repo_root=None: {"compact_results": [{"file": "app/coordinator.py", "target": target, "lines": [167, 277], "retrieval_source": "chunk_index"}]},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_unified_context",
+        lambda duckdb_store, kuzu_store, target, max_matches=3, neighborhood_depth=1: {"compact_summary": {"caller_count": 1, "callee_count": 1, "dependency_counts": {}, "top_neighbors": [{"node": "Coordinator._run_agent_analyses", "edge_count": 1}]}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "app_context",
+        lambda repo_root, duckdb_store, kuzu_store, target="", limit=6: {"compact_summary": {"top_routes": [], "top_files": ["app/coordinator.py", "app/main.py"], "top_processes": [], "file_kinds": {"backend": 1}, "graph_edge_count": 0}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "find_tests_for_target",
+        lambda duckdb_store, target, limit=4: {
+            "compact_results": [
+                {"file": "tests/test_coordinator.py", "target": "test_run", "kind": "test", "score": 5},
+            ],
+            "compact_summary": {"top_files": ["tests/test_coordinator.py"]},
+        },
+    )
+
+    payload = investigation_service.investigate_codebase(
+        repo_root=repo_root,
+        duckdb_store=_Store(),
+        kuzu_store=_Kuzu(),
+        question="what will Coordinator.run affect",
+        search_payload={
+            "compact_results": [
+                {"target": "Coordinator.run", "file": "app/coordinator.py", "lines": [167, 277], "why_relevant": "direct symbol match", "sources": ["symbol", "chunk"]},
+            ]
+        },
+        limit=5,
+    )
+
+    assert payload["change_guidance"]["related_files"][:2] == ["app/coordinator.py", "app/main.py"]
+    assert payload["change_guidance"]["recommended_tests"][0]["file"] == "tests/test_coordinator.py"
+    assert payload["change_guidance"]["likely_impact_targets"] == ["Coordinator._run_agent_analyses"]
+    assert "Suggested tests: 1" in payload["answer_outline"]

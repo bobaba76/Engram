@@ -1,0 +1,42 @@
+[
+  {
+    "question": "where is Coordinator.run handled",
+    "max_seconds": 2.0,
+    "expect_target_contains": "Coordinator.run",
+    "expect_top_file_contains": "app/coordinator.py",
+    "expect_next_tools": ["get_source_context"]
+  },
+  {
+    "question": "where is ProcessRepository.insert_relationships handled",
+    "max_seconds": 2.0,
+    "expect_target_contains": "ProcessRepository.insert_relationships",
+    "expect_top_file_contains": "storage/repositories.py",
+    "expect_next_tools": ["impact_analysis", "unified_context"]
+  },
+  {
+    "question": "where is index_health handled",
+    "max_seconds": 2.0,
+    "expect_target_contains": "index_health",
+    "expect_top_file_contains": "services/index_health_service.py",
+    "expect_next_tools": ["get_source_context"]
+  },
+  {
+    "question": "what will Coordinator.run affect",
+    "max_seconds": 2.0,
+    "expect_target_contains": "Coordinator.run",
+    "expect_top_file_contains": "app/coordinator.py",
+    "expect_next_tools": ["impact_analysis"]
+  },
+  {
+    "question": "what tests should I run for Coordinator.run",
+    "max_seconds": 2.0,
+    "expect_target_contains": "Coordinator.run",
+    "expect_next_tools": ["find_tests_for_target"]
+  },
+  {
+    "question": "where is defaultView behavior handled",
+    "max_seconds": 2.0,
+    "expect_partial": true,
+    "expect_next_tools": ["get_source_context"]
+  }
+]
