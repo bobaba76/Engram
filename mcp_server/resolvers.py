@@ -57,20 +57,42 @@ def resolve_tool_target(
         )
     primary = matches[0] if matches else {}
     ambiguous = ambiguity_status(candidates)
+    status = "ambiguous" if ambiguous else "found" if matches else "not_found"
+    warnings: list[str] = []
+    if ambiguous:
+        warnings.append("Target resolution is ambiguous; pass file_path, kind, or symbol_uid.")
+    elif not matches:
+        warnings.append("No indexed target matched exactly; try resolve_target with a more specific symbol or file path.")
+    next_tools = [
+        {"tool": "get_source_context", "why": "Read concrete source for the resolved symbol."},
+        {"tool": "unified_context", "why": "Inspect callers, callees, and dependencies for the resolved symbol."},
+    ] if matches and not ambiguous else [
+        {"tool": "find_symbols", "why": "List candidate symbols when resolution is weak or ambiguous."},
+        {"tool": "semantic_code_search", "why": "Search by natural language when you do not yet have an exact target."},
+    ]
     return {
         "target": target,
         "normalized_target": normalized_target,
-        "status": "ambiguous" if ambiguous else "found" if matches else "not_found",
+        "status": status,
+        "confidence": primary.get("confidence", "low") if matches and not ambiguous else "low" if ambiguous else "none",
+        "partial": ambiguous,
         "resolved_target": primary.get("qualified_name") or primary.get("name") or normalized_target,
         "resolved_uid": primary.get("uid") or resolved_symbol_uid or "",
         "matches": matches,
+        "warnings": warnings,
+        "next_tools": next_tools,
         "compact_results": matches,
         "compact_summary": {
             "target": normalized_target,
-            "status": "ambiguous" if ambiguous else "found" if matches else "not_found",
+            "status": status,
+            "confidence": primary.get("confidence", "low") if matches and not ambiguous else "low" if ambiguous else "none",
+            "partial": ambiguous,
             "match_count": len(matches),
             "resolved_target": primary.get("qualified_name") or primary.get("name") or "",
             "resolved_uid": primary.get("uid") or resolved_symbol_uid or "",
-            "warnings": ["Target resolution is ambiguous; pass file_path, kind, or symbol_uid."] if ambiguous else [],
+            "warnings": warnings,
+            "top_symbols": [item.get("qualified_name") or item.get("name") or "" for item in matches[:5]],
+            "top_files": [item.get("file_path") or "" for item in matches[:5]],
+            "next_tools": next_tools,
         },
     }

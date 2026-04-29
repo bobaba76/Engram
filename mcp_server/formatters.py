@@ -6,6 +6,19 @@ def _compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _strip_large_internal_fields(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_strip_large_internal_fields(item) for item in value]
+    if isinstance(value, dict):
+        stripped: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "vector":
+                continue
+            stripped[key] = _strip_large_internal_fields(item)
+        return stripped
+    return value
+
+
 def _render_target(value: Any) -> str:
     if isinstance(value, dict):
         for key in ("qualified_name", "name", "target", "file_path"):
@@ -14,6 +27,155 @@ def _render_target(value: Any) -> str:
                 return rendered
         return ""
     return str(value or "")
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _dedupe_strings(values: list[Any], limit: int = 8) -> list[str]:
+    seen: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.append(text)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def _derive_status(payload: dict[str, Any], compact_summary: dict[str, Any]) -> str:
+    for value in (
+        payload.get("status"),
+        compact_summary.get("status"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    if payload.get("error"):
+        return "error"
+    if compact_summary.get("warnings") and not payload.get("matches") and not payload.get("compact_results"):
+        return "partial"
+    return "ok"
+
+
+def _derive_partial(payload: dict[str, Any], compact_summary: dict[str, Any], status: str) -> bool:
+    if isinstance(payload.get("partial"), bool):
+        return bool(payload.get("partial"))
+    if isinstance(compact_summary.get("partial"), bool):
+        return bool(compact_summary.get("partial"))
+    if status == "partial":
+        return True
+    warnings = _as_list(compact_summary.get("warnings")) + _as_list(payload.get("warnings"))
+    warning_text = " ".join(str(item or "").lower() for item in warnings)
+    return "capped" in warning_text or "truncated" in warning_text or "partial" in warning_text
+
+
+def _derive_confidence(payload: dict[str, Any], compact_summary: dict[str, Any]) -> str:
+    for value in (payload.get("confidence"), compact_summary.get("confidence")):
+        text = str(value or "").strip()
+        if text:
+            return text
+    if _as_list(payload.get("matches")) or _as_list(payload.get("compact_results")):
+        return "medium"
+    status = str(payload.get("status") or compact_summary.get("status") or "").strip().lower()
+    if status == "ambiguous":
+        return "low"
+    if status in {"found", "ok"}:
+        return "medium"
+    return "low"
+
+
+def _derive_warnings(payload: dict[str, Any], compact_summary: dict[str, Any]) -> list[str]:
+    return _dedupe_strings([
+        *_as_list(payload.get("warnings")),
+        *_as_list(compact_summary.get("warnings")),
+    ], limit=8)
+
+
+def _derive_top_files(payload: dict[str, Any], compact_summary: dict[str, Any]) -> list[str]:
+    candidates: list[Any] = []
+    candidates.extend(_as_list(compact_summary.get("top_files")))
+    candidates.extend(_as_list(compact_summary.get("app_files")))
+    for item in _as_list(payload.get("compact_results"))[:8]:
+        if isinstance(item, dict):
+            candidates.append(item.get("file") or item.get("file_path"))
+    for item in _as_list(payload.get("matches"))[:8]:
+        if isinstance(item, dict):
+            candidates.append(item.get("file") or item.get("file_path"))
+    for item in _as_list(payload.get("snippet_results"))[:8]:
+        if isinstance(item, dict):
+            candidates.append(item.get("file") or item.get("file_path"))
+    return _dedupe_strings(candidates, limit=8)
+
+
+def _derive_top_symbols(payload: dict[str, Any], compact_summary: dict[str, Any]) -> list[str]:
+    candidates: list[Any] = []
+    candidates.extend(_as_list(compact_summary.get("top_symbols")))
+    for item in _as_list(payload.get("matches"))[:8]:
+        if isinstance(item, dict):
+            candidates.append(item.get("qualified_name") or item.get("name") or item.get("symbol"))
+    for item in _as_list(payload.get("compact_results"))[:8]:
+        if isinstance(item, dict):
+            candidates.append(item.get("target") or item.get("qualified_name") or item.get("name"))
+    if payload.get("resolved_target"):
+        candidates.append(payload.get("resolved_target"))
+    return _dedupe_strings(candidates, limit=8)
+
+
+def _derive_next_tools(payload: dict[str, Any], compact_summary: dict[str, Any]) -> list[dict[str, str]]:
+    existing = _as_list(payload.get("next_tools")) or _as_list(compact_summary.get("next_tools"))
+    normalized: list[dict[str, str]] = []
+    for item in existing:
+        if isinstance(item, dict) and str(item.get("tool") or "").strip():
+            normalized.append({
+                "tool": str(item.get("tool") or "").strip(),
+                "why": str(item.get("why") or "").strip(),
+            })
+    if normalized:
+        return normalized[:6]
+    target = _render_target(payload.get("target") or compact_summary.get("target") or "")
+    task = str(payload.get("task") or "").strip()
+    suggested: list[dict[str, str]] = []
+    if target and (_as_list(payload.get("matches")) or payload.get("resolved_target")):
+        suggested.append({"tool": "get_source_context", "why": "Read concrete source snippets for the resolved target."})
+        suggested.append({"tool": "unified_context", "why": "Inspect nearby callers, callees, and dependencies."})
+    if task:
+        suggested.append({"tool": "resolve_target", "why": "Pin broad search results to an exact symbol before graph-heavy follow-up."})
+    if compact_summary.get("changed_file_count") or compact_summary.get("changed_symbol_count"):
+        suggested.append({"tool": "suggest_tests_for_change", "why": "Pick the most relevant tests for the current edits."})
+    return suggested[:4]
+
+
+def _normalize_contract(payload: dict[str, Any]) -> dict[str, Any]:
+    compact_summary = payload.get("compact_summary", {})
+    if not isinstance(compact_summary, dict):
+        compact_summary = {}
+    status = _derive_status(payload, compact_summary)
+    warnings = _derive_warnings(payload, compact_summary)
+    confidence = _derive_confidence(payload, compact_summary)
+    top_files = _derive_top_files(payload, compact_summary)
+    top_symbols = _derive_top_symbols(payload, compact_summary)
+    next_tools = _derive_next_tools(payload, compact_summary)
+    partial = _derive_partial(payload, compact_summary, status)
+    enriched_summary = dict(compact_summary)
+    enriched_summary.setdefault("status", status)
+    enriched_summary["warnings"] = warnings
+    enriched_summary["confidence"] = confidence
+    enriched_summary["top_files"] = top_files
+    enriched_summary["top_symbols"] = top_symbols
+    enriched_summary["next_tools"] = next_tools
+    enriched_summary["partial"] = partial
+    enriched = dict(payload)
+    enriched["status"] = status
+    enriched["warnings"] = warnings
+    enriched["confidence"] = confidence
+    enriched["top_files"] = top_files
+    enriched["top_symbols"] = top_symbols
+    enriched["next_tools"] = next_tools
+    enriched["partial"] = partial
+    enriched["compact_summary"] = enriched_summary
+    return enriched
 
 
 def _format_summary_lines(payload: dict[str, Any]) -> list[str]:
@@ -285,8 +447,9 @@ def _format_summary_lines(payload: dict[str, Any]) -> list[str]:
 def enrich_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"result": payload}
-    summary_lines = _format_summary_lines(payload)
-    enriched = dict(payload)
+    payload = _strip_large_internal_fields(payload)
+    enriched = _normalize_contract(payload)
+    summary_lines = _format_summary_lines(enriched)
     enriched["summary_text"] = "\n".join(summary_lines) if summary_lines else ""
     enriched["highlights"] = summary_lines
     return enriched

@@ -23,7 +23,7 @@ from services.graph_service import get_callers_and_callees, get_graph_neighborho
 from services.impact_service import analyze_impact
 from services.index_health_service import index_health
 from services.index_status_service import get_index_status, get_recent_runs, get_run_metrics
-from services.investigation_service import investigate_codebase, investigation_search_task
+from services.investigation_service import broad_lexical_search_terms, investigate_codebase, investigation_search_task, should_allow_broad_vector_fallback
 from services.process_catalog_service import get_symbol_process_participation, list_processes
 from services.process_service import trace_execution_flows
 from services.rename_service import preview_rename
@@ -389,7 +389,13 @@ def main() -> int:
     def investigate_codebase_tool(question: str, limit: int = 5, repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
         search_task, search_plan = investigation_search_task(question, limit=limit)
-        search_limit = int(search_plan.get("guardrails", {}).get("search_limit", limit) or limit) if isinstance(search_plan.get("guardrails", {}), dict) else limit
+        intent = search_plan.get("intent", {}) if isinstance(search_plan.get("intent", {}), dict) else {}
+        guardrails = search_plan.get("guardrails", {}) if isinstance(search_plan.get("guardrails", {}), dict) else {}
+        broad_question = bool(guardrails.get("broad_question"))
+        impact_question = str(intent.get("primary", "general") or "general") == "impact"
+        safe_first_pass = broad_question or impact_question
+        search_limit = int(guardrails.get("search_limit", limit) or limit)
+        lexical_terms = broad_lexical_search_terms(search_task, search_plan.get("query_rewrite", {}), limit=4) if safe_first_pass else [search_task]
         search_payload = semantic_code_search(
             context["vector_store"],
             task=search_task,
@@ -402,7 +408,52 @@ def main() -> int:
             provider_name=context["settings"].embedding_provider,
             api_key=context["settings"].embedding_api_key,
             base_url=context["settings"].embedding_base_url,
+            max_variants=1 if safe_first_pass else 3,
+            include_vector=not safe_first_pass,
+            include_graph=not safe_first_pass,
+            include_expansion=not safe_first_pass,
+            extra_query_terms=lexical_terms,
         )
+        if safe_first_pass and isinstance(search_payload, dict):
+            retrieval_diag = search_payload.get("retrieval_diagnostics", {})
+            if isinstance(retrieval_diag, dict):
+                retrieval_diag["investigation_safe_first_pass"] = True
+                retrieval_diag["impact_safe_path"] = impact_question
+                retrieval_diag["broad_safe_path"] = broad_question
+        if safe_first_pass and isinstance(search_payload, dict) and not search_payload.get("compact_results") and should_allow_broad_vector_fallback(search_task, search_plan.get("query_rewrite", {})):
+            fallback_payload = semantic_code_search(
+                context["vector_store"],
+                task=search_task,
+                model_name=context["settings"].embedding_model,
+                duckdb_store=context["duckdb_store"],
+                kuzu_store=_get_kuzu_store(repo),
+                limit=min(search_limit, 3),
+                max_length=context["settings"].embedding_max_length,
+                device=context["settings"].embedding_device,
+                provider_name=context["settings"].embedding_provider,
+                api_key=context["settings"].embedding_api_key,
+                base_url=context["settings"].embedding_base_url,
+                max_variants=1,
+                include_vector=True,
+                include_graph=False,
+                include_expansion=False,
+                extra_query_terms=lexical_terms,
+            )
+            if isinstance(fallback_payload, dict):
+                fallback_payload["investigation_search_plan"] = search_plan
+                fallback_diag = fallback_payload.get("retrieval_diagnostics", {})
+                if isinstance(fallback_diag, dict):
+                    fallback_diag["fallback_from_lexical_only"] = True
+                    fallback_diag["impact_safe_path"] = impact_question
+                    fallback_diag["broad_safe_path"] = broad_question
+                search_payload = fallback_payload
+        elif safe_first_pass and isinstance(search_payload, dict) and not search_payload.get("compact_results"):
+            fallback_diag = search_payload.get("retrieval_diagnostics", {})
+            if isinstance(fallback_diag, dict):
+                fallback_diag["fallback_from_lexical_only"] = False
+                fallback_diag["fallback_skipped_broad_target"] = True
+                fallback_diag["impact_safe_path"] = impact_question
+                fallback_diag["broad_safe_path"] = broad_question
         if isinstance(search_payload, dict):
             search_payload.setdefault("investigation_search_plan", search_plan)
         return investigate_codebase(
@@ -497,21 +548,21 @@ def main() -> int:
         ("get_recent_runs", get_recent_runs_tool, "List recent persisted index runs including parsed stage summaries."),
         ("get_run_metrics", get_run_metrics_tool, "Show parsed persisted stage metrics for a specific run ID."),
         ("reindex_project", reindex_project_tool, "Run an incremental or full index refresh for a repository."),
-        ("unified_context", unified_context_tool, "Resolve a target and return matches, callers/callees, dependencies, and graph neighborhood."),
-        ("impact_analysis", impact_analysis_tool, "Estimate upstream or downstream impact for a symbol target."),
+        ("unified_context", unified_context_tool, "Resolve an exact or near-exact target and return matches, callers/callees, dependencies, and graph neighborhood. Prefer after resolve_target for broad names."),
+        ("impact_analysis", impact_analysis_tool, "Estimate upstream or downstream impact for a symbol target. Prefer exact symbols or resolved targets; broad inputs may return partial results with warnings."),
         ("graph_query", graph_query_tool, "Execute a read-only graph query against the indexed Kuzu graph."),
         ("detect_changes", detect_changes_tool, "Analyze changed files and related graph impact for the working tree or git ref."),
         ("route_map", route_map_tool, "Map API/frontend route strings to likely files and symbols."),
         ("api_impact", api_impact_tool, "Estimate code impact for an API route."),
-        ("app_context", app_context_tool, "Map app-level context across routes, files, tables, graph edges, and processes."),
-        ("resolve_target", resolve_target_tool, "Resolve a file, symbol name, or symbol UID to the indexed target Coder will use."),
+        ("app_context", app_context_tool, "Map app-level context across routes, files, tables, graph edges, and processes. Broad natural-language targets are capped for safety and may return partial context."),
+        ("resolve_target", resolve_target_tool, "Resolve a file, symbol name, or symbol UID to the indexed target Coder will use. Best first step before graph-heavy symbol tools."),
         ("trace_processes", trace_processes_tool, "Trace execution/process flows around a target symbol."),
         ("list_processes", list_processes_tool, "List inferred process clusters from the indexed codebase."),
         ("symbol_process_participation", symbol_process_participation_tool, "Show process clusters involving a target symbol."),
         ("preview_rename", preview_rename_tool, "Preview references that may need edits for a symbol rename."),
-        ("semantic_code_search", semantic_code_search_tool, "Search indexed chunks semantically for a natural language task."),
-        ("investigate_codebase", investigate_codebase_tool, "Investigate a natural-language codebase question using search, symbols, snippets, graph, and app context."),
-        ("change_impact_report", change_impact_report_tool, "Summarize git changes, likely impact, app context, and recommended tests."),
+        ("semantic_code_search", semantic_code_search_tool, "Search indexed chunks semantically for a natural language task. Use when you do not yet have an exact symbol or file target."),
+        ("investigate_codebase", investigate_codebase_tool, "Safely investigate a natural-language codebase question using search, symbol resolution, snippets, graph, and app context. Broad questions may be narrowed automatically."),
+        ("change_impact_report", change_impact_report_tool, "Safely summarize git changes, likely impact, app context, and recommended tests for the current worktree or a base ref."),
         ("find_tests_for_target", find_tests_for_target_tool, "Find likely tests for a symbol, file, or feature target."),
         ("suggest_tests_for_change", suggest_tests_for_change_tool, "Suggest tests for current git changes."),
         ("test_impact", test_impact_tool, "Estimate testing impact and risk for current git changes."),
@@ -520,7 +571,7 @@ def main() -> int:
         ("get_dependencies", get_dependencies_tool, "Show dependency graph context for a target."),
         ("get_review_history", get_review_history_tool, "Show persisted review findings and analyses for a target file."),
         ("get_symbol_context", get_symbol_context_tool, "Show direct symbol metadata and related source context."),
-        ("find_symbols", find_symbols_tool, "Find symbols by query, file, kind, or symbol UID."),
+        ("find_symbols", find_symbols_tool, "Find symbols by query, file, kind, or symbol UID. Good follow-up when resolve_target reports ambiguity."),
         ("get_callers_and_callees", get_callers_and_callees_tool, "Show direct CALLS callers and callees for a symbol target."),
         ("get_graph_neighborhood", get_graph_neighborhood_tool, "Show filtered graph neighborhood for a target."),
         ("get_file_summary", get_file_summary_tool, "Summarize indexed symbols and chunks for a file."),

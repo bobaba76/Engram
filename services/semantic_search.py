@@ -12,6 +12,8 @@ def _task_variants(task: str, limit: int = 6) -> list[str]:
     if not normalized:
         return []
     variants: list[str] = [normalized]
+    if limit <= 1:
+        return variants[:1]
     try:
         from services.investigation_service import _query_rewrite, _question_intent
 
@@ -59,6 +61,23 @@ def _dedupe_results(results: list[dict[str, object]]) -> list[dict[str, object]]
             if not existing.get(field) and result.get(field):
                 existing[field] = result[field]
     return list(deduped.values())
+
+
+def _public_result_payload(result: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in result.items() if key != "vector"}
+
+
+def _embedding_backend_label(provider_name: str, model_name: str, *, include_vector: bool) -> str:
+    if not include_vector:
+        normalized_provider = (provider_name or "local").strip().lower()
+        if normalized_provider in {"openai", "openai-compatible"}:
+            provider_label = "openai-compatible"
+        elif str(model_name or "").startswith("jinaai/"):
+            provider_label = "local-jina"
+        else:
+            provider_label = "deterministic-fallback"
+        return f"{provider_label}:vector_skipped"
+    return embedding_provider_name(provider_name, model_name)
 
 
 def _extract_search_terms(task: str, results: list[dict[str, object]], limit: int = 12) -> list[str]:
@@ -290,36 +309,59 @@ def semantic_code_search(
     provider_name: str = "local",
     api_key: str = "",
     base_url: str = "",
+    max_variants: int = 6,
+    include_vector: bool = True,
+    include_graph: bool = True,
+    include_expansion: bool = True,
+    extra_query_terms: list[str] | None = None,
 ) -> dict[str, object]:
-    request = EmbeddingRequest(
-        model_name=model_name,
-        provider_name=provider_name,
-        max_length=max_length,
-        device=device,
-        api_key=api_key,
-        base_url=base_url,
-    )
-    provider = build_embedding_provider(provider_name, model_name)
-    task_variants = _task_variants(task)
+    request = None
+    provider = None
+    if include_vector:
+        request = EmbeddingRequest(
+            model_name=model_name,
+            provider_name=provider_name,
+            max_length=max_length,
+            device=device,
+            api_key=api_key,
+            base_url=base_url,
+        )
+        provider = build_embedding_provider(provider_name, model_name)
+    task_variants = _task_variants(task, limit=max(1, max_variants))
+    lexical_terms: list[str] = []
+    for candidate in [task, *(extra_query_terms or [])]:
+        normalized = str(candidate or "").strip()
+        if normalized and normalized not in lexical_terms:
+            lexical_terms.append(normalized)
     vector_results: list[dict[str, object]] = []
     symbol_results: list[dict[str, object]] = []
     chunk_results: list[dict[str, object]] = []
     regex_results: list[dict[str, object]] = []
     graph_results: list[dict[str, object]] = []
     for index, variant in enumerate(task_variants or [task]):
-        embedding = provider.embed([variant], request=request)[0]
-        raw_results = vector_store.search(task=variant, limit=max(limit * 4, 20), embedding=embedding)
-        vector_results.extend(
-            {
-                **result,
-                "retrieval_source": result.get("retrieval_source", "vector") if index == 0 else f"vector_variant",
-            }
-            for result in raw_results
-        )
+        if include_vector:
+            assert provider is not None
+            assert request is not None
+            embedding = provider.embed([variant], request=request)[0]
+            raw_results = vector_store.search(task=variant, limit=max(limit * 4, 20), embedding=embedding)
+            vector_results.extend(
+                {
+                    **result,
+                    "retrieval_source": result.get("retrieval_source", "vector") if index == 0 else f"vector_variant",
+                }
+                for result in raw_results
+            )
         symbol_results.extend(_symbol_candidates(duckdb_store, variant, limit))
         chunk_results.extend(_chunk_candidates(duckdb_store, variant, limit))
         regex_results.extend(_regex_candidates(duckdb_store, variant, limit))
-        graph_results.extend(_graph_candidates(duckdb_store, kuzu_store, variant, limit))
+        if include_graph:
+            graph_results.extend(_graph_candidates(duckdb_store, kuzu_store, variant, limit))
+    for term in lexical_terms:
+        if term in task_variants:
+            continue
+        symbol_results.extend(_symbol_candidates(duckdb_store, term, limit))
+        chunk_results.extend(_chunk_candidates(duckdb_store, term, limit))
+        regex_results.extend(_regex_candidates(duckdb_store, term, limit))
     vector_results = _dedupe_results(vector_results)
     symbol_results = _dedupe_results(symbol_results)
     chunk_results = _dedupe_results(chunk_results)
@@ -331,8 +373,8 @@ def semantic_code_search(
         *chunk_results[: max(limit, 4)],
         *graph_results[: max(limit, 4)],
     ])
-    expanded_regex_results = _expanded_regex_candidates(duckdb_store, task, expansion_seed_results, limit)
-    window_results = _neighboring_chunk_candidates(duckdb_store, expansion_seed_results + expanded_regex_results, limit)
+    expanded_regex_results = _expanded_regex_candidates(duckdb_store, task, expansion_seed_results, limit) if include_expansion else []
+    window_results = _neighboring_chunk_candidates(duckdb_store, expansion_seed_results + expanded_regex_results, limit) if include_expansion else []
     hybrid_results = _dedupe_results(
         [
             *vector_results,
@@ -353,12 +395,18 @@ def semantic_code_search(
         for source in sources:
             source_text = str(source or "unknown")
             source_counts[source_text] = source_counts.get(source_text, 0) + 1
+    backend_name = _embedding_backend_label(provider_name, model_name, include_vector=include_vector)
+
     return {
         "task": task,
-        "embedding_backend": embedding_provider_name(provider_name, model_name),
+        "embedding_backend": backend_name,
         "retrieval_diagnostics": {
             "query_variants": task_variants,
+            "lexical_terms": lexical_terms,
             "variant_count": len(task_variants),
+            "include_vector": include_vector,
+            "include_graph": include_graph,
+            "include_expansion": include_expansion,
             "vector_candidates": len(vector_results),
             "symbol_candidates": len(symbol_results),
             "chunk_candidates": len(chunk_results),
@@ -369,6 +417,6 @@ def semantic_code_search(
             "deduped_candidates": len(hybrid_results),
             "source_counts": source_counts,
         },
-        "results": results,
+        "results": [_public_result_payload(result) for result in results],
         "compact_results": [compact_result_payload(result) for result in results],
     }

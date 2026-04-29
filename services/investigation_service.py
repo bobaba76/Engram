@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mcp_server.resolvers import resolve_tool_target
 from services.app_context_service import app_context
 from services.source_retrieval_service import get_source_context
+from services.test_intelligence_service import find_tests_for_target
 from services.unified_context_service import get_unified_context
 
 if TYPE_CHECKING:
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 
 LOCATION_TOKENS = {"where", "handled", "located", "defined", "implemented", "lives", "entrypoint", "entry", "owns", "owner"}
 FLOW_TOKENS = {"why", "flow", "path", "happen", "happens", "trigger", "sequence", "execution", "called", "calls"}
-IMPACT_TOKENS = {"impact", "break", "breaks", "affected", "affects", "change", "changing", "depends", "dependents", "blast"}
+IMPACT_TOKENS = {"impact", "break", "breaks", "affected", "affects", "affect", "change", "changing", "depends", "dependents", "blast"}
 TEST_TOKENS = {"test", "tests", "verify", "coverage", "spec", "specs"}
 API_TOKENS = {"api", "route", "endpoint", "request", "response", "consumer", "handler"}
 BUG_TOKENS = {"bug", "broken", "issue", "wrong", "error", "failing", "fix", "problem"}
@@ -56,6 +57,20 @@ STOPWORD_TOKENS = {
     "on",
     "at",
 }
+GENERIC_SEARCH_TERMS = {
+    "behavior",
+    "handled",
+    "logic",
+    "flow",
+    "path",
+    "works",
+    "work",
+    "main",
+    "app",
+    "index",
+    "default",
+    "view",
+}
 
 
 def _question_tokens(question: str) -> set[str]:
@@ -86,15 +101,32 @@ def _symbolish_terms(question: str, limit: int = 8) -> list[str]:
     raw_question = str(question or "")
     candidates = re.findall(r"[A-Za-z_][A-Za-z0-9_\.\/:-]{2,}", raw_question)
     candidates.extend(re.findall(r"/[A-Za-z0-9_\-./:]+", raw_question))
-    unique: list[str] = []
+    scored: list[tuple[int, int, str]] = []
     for candidate in candidates:
         normalized = candidate.strip(" .,:;()[]{}\"'")
         if not normalized:
             continue
         if normalized.lower() in STOPWORD_TOKENS:
             continue
-        if normalized not in unique:
-            unique.append(normalized)
+        score = 0
+        if any(marker in normalized for marker in (".", "/", ":", "\\")):
+            score += 5
+        if normalized.endswith((".py", ".ts", ".tsx", ".js", ".jsx")):
+            score += 3
+        if re.search(r"[a-z][A-Z]", normalized):
+            score += 3
+        if not normalized.islower():
+            score += 1
+        if normalized.lower() in GENERIC_SEARCH_TERMS:
+            score -= 3
+        if normalized.isalpha() and normalized.islower():
+            score -= 2
+        scored.append((score, len(normalized), normalized))
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    unique: list[str] = []
+    for _, _, candidate in scored:
+        if candidate not in unique:
+            unique.append(candidate)
         if len(unique) >= limit:
             break
     return unique
@@ -160,13 +192,20 @@ def _best_seed_target(
     seed_hits: list[dict[str, object]],
     expanded_hits: list[dict[str, object]],
 ) -> str:
+    for field in ("file_terms", "route_terms", "symbol_terms"):
+        values = query_rewrite.get(field, [])
+        if isinstance(values, list):
+            for value in values:
+                candidate = str(value or "").strip()
+                if candidate:
+                    return candidate
     for collection in (seed_hits, expanded_hits):
         if collection:
             first = collection[0]
             candidate = str(first.get("target") or first.get("file") or "").strip()
             if candidate:
                 return candidate
-    for field in ("symbol_terms", "route_terms", "file_terms", "search_seeds"):
+    for field in ("search_seeds",):
         values = query_rewrite.get(field, [])
         if isinstance(values, list):
             for value in values:
@@ -277,6 +316,262 @@ def _alternate_seed_targets(seed_target: str, query_rewrite: dict[str, object], 
     return candidates
 
 
+def should_allow_broad_vector_fallback(search_task: str, query_rewrite: dict[str, object]) -> bool:
+    candidate = str(search_task or "").strip()
+    if not candidate:
+        return False
+    route_terms = query_rewrite.get("route_terms", [])
+    file_terms = query_rewrite.get("file_terms", [])
+    if isinstance(route_terms, list) and candidate in route_terms:
+        return True
+    if isinstance(file_terms, list) and candidate in file_terms:
+        return True
+    if "/" in candidate or candidate.endswith((".py", ".ts", ".tsx", ".js", ".jsx")):
+        return True
+    if "." in candidate or ":" in candidate:
+        return True
+    if re.search(r"[a-z][A-Z]", candidate):
+        lowered = candidate.lower()
+        if lowered in GENERIC_SEARCH_TERMS:
+            return False
+        parts = [part for part in re.split(r"[^a-zA-Z0-9]+", candidate) if part]
+        if len(parts) == 1 and len(candidate) >= 14:
+            return True
+        if len(parts) >= 2:
+            return True
+    lowered_tokens = [token for token in re.split(r"[^a-zA-Z0-9]+", candidate.lower()) if token]
+    if not lowered_tokens:
+        return False
+    if all(token in GENERIC_SEARCH_TERMS or token in STOPWORD_TOKENS for token in lowered_tokens):
+        return False
+    return False
+
+
+def broad_lexical_search_terms(search_task: str, query_rewrite: dict[str, object], limit: int = 4) -> list[str]:
+    terms: list[str] = []
+
+    def token_key(value: str) -> tuple[str, ...]:
+        return tuple(token for token in re.split(r"[^a-zA-Z0-9]+", value.lower()) if token)
+
+    def add_term(value: object) -> None:
+        candidate = str(value or "").strip()
+        if not candidate or candidate in terms:
+            return
+        lowered_tokens = list(token_key(candidate))
+        if lowered_tokens and all(token in GENERIC_SEARCH_TERMS or token in STOPWORD_TOKENS for token in lowered_tokens):
+            return
+        terms.append(candidate)
+
+    add_term(search_task)
+    for field in ("route_terms", "file_terms", "symbol_terms", "search_seeds"):
+        values = query_rewrite.get(field, [])
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            candidate = str(value or "").strip()
+            if not candidate or " " in candidate:
+                continue
+            if field in {"route_terms", "file_terms"}:
+                add_term(candidate)
+            elif should_allow_broad_vector_fallback(candidate, query_rewrite):
+                add_term(candidate)
+            if len(terms) >= limit:
+                return terms[:limit]
+    if len(terms) < limit:
+        for value in list(terms):
+            split_variant = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value).strip()
+            if split_variant and split_variant != value:
+                add_term(split_variant)
+            compact_variant = "".join(token_key(value))
+            if compact_variant and compact_variant != value.lower():
+                add_term(compact_variant)
+            if len(terms) >= limit:
+                return terms[:limit]
+    if len(terms) < limit:
+        core_terms = query_rewrite.get("core_terms", [])
+        if isinstance(core_terms, list):
+            focused_terms = [term for term in core_terms if term not in GENERIC_SEARCH_TERMS and term not in STOPWORD_TOKENS]
+            if len(focused_terms) >= 2:
+                add_term(" ".join(focused_terms[:2]))
+            elif focused_terms:
+                add_term(focused_terms[0])
+    return terms[:limit]
+
+
+def cheap_symbol_discovery_terms(search_task: str, query_rewrite: dict[str, object], limit: int = 4) -> list[str]:
+    terms = broad_lexical_search_terms(search_task, query_rewrite, limit=limit)
+    for value in list(terms):
+        split_variant = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value).strip()
+        if split_variant and split_variant not in terms:
+            terms.append(split_variant)
+        if len(terms) >= limit:
+            return terms[:limit]
+    return terms[:limit]
+
+
+def alternate_discovery_anchors(
+    search_task: str,
+    query_rewrite: dict[str, object],
+    app_target: str = "",
+    limit: int = 2,
+) -> list[str]:
+    anchors: list[str] = []
+    normalized_seed = str(search_task or "").strip().lower()
+
+    def add_anchor(value: object) -> None:
+        candidate = str(value or "").strip()
+        if not candidate:
+            return
+        normalized = candidate.lower()
+        if normalized == normalized_seed or candidate in anchors:
+            return
+        tokens = [token for token in re.split(r"[^a-zA-Z0-9]+", normalized) if token]
+        if tokens and all(token in GENERIC_SEARCH_TERMS or token in STOPWORD_TOKENS for token in tokens):
+            return
+        if " " in candidate and not any(marker in candidate for marker in ("/", ".", ":")):
+            return
+        if not (
+            should_allow_broad_vector_fallback(candidate, query_rewrite)
+            or "/" in candidate
+            or "." in candidate
+            or ":" in candidate
+            or re.search(r"[a-z][A-Z]", candidate)
+            or len(candidate) >= 8
+        ):
+            return
+        anchors.append(candidate)
+
+    for value in [app_target]:
+        add_anchor(value)
+    for field in ("route_terms", "file_terms", "symbol_terms", "search_seeds"):
+        values = query_rewrite.get(field, [])
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            add_anchor(value)
+            if len(anchors) >= limit:
+                return anchors[:limit]
+    core_terms = query_rewrite.get("core_terms", [])
+    if isinstance(core_terms, list):
+        for value in core_terms:
+            add_anchor(value)
+            if len(anchors) >= limit:
+                return anchors[:limit]
+    return anchors[:limit]
+
+
+def cheap_symbol_discovery(
+    duckdb_store: DuckDBStore,
+    search_task: str,
+    query_rewrite: dict[str, object],
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    fetch_symbols = getattr(duckdb_store, "fetch_symbols_for_target", None)
+    if not callable(fetch_symbols):
+        return []
+    matches: list[dict[str, object]] = []
+    seen: set[tuple[str, str, object, object]] = set()
+    for term in cheap_symbol_discovery_terms(search_task, query_rewrite, limit=max(limit, 4)):
+        for symbol in fetch_symbols(term, limit=max(limit * 3, 12)):
+            key = (
+                str(symbol.get("qualified_name", "") or ""),
+                str(symbol.get("file_path", "") or ""),
+                symbol.get("start_line"),
+                symbol.get("end_line"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append(
+                {
+                    "qualified_name": symbol.get("qualified_name", ""),
+                    "name": symbol.get("name", ""),
+                    "file_path": symbol.get("file_path", ""),
+                    "kind": symbol.get("kind", ""),
+                    "start_line": symbol.get("start_line"),
+                    "end_line": symbol.get("end_line"),
+                    "discovery_term": term,
+                }
+            )
+            if len(matches) >= limit:
+                return matches
+    return matches
+
+
+def cheap_ui_symbol_discovery_terms(search_task: str, query_rewrite: dict[str, object], limit: int = 4) -> list[str]:
+    terms: list[str] = []
+
+    def add_term(value: object) -> None:
+        candidate = str(value or "").strip()
+        if not candidate or candidate in terms:
+            return
+        tokens = [token for token in re.split(r"[^a-zA-Z0-9]+", candidate.lower()) if token]
+        if tokens and all(token in GENERIC_SEARCH_TERMS or token in STOPWORD_TOKENS for token in tokens):
+            return
+        terms.append(candidate)
+
+    split_variant = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(search_task or "")).strip()
+    if split_variant and split_variant != search_task:
+        add_term(split_variant)
+    core_terms = query_rewrite.get("core_terms", [])
+    if isinstance(core_terms, list):
+        focused = [str(term).strip() for term in core_terms if str(term).strip() and str(term) not in GENERIC_SEARCH_TERMS and str(term) not in STOPWORD_TOKENS]
+        if len(focused) >= 2:
+            add_term(" ".join(focused[:2]))
+        for term in focused:
+            add_term(term)
+            if len(terms) >= limit:
+                return terms[:limit]
+    if split_variant:
+        add_term(split_variant.replace(" ", ""))
+    return terms[:limit]
+
+
+def cheap_ui_symbol_discovery(
+    duckdb_store: DuckDBStore,
+    search_task: str,
+    query_rewrite: dict[str, object],
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    search_chunks = getattr(duckdb_store, "search_chunks_content", None)
+    fetch_symbols_for_file = getattr(duckdb_store, "fetch_symbols_for_file", None)
+    if not callable(search_chunks) or not callable(fetch_symbols_for_file):
+        return []
+    matches: list[dict[str, object]] = []
+    seen: set[tuple[str, str, object, object]] = set()
+    for term in cheap_ui_symbol_discovery_terms(search_task, query_rewrite, limit=max(limit, 4)):
+        chunk_rows = search_chunks(term, limit=max(limit * 2, 8))
+        for chunk in chunk_rows:
+            file_path = str(chunk.get("file_path", "") or "")
+            if not file_path:
+                continue
+            for symbol in fetch_symbols_for_file(file_path)[:4]:
+                key = (
+                    str(symbol.get("qualified_name", "") or ""),
+                    str(symbol.get("file_path", file_path) or file_path),
+                    symbol.get("start_line"),
+                    symbol.get("end_line"),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                matches.append(
+                    {
+                        "qualified_name": symbol.get("qualified_name", symbol.get("name", "")),
+                        "name": symbol.get("name", ""),
+                        "file_path": symbol.get("file_path", file_path) or file_path,
+                        "kind": symbol.get("kind", ""),
+                        "start_line": symbol.get("start_line"),
+                        "end_line": symbol.get("end_line"),
+                        "discovery_term": term,
+                        "discovery_source": "chunk_content",
+                    }
+                )
+                if len(matches) >= limit:
+                    return matches
+    return matches
+
+
 def _is_generic_target(target: str) -> bool:
     normalized = str(target or "").strip().lower()
     return normalized in {"main", "app", "index", "__init__"}
@@ -383,6 +678,49 @@ def _classify_search_hits(search_hits: list[dict[str, object]]) -> tuple[list[di
         else:
             seed_hits.append(item)
     return seed_hits, expanded_hits
+
+
+def _target_affinity_score(item: dict[str, object], seed_target: str, resolved_target: str) -> tuple[int, int, int]:
+    item_target = str(item.get("target") or item.get("qualified_name") or item.get("name") or "").strip()
+    item_file = str(item.get("file") or item.get("file_path") or "").strip()
+    normalized_target = item_target.lower()
+    normalized_file = item_file.lower()
+    normalized_seed = str(seed_target or "").strip().lower()
+    normalized_resolved = str(resolved_target or "").strip().lower()
+
+    exact_match = int(bool(normalized_resolved and normalized_target == normalized_resolved))
+    seed_match = int(bool(normalized_seed and normalized_target == normalized_seed))
+    partial_match = int(
+        bool(
+            normalized_resolved
+            and (
+                normalized_resolved in normalized_target
+                or normalized_target in normalized_resolved
+                or normalized_resolved in normalized_file
+            )
+        )
+        or bool(
+            normalized_seed
+            and (
+                normalized_seed in normalized_target
+                or normalized_target in normalized_seed
+                or normalized_seed in normalized_file
+            )
+        )
+    )
+    return exact_match, seed_match, partial_match
+
+
+def _prioritize_search_hits(search_hits: list[dict[str, object]], seed_target: str, resolved_target: str) -> list[dict[str, object]]:
+    return sorted(
+        search_hits,
+        key=lambda item: (
+            _target_affinity_score(item, seed_target, resolved_target),
+            float(item.get("score", 0.0) or 0.0),
+            int(bool(not _is_expanded_hit(item))),
+        ),
+        reverse=True,
+    )
 
 
 def _file_relevance(search_hits: list[dict[str, object]], snippets: list[dict[str, object]], app: dict[str, object], limit: int = 8) -> list[dict[str, object]]:
@@ -621,6 +959,8 @@ def _guidance_next_tools(profile: dict[str, object], resolved_target: str, quest
 
     def add_tool(name: str, target: str, why: str) -> None:
         candidate = {"tool": name, "target": target, "why": why}
+        if any(existing.get("tool") == name and existing.get("target") == target for existing in tools):
+            return
         if candidate not in tools:
             tools.append(candidate)
 
@@ -663,6 +1003,36 @@ def _guidance_summary(profile: dict[str, object]) -> dict[str, object]:
         "top_file": str(top_file.get("file", "") or ""),
         "top_file_reasons": top_file.get("reasons", [])[:3] if isinstance(top_file, dict) else [],
         "retrieval_signal_strength": retrieval_signal_strength,
+    }
+
+
+def _change_guidance(
+    duckdb_store: DuckDBStore,
+    resolved_target: str,
+    ranked_files: list[dict[str, object]],
+    unified_summary: dict[str, object],
+    app_summary: dict[str, object],
+) -> dict[str, object]:
+    try:
+        test_payload = find_tests_for_target(duckdb_store, resolved_target, limit=4) if resolved_target else {"compact_results": [], "compact_summary": {}}
+    except Exception:
+        test_payload = {"compact_results": [], "compact_summary": {}}
+    test_results = test_payload.get("compact_results", []) if isinstance(test_payload, dict) else []
+    app_files = app_summary.get("top_files", []) if isinstance(app_summary, dict) else []
+    related_files = _unique_strings(
+        [item.get("file", "") for item in ranked_files[:5] if isinstance(item, dict)] + list(app_files[:5] if isinstance(app_files, list) else []),
+        limit=6,
+    )
+    top_neighbors = unified_summary.get("top_neighbors", []) if isinstance(unified_summary, dict) else []
+    likely_impact_targets = _unique_strings(
+        [item.get("node", "") for item in top_neighbors if isinstance(item, dict)],
+        limit=5,
+    )
+    return {
+        "related_files": related_files,
+        "recommended_tests": [item for item in test_results[:4] if isinstance(item, dict)],
+        "likely_impact_targets": likely_impact_targets,
+        "test_count": len(test_results) if isinstance(test_results, list) else 0,
     }
 
 
@@ -807,6 +1177,47 @@ def investigate_codebase(
     diagnostics = _retrieval_diagnostics(search_payload)
     warnings = list(guardrails.get("warnings", [])) if isinstance(guardrails.get("warnings"), list) else []
     seed_hits, expanded_hits = _classify_search_hits(search_hits)
+    discovered_symbols: list[dict[str, object]] = []
+    alternate_anchors: list[str] = []
+    if bool(guardrails.get("broad_question")) and not search_hits:
+        discovered_symbols = cheap_symbol_discovery(duckdb_store, search_task, query_rewrite, limit=5)
+        if not discovered_symbols:
+            alternate_anchors = alternate_discovery_anchors(search_task, query_rewrite, app_target=str(search_task or ""), limit=2)
+            if alternate_anchors:
+                seen_keys = {
+                    (
+                        str(symbol.get("qualified_name", "") or ""),
+                        str(symbol.get("file_path", "") or ""),
+                        symbol.get("start_line"),
+                        symbol.get("end_line"),
+                    )
+                    for symbol in discovered_symbols
+                }
+                for anchor in alternate_anchors:
+                    remaining = max(1, 5 - len(discovered_symbols))
+                    for symbol in cheap_symbol_discovery(duckdb_store, anchor, query_rewrite, limit=remaining):
+                        key = (
+                            str(symbol.get("qualified_name", "") or ""),
+                            str(symbol.get("file_path", "") or ""),
+                            symbol.get("start_line"),
+                            symbol.get("end_line"),
+                        )
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        discovered_symbols.append(symbol)
+                        if len(discovered_symbols) >= 5:
+                            break
+                    if len(discovered_symbols) >= 5:
+                        break
+        if not discovered_symbols:
+            discovered_symbols = cheap_ui_symbol_discovery(duckdb_store, search_task, query_rewrite, limit=5)
+        if discovered_symbols:
+            warnings.append("Broad search found nearby symbols via cheap lexical discovery.")
+        if alternate_anchors:
+            warnings.append(f"Broad search also tried alternate anchors: {', '.join(alternate_anchors)}.")
+        if discovered_symbols and any(str(item.get("discovery_source", "")) == "chunk_content" for item in discovered_symbols):
+            warnings.append("Weak UI-like target was expanded through nearby chunk text to surface candidate symbols.")
     expanded_hit_limit = int(guardrails.get("expanded_hit_limit", max(limit + 1, 6)) or max(limit + 1, 6))
     if len(expanded_hits) > expanded_hit_limit:
         expanded_hits = expanded_hits[:expanded_hit_limit]
@@ -829,6 +1240,8 @@ def investigate_codebase(
             if _is_generic_target(resolved_target):
                 resolved_target = narrowed_target
             warnings.append(f"Generic target resolution was replaced with narrowed term '{narrowed_target}'.")
+    search_hits = _prioritize_search_hits(search_hits, seed_target, resolved_target)
+    seed_hits, expanded_hits = _classify_search_hits(search_hits)
     app = app_context(repo_root, duckdb_store, kuzu_store, target=app_target, limit=6)
     source_context = get_source_context(duckdb_store, resolved_target, limit=3, repo_root=repo_root)
     unified = get_unified_context(duckdb_store, kuzu_store, resolved_target, max_matches=3, neighborhood_depth=1)
@@ -875,6 +1288,15 @@ def investigate_codebase(
         evidence = evidence[:evidence_limit]
         warnings.append("Evidence was truncated to keep the result compact.")
     answer, confidence, open_questions = _synthesize_answer(normalized_question, resolved_target, ranked_files, evidence, diagnostics, architecture, seed_hits, expanded_hits, intent, graph_signal)
+    if not evidence and discovered_symbols:
+        discovered_names = [
+            str(item.get("qualified_name") or item.get("name") or "").strip()
+            for item in discovered_symbols
+            if str(item.get("qualified_name") or item.get("name") or "").strip()
+        ][:3]
+        if discovered_names:
+            answer += f" Cheap symbol discovery found nearby candidates: {', '.join(discovered_names)}."
+        open_questions = ["No direct evidence was found, but nearby symbols may help narrow the follow-up."]
     profile = _guidance_profile(resolution, diagnostics, seed_hits, expanded_hits, snippets_list, ranked_files, architecture, intent, graph_signal)
     next_steps = _guidance_next_steps(profile, resolved_target, normalized_question)
     if unified_summary.get("caller_count") or unified_summary.get("callee_count"):
@@ -882,6 +1304,7 @@ def investigate_codebase(
             next_steps.append("Review callers/callees from unified_context.")
     next_tools = _guidance_next_tools(profile, resolved_target, normalized_question)
     guidance_summary = _guidance_summary(profile)
+    change_guidance = _change_guidance(duckdb_store, resolved_target, ranked_files, unified_summary, app_summary)
 
     return {
         "question": normalized_question,
@@ -896,6 +1319,7 @@ def investigate_codebase(
             "attempted_seeds": attempted_passes,
             "retry_used": retry_used,
             "retry_reason": retry_reason,
+            "alternate_discovery_anchors": alternate_anchors,
         },
         "warnings": warnings,
         "answer": answer,
@@ -912,6 +1336,8 @@ def investigate_codebase(
         "graph_signal": graph_signal,
         "data_flow_summary": data_flow_points,
         "guidance_summary": guidance_summary,
+        "change_guidance": change_guidance,
+        "discovered_symbols": discovered_symbols,
         "open_questions": open_questions,
         "next_tools": next_tools,
         "resolution": resolution,
@@ -924,6 +1350,9 @@ def investigate_codebase(
             f"Key files: {', '.join(key_files[:6])}" if key_files else "Key files: no strong file candidates",
             f"Search hits: {len(search_hits)} ({len(seed_hits)} seed, {len(expanded_hits)} expanded)",
             f"Snippet hits: {len(snippets_list)}",
+            f"Cheap symbol candidates: {len(discovered_symbols)}",
+            f"Alternate anchors tried: {', '.join(alternate_anchors)}" if alternate_anchors else "Alternate anchors tried: none",
+            f"Suggested tests: {change_guidance.get('test_count', 0)}",
         ] + data_flow_points[:3],
         "next_steps": next_steps,
         "compact_summary": {
@@ -940,16 +1369,19 @@ def investigate_codebase(
                 "attempted_seeds": attempted_passes,
                 "retry_used": retry_used,
                 "retry_reason": retry_reason,
+                "alternate_discovery_anchors": alternate_anchors,
             },
             "warnings": warnings,
             "top_files": key_files[:8],
             "top_file_reasons": {str(item.get("file", "")): item.get("reasons", [])[:3] for item in ranked_files[:5]},
             "top_symbols": _unique_strings([item.get("target") for item in search_hits[:5] if item.get("target")]),
+            "discovered_symbols": discovered_symbols[:5],
             "snippet_count": len(snippets_list),
             "evidence_count": len(evidence),
             "seed_hit_count": len(seed_hits),
             "expanded_hit_count": len(expanded_hits),
             "guidance": guidance_summary,
+            "change_guidance": change_guidance,
             "app_files": app_summary.get("top_files", []),
             "top_neighbors": unified_summary.get("top_neighbors", []),
             "graph_signal": graph_signal,

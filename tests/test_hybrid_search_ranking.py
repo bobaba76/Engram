@@ -1,5 +1,5 @@
 from services.search_ranking import rerank_search_results
-from services.semantic_search import _expanded_regex_candidates, _neighboring_chunk_candidates, _task_variants
+from services.semantic_search import _expanded_regex_candidates, _neighboring_chunk_candidates, _public_result_payload, _task_variants
 
 
 def test_hybrid_ranking_uses_source_and_content_signals() -> None:
@@ -110,6 +110,18 @@ def test_task_variants_include_rewritten_queries_for_natural_language_tasks() ->
     assert variants[0] == "where is resolveCustomer handled in /api/customers"
     assert any("resolveCustomer" in variant for variant in variants)
     assert any("/api/customers" in variant for variant in variants)
+
+
+def test_task_variants_respects_single_variant_limit() -> None:
+    variants = _task_variants("where is defaultView behavior handled", limit=1)
+
+    assert variants == ["where is defaultView behavior handled"]
+
+
+def test_public_result_payload_omits_embedding_vectors() -> None:
+    payload = _public_result_payload({"file_path": "app/main.py", "vector": [0.1, 0.2]})
+
+    assert payload == {"file_path": "app/main.py"}
 
 
 def test_hybrid_ranking_boosts_graph_backed_frontend_implementation_paths() -> None:

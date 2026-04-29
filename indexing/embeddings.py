@@ -113,8 +113,7 @@ def embedding_backend_name(model_name: str) -> str:
     if model_name.startswith("jinaai/"):
         if not _load_embedding_dependencies():
             return "deterministic_fallback"
-        tokenizer, model = _load_jina_model(model_name)
-        if tokenizer is not None and model is not None and torch is not None and torch_functional is not None:
+        if torch is not None and torch_functional is not None and AutoTokenizer is not None and AutoModel is not None:
             return "jina_transformers"
     return "deterministic_fallback"
 
