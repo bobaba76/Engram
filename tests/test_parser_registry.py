@@ -22,6 +22,26 @@ def test_python_parser_module_is_registered(tmp_path: Path) -> None:
     assert {symbol.qualified_name for symbol in symbols} >= {"CustomerService", "CustomerService.assign", "helper"}
 
 
+def test_python_parser_accepts_utf8_bom(tmp_path: Path) -> None:
+    source = tmp_path / "bom_sample.py"
+    source.write_text(
+        "\ufeff"
+        "class Dashboard:\n"
+        "    def render(self):\n"
+        "        return helper()\n"
+        "\n"
+        "def helper():\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+
+    symbols, status = extract_symbols_with_status(source)
+
+    assert status["parser"] == "ast"
+    assert status["language"] == "python"
+    assert {symbol.qualified_name for symbol in symbols} >= {"Dashboard", "Dashboard.render", "helper"}
+
+
 def test_typescript_parser_module_falls_back_to_regex(tmp_path: Path) -> None:
     source = tmp_path / "sample.ts"
     source.write_text(

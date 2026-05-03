@@ -4,6 +4,9 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from config.settings import DEFAULT_SCAN_EXCLUDED_DIRS
+from indexing.scanner import scan_repo
+
 if TYPE_CHECKING:
     from storage.duckdb_store import DuckDBStore
 
@@ -31,10 +34,33 @@ def _read_text(path: Path) -> str:
 
 
 def _iter_candidate_files(repo_root: Path) -> list[Path]:
+    return [
+        repo_root / record.path
+        for record in scan_repo(repo_root, excluded_dirs=DEFAULT_SCAN_EXCLUDED_DIRS)
+        if Path(record.path).suffix.lower() in {".py", ".ts", ".tsx", ".js", ".jsx"}
+    ]
+
+
+def _iter_indexed_candidate_files(repo_root: Path, duckdb_store: DuckDBStore) -> list[Path]:
+    files_repo = getattr(duckdb_store, "files", None)
+    fetch_all = getattr(files_repo, "fetch_all", None)
+    if not callable(fetch_all):
+        return _iter_candidate_files(repo_root)
     candidates: list[Path] = []
-    for suffix in ("*.py", "*.ts", "*.tsx", "*.js", "*.jsx"):
-        candidates.extend(repo_root.rglob(suffix))
-    return candidates
+    for row in fetch_all():
+        relative_path = str(row.get("path", "") or "").strip()
+        if not relative_path:
+            continue
+        candidate = (repo_root / relative_path).resolve()
+        try:
+            candidate.relative_to(repo_root.resolve())
+        except ValueError:
+            continue
+        if candidate.suffix.lower() not in {".py", ".ts", ".tsx", ".js", ".jsx"}:
+            continue
+        if candidate.exists() and candidate.is_file():
+            candidates.append(candidate)
+    return candidates or _iter_candidate_files(repo_root)
 
 
 def _response_keys(snippet: str) -> list[str]:
@@ -56,7 +82,7 @@ def route_map(repo_root: Path, duckdb_store: DuckDBStore, route: str = "") -> di
     normalized_route = str(route or "").strip()
     handlers: list[dict[str, object]] = []
     consumers: list[dict[str, object]] = []
-    for path in _iter_candidate_files(repo_root):
+    for path in _iter_indexed_candidate_files(repo_root, duckdb_store):
         relative_path = str(path.relative_to(repo_root)).replace("\\", "/")
         source = _read_text(path)
         if not source:

@@ -1,6 +1,15 @@
 import sys
+import io
+
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True)
+    if hasattr(sys.stderr, "buffer"):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", line_buffering=True)
+
 import os
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +40,7 @@ from services.repo_registry_service import list_indexed_repos, resolve_indexed_r
 from services.review_history_service import get_review_history
 from services.route_map_service import route_map
 from services.semantic_search import semantic_code_search
+from indexing.embeddings import prewarm_jina_model, is_model_ready, get_model_load_error
 from services.source_retrieval_service import get_source_context
 from services.symbol_lookup_service import find_symbols
 from services.symbol_context_service import get_symbol_context
@@ -140,6 +150,7 @@ def main() -> int:
     manifest.setdefault("mcp_resolution_source", resolved_by)
     server = MCPServer()
     repo_context_cache: dict[Path, dict[str, Any]] = {}
+    _kuzu_init_lock = threading.Lock()
     selected_repo_root = settings.repo_root.resolve()
 
     def _get_repo_context(repo: str = "") -> dict[str, Any]:
@@ -167,9 +178,14 @@ def main() -> int:
         cached_store = context.get("kuzu_store")
         if isinstance(cached_store, KuzuStore):
             return cached_store
-        kuzu_store = KuzuStore(context["settings"].kuzu_path, read_only=True)
-        context["kuzu_store"] = kuzu_store
-        return kuzu_store
+        with _kuzu_init_lock:
+            # Re-check inside the lock — another thread may have opened it
+            cached_store = context.get("kuzu_store")
+            if isinstance(cached_store, KuzuStore):
+                return cached_store
+            kuzu_store = KuzuStore(context["settings"].kuzu_path, read_only=True)
+            context["kuzu_store"] = kuzu_store
+            return kuzu_store
 
     def _close_repo_context(context: dict[str, Any]) -> None:
         for key in ("kuzu_store", "duckdb_store"):
@@ -180,6 +196,19 @@ def main() -> int:
         context["kuzu_store"] = None
 
     _get_repo_context()
+
+    # Pre-warm Kuzu synchronously before the server starts accepting requests.
+    # KuzuStore cold-open (loading 53k+ edges from disk) takes several seconds.
+    # Doing it here ensures no tool call ever blocks on it.
+    _get_kuzu_store()
+
+    # Kick off model pre-warming immediately so it's ready by the time the
+    # first semantic_code_search call arrives. This runs on a daemon thread
+    # and never blocks server startup or other tool calls.
+    prewarm_jina_model(
+        settings.embedding_model,
+        device=settings.embedding_device,
+    )
 
     def index_status(repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
@@ -372,10 +401,13 @@ def main() -> int:
 
     def semantic_code_search_tool(task: str, limit: int = 5, repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
-        return semantic_code_search(
+        model_name = context["settings"].embedding_model
+        model_ready = is_model_ready(model_name)
+        load_error = get_model_load_error(model_name) if not model_ready else ""
+        result = semantic_code_search(
             context["vector_store"],
             task=task,
-            model_name=context["settings"].embedding_model,
+            model_name=model_name,
             duckdb_store=context["duckdb_store"],
             kuzu_store=_get_kuzu_store(repo),
             limit=limit,
@@ -384,16 +416,47 @@ def main() -> int:
             provider_name=context["settings"].embedding_provider,
             api_key=context["settings"].embedding_api_key,
             base_url=context["settings"].embedding_base_url,
+            include_vector=model_ready,
         )
+        if not model_ready:
+            warnings = result.setdefault("warnings", [])
+            if load_error:
+                warnings.append(f"Vector search skipped: model failed to load ({load_error}). Lexical results only.")
+            else:
+                warnings.append(
+                    "Vector search skipped: embedding model is still loading in the background. "
+                    "Retry in a few seconds for full semantic results. Lexical results only."
+                )
+        return result
 
     def investigate_codebase_tool(question: str, limit: int = 5, repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
         search_task, search_plan = investigation_search_task(question, limit=limit)
         intent = search_plan.get("intent", {}) if isinstance(search_plan.get("intent", {}), dict) else {}
         guardrails = search_plan.get("guardrails", {}) if isinstance(search_plan.get("guardrails", {}), dict) else {}
+        intent_primary = str(intent.get("primary", "general") or "general")
         broad_question = bool(guardrails.get("broad_question"))
-        impact_question = str(intent.get("primary", "general") or "general") == "impact"
+        impact_question = intent_primary == "impact"
+        exploratory_question = intent_primary in {"ui_ownership", "feature_exploration"}
+        lightweight_exploratory = bool(exploratory_question and (broad_question or len(intent.get("tokens", [])) >= 8))
         safe_first_pass = broad_question or impact_question
+        if lightweight_exploratory:
+            return investigate_codebase(
+                context["repo_root"],
+                context["duckdb_store"],
+                _get_kuzu_store(repo),
+                question=question,
+                search_payload={
+                    "compact_results": [],
+                    "retrieval_diagnostics": {
+                        "exploratory_budget_short_circuit": True,
+                        "investigation_safe_first_pass": True,
+                        "exploratory_lightweight_path": True,
+                    },
+                    "investigation_search_plan": search_plan,
+                },
+                limit=limit,
+            )
         search_limit = int(guardrails.get("search_limit", limit) or limit)
         lexical_terms = broad_lexical_search_terms(search_task, search_plan.get("query_rewrite", {}), limit=4) if safe_first_pass else [search_task]
         search_payload = semantic_code_search(

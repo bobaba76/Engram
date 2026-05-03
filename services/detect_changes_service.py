@@ -12,15 +12,19 @@ HUNK_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,(?P<count>\d+)
 
 
 def _run_git(repo_root: Path, args: list[str]) -> str:
-    completed = subprocess.run(
-        ["git", *args],
-        cwd=str(repo_root),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
     if completed.returncode != 0:
         return ""
     return completed.stdout
@@ -87,7 +91,10 @@ def detect_changes(
     scope: str = "unstaged",
     base_ref: str | None = None,
 ) -> dict[str, object]:
+    warnings: list[str] = []
     diff_text = _diff_output(repo_root, scope=scope, base_ref=base_ref)
+    if not diff_text and not _run_git(repo_root, ["rev-parse", "--git-dir"]):
+        warnings.append(f"No git repository found at {repo_root}. detect_changes requires a git repo.")
     changed_lines_by_file = _parse_changed_lines(diff_text)
     changed_files = sorted(changed_lines_by_file)
     changed_symbols: list[dict[str, object]] = []
@@ -124,6 +131,7 @@ def detect_changes(
         "impacted_files": impacted_files,
         "impacted_symbols": impacted_symbols,
         "risk": risk,
+        "warnings": warnings,
         "compact_summary": {
             "target": str(repo_root.resolve()),
             "scope": scope,
