@@ -38,5 +38,34 @@
     "max_seconds": 2.0,
     "expect_partial": true,
     "expect_next_tools": ["get_source_context"]
+  },
+  {
+    "question": "find the MCP repo selection flow across the app",
+    "max_seconds": 2.0,
+    "expect_any_top_file_contains": [
+      "scripts/run_mcp.py",
+      "services/repo_registry_service.py",
+      "services/app_context_service.py"
+    ],
+    "expect_any_next_tools": ["feature_context", "app_context"]
+  },
+  {
+    "question": "trace the indexing progress reporting flow",
+    "max_seconds": 2.0,
+    "expect_any_top_file_contains": [
+      "app/coordinator.py",
+      "scripts/run_index.py",
+      "services/progress_service.py"
+    ],
+    "expect_any_next_tools": ["feature_context", "unified_context"]
+  },
+  {
+    "question": "find the code path for index health status reporting",
+    "max_seconds": 2.0,
+    "expect_any_top_file_contains": [
+      "services/index_health_service.py",
+      "scripts/run_mcp.py"
+    ],
+    "expect_any_next_tools": ["feature_context", "get_source_context"]
   }
 ]

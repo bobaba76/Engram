@@ -26,7 +26,6 @@ class DuckDBStore:
             shutil.copy2(self.database_path, temp_path)
             self._temp_database_path = temp_path
             self.connection_manager = DuckDBConnectionManager(temp_path, read_only=True)
-        self.connection = self.connection_manager.connection
         if not read_only:
             self._initialize_schema()
         self.files = FileRepository(self)
@@ -35,6 +34,10 @@ class DuckDBStore:
         self.reviews = ReviewRepository(self)
         self.processes = ProcessRepository(self)
         self.runs = RunRepository(self)
+
+    @property
+    def connection(self):
+        return self.connection_manager.connection
 
     def close(self) -> None:
         self.connection_manager.close()

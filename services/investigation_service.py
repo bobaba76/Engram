@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from mcp_server.resolvers import resolve_tool_target
 from services.app_context_service import app_context
+from services.feature_context_service import feature_context
 from services.source_retrieval_service import get_source_context
 from services.test_intelligence_service import find_tests_for_target
 from services.unified_context_service import get_unified_context
@@ -22,6 +23,9 @@ IMPACT_TOKENS = {"impact", "break", "breaks", "affected", "affects", "affect", "
 TEST_TOKENS = {"test", "tests", "verify", "coverage", "spec", "specs"}
 API_TOKENS = {"api", "route", "endpoint", "request", "response", "consumer", "handler"}
 BUG_TOKENS = {"bug", "broken", "issue", "wrong", "error", "failing", "fix", "problem"}
+UI_TOKENS = {"page", "screen", "dashboard", "overview", "selector", "filter", "tab", "modal", "form", "frontend", "view", "landing"}
+EXPLORATION_TOKENS = {"find", "show", "trace", "investigate", "check", "explore", "walk", "follow", "including", "shared"}
+IMPERATIVE_SEED_TOKENS = {"find", "show", "trace", "investigate", "check", "explore", "walk", "follow", "including"}
 STOPWORD_TOKENS = {
     "a",
     "an",
@@ -71,6 +75,71 @@ GENERIC_SEARCH_TERMS = {
     "default",
     "view",
 }
+BEHAVIOR_TRACE_TOKENS = {
+    "page",
+    "view",
+    "selector",
+    "filter",
+    "frontend",
+    "backend",
+    "financial",
+    "calendar",
+    "period",
+    "overview",
+    "landing",
+    "widget",
+    "dropdown",
+}
+WEAK_BROAD_SEED_TERMS = {
+    "mcp",
+    "reporting",
+    "status",
+    "selection",
+    "progress",
+    "health",
+    "index",
+    "flow",
+    "trace",
+    "find",
+    "app",
+    "utility",
+    "utilities",
+    "shared",
+}
+GENERIC_EXPLORATORY_NOUNS = {
+    "utility",
+    "utilities",
+    "shared",
+    "code",
+    "logic",
+    "flow",
+    "path",
+}
+BEHAVIOR_TRACE_ALIASES = {
+    frozenset({"repo", "selection"}): ["select_repo", "select_repo_tool"],
+    frozenset({"mcp", "repo"}): ["select_repo", "run_mcp"],
+    frozenset({"indexing", "progress"}): ["_log_progress", "run_index"],
+    frozenset({"progress", "reporting"}): ["_log_progress", "run_summary"],
+    frozenset({"index", "health"}): ["index_health", "index_health_tool"],
+    frozenset({"health", "status"}): ["index_status", "index_health"],
+    frozenset({"period", "selector"}): ["PeriodSelector", "selectedPeriod"],
+}
+BEHAVIOR_OWNER_HINTS = {
+    frozenset({"mcp", "repo", "selection"}): [
+        ("scripts/run_mcp.py", "owner hint: MCP repo selection entrypoint"),
+    ],
+    frozenset({"indexing", "progress"}): [
+        ("app/coordinator.py", "owner hint: indexing progress coordinator"),
+        ("scripts/run_index.py", "owner hint: indexing entrypoint"),
+    ],
+    frozenset({"progress", "reporting"}): [
+        ("app/coordinator.py", "owner hint: progress reporting coordinator"),
+        ("scripts/run_index.py", "owner hint: progress reporting entrypoint"),
+    ],
+    frozenset({"index", "health"}): [
+        ("services/index_health_service.py", "owner hint: index health service"),
+    ],
+}
 
 
 def _question_tokens(question: str) -> set[str]:
@@ -86,8 +155,14 @@ def _question_intent(question: str) -> dict[str, object]:
         "tests": len(tokens & TEST_TOKENS),
         "api": len(tokens & API_TOKENS),
         "bug": len(tokens & BUG_TOKENS),
+        "ui_ownership": len(tokens & UI_TOKENS),
+        "feature_exploration": len(tokens & EXPLORATION_TOKENS),
     }
     primary = max(score_map, key=score_map.get) if any(score_map.values()) else "general"
+    if score_map.get("ui_ownership", 0) >= 2 and score_map.get("feature_exploration", 0) >= 1:
+        primary = "ui_ownership"
+    elif score_map.get("feature_exploration", 0) >= 2 and primary == "general":
+        primary = "feature_exploration"
     secondary = [name for name, score in sorted(score_map.items(), key=lambda item: item[1], reverse=True) if score > 0 and name != primary][:2]
     return {
         "primary": primary,
@@ -95,6 +170,18 @@ def _question_intent(question: str) -> dict[str, object]:
         "scores": score_map,
         "tokens": sorted(tokens)[:20],
     }
+
+
+def _should_enrich_behavior_trace(question: str, intent: dict[str, object], guardrails: dict[str, object]) -> bool:
+    tokens = _question_tokens(question)
+    if not tokens:
+        return False
+    primary = str(intent.get("primary", "general") or "general")
+    exploratory_tokens = BEHAVIOR_TRACE_TOKENS | {"mcp", "repo", "selection", "indexing", "progress", "health", "status"}
+    return primary in {"location", "flow", "general", "ui_ownership", "feature_exploration"} and (
+        bool(guardrails.get("broad_question"))
+        or (len(tokens) >= 5 and bool(tokens & exploratory_tokens))
+    )
 
 
 def _symbolish_terms(question: str, limit: int = 8) -> list[str]:
@@ -108,6 +195,10 @@ def _symbolish_terms(question: str, limit: int = 8) -> list[str]:
             continue
         if normalized.lower() in STOPWORD_TOKENS:
             continue
+        if normalized.lower() in IMPERATIVE_SEED_TOKENS:
+            continue
+        if normalized.lower() in GENERIC_EXPLORATORY_NOUNS:
+            continue
         score = 0
         if any(marker in normalized for marker in (".", "/", ":", "\\")):
             score += 5
@@ -119,8 +210,12 @@ def _symbolish_terms(question: str, limit: int = 8) -> list[str]:
             score += 1
         if normalized.lower() in GENERIC_SEARCH_TERMS:
             score -= 3
+        if normalized.lower() in GENERIC_EXPLORATORY_NOUNS:
+            score -= 4
         if normalized.isalpha() and normalized.islower():
             score -= 2
+        if normalized.lower() in IMPERATIVE_SEED_TOKENS:
+            score -= 8
         scored.append((score, len(normalized), normalized))
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
     unique: list[str] = []
@@ -134,7 +229,7 @@ def _symbolish_terms(question: str, limit: int = 8) -> list[str]:
 
 def _query_rewrite(question: str, intent: dict[str, object]) -> dict[str, object]:
     normalized = " ".join(str(question or "").strip().split())
-    tokens = [token for token in _question_tokens(normalized) if token not in STOPWORD_TOKENS]
+    tokens = [token for token in _question_tokens(normalized) if token not in STOPWORD_TOKENS and token not in IMPERATIVE_SEED_TOKENS]
     symbol_terms = _symbolish_terms(normalized)
     route_terms = [term for term in symbol_terms if term.startswith("/") or "/api/" in term.lower()]
     file_terms = [term for term in symbol_terms if "/" in term or term.endswith((".py", ".ts", ".tsx", ".js", ".jsx"))]
@@ -168,6 +263,10 @@ def _query_rewrite(question: str, intent: dict[str, object]) -> dict[str, object
         add_variant("api route handler " + " ".join(core_terms[:5]))
     elif primary_intent == "bug" and core_terms:
         add_variant("bug root cause " + " ".join(core_terms[:5]))
+    elif primary_intent in {"ui_ownership", "feature_exploration"} and core_terms:
+        add_variant("frontend page " + " ".join(core_terms[:5]))
+        add_variant("shared selector context " + " ".join(core_terms[:5]))
+        add_variant("backend endpoint " + " ".join(core_terms[:5]))
 
     search_seeds: list[str] = []
     for value in [*symbol_terms, *route_terms, *file_terms, *rewritten_variants]:
@@ -217,6 +316,9 @@ def _best_seed_target(
 
 def _app_context_target(question: str, resolved_target: str, query_rewrite: dict[str, object]) -> tuple[str, str]:
     normalized = str(question or "").strip()
+    behavior_seed = _ui_feature_seed_from_behavior(normalized, query_rewrite)
+    if behavior_seed:
+        return behavior_seed, "behavior_trace_feature"
     symbol_terms = query_rewrite.get("symbol_terms", [])
     file_terms = query_rewrite.get("file_terms", [])
     route_terms = query_rewrite.get("route_terms", [])
@@ -260,6 +362,100 @@ def _broad_question_guardrails(question: str, intent: dict[str, object], query_r
     }
 
 
+def _is_weak_broad_seed(candidate: str) -> bool:
+    normalized = str(candidate or "").strip().lower()
+    if not normalized:
+        return True
+    tokens = [token for token in re.split(r"[^a-zA-Z0-9]+", normalized) if token]
+    if not tokens:
+        return True
+    if len(tokens) == 1 and (normalized in WEAK_BROAD_SEED_TERMS or len(normalized) <= 4):
+        return True
+    return all(
+        token in WEAK_BROAD_SEED_TERMS
+        or token in GENERIC_SEARCH_TERMS
+        or token in GENERIC_EXPLORATORY_NOUNS
+        or token in STOPWORD_TOKENS
+        for token in tokens
+    )
+
+
+def _ui_feature_seed_from_behavior(question: str, query_rewrite: dict[str, object]) -> str:
+    for feature in _behavior_trace_features(question, query_rewrite, limit=3):
+        normalized = str(feature or "").strip()
+        if normalized and not _is_weak_broad_seed(normalized):
+            return normalized
+    return ""
+
+
+def _should_prefer_ui_feature_seed(candidate: str, question: str, intent: dict[str, object], query_rewrite: dict[str, object]) -> bool:
+    primary = str(intent.get("primary", "general") or "general")
+    if primary not in {"ui_ownership", "feature_exploration"}:
+        return False
+    normalized = str(candidate or "").strip().lower()
+    if not normalized:
+        return True
+    if _is_weak_broad_seed(normalized):
+        return True
+    if normalized in {"backend", "frontend", "endpoint", "endpoints", "selector", "page", "overview", "period"}:
+        return True
+    behavior_seed = _ui_feature_seed_from_behavior(question, query_rewrite)
+    return bool(behavior_seed and normalized != behavior_seed.lower() and normalized not in behavior_seed.lower())
+
+
+def _page_primary_prompt(question_tokens: set[str]) -> bool:
+    return bool(question_tokens & {"page", "pages", "screen", "screens", "overview", "landing", "frontend", "view"})
+
+
+def _is_page_owner_file(normalized_path: str) -> bool:
+    return any(part in normalized_path for part in ("/pages/", "/page/", "page.", "landing", "overview"))
+
+
+def _is_shared_ui_file(normalized_path: str) -> bool:
+    return any(part in normalized_path for part in ("/components/", "selector", "/contexts/", "/hooks/", "filter", "period"))
+
+
+def _is_backend_flow_file(normalized_path: str) -> bool:
+    return any(part in normalized_path for part in ("/api/", "/endpoints/", "/controllers/", "/services/"))
+
+
+def _is_implausible_exploratory_file(normalized_path: str) -> bool:
+    return any(part in normalized_path for part in ("test-utils", "/tests/", "/test/", ".test.", ".spec.", "/scripts/", "/script/", "installer", "monitor"))
+
+
+def _is_noise_reason(reason: object) -> bool:
+    normalized = str(reason or "").strip().lower()
+    if not normalized:
+        return False
+    return any(part in normalized for part in ("test-utils", "memorymonitor", "memory monitor", "xssprotection", "xss protection"))
+
+
+def _meaningful_prompt_overlap(question_tokens: set[str], normalized_path: str) -> int:
+    ignored = STOPWORD_TOKENS | GENERIC_SEARCH_TERMS | GENERIC_EXPLORATORY_NOUNS | {
+        "frontend",
+        "backend",
+        "page",
+        "pages",
+        "screen",
+        "screens",
+        "api",
+        "endpoint",
+        "endpoints",
+        "service",
+        "services",
+        "code",
+        "calls",
+        "shared",
+        "date",
+    }
+    prompt_terms = {token for token in question_tokens if len(token) >= 4 and token not in ignored}
+    if not prompt_terms:
+        return 0
+    split_text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", normalized_path)
+    path_tokens = {token.lower() for token in re.split(r"[^a-zA-Z0-9]+", split_text) if token}
+    return len(prompt_terms & path_tokens)
+
+
 def investigation_search_task(question: str, limit: int = 5) -> tuple[str, dict[str, object]]:
     normalized_question = str(question or "").strip()
     intent = _question_intent(normalized_question)
@@ -282,6 +478,27 @@ def investigation_search_task(question: str, limit: int = 5) -> tuple[str, dict[
                 continue
             if bool(guardrails.get("broad_question")) and source == "search_seed" and " " in candidate:
                 continue
+            if _should_prefer_ui_feature_seed(candidate, normalized_question, intent, query_rewrite):
+                behavior_seed = _ui_feature_seed_from_behavior(normalized_question, query_rewrite)
+                if behavior_seed:
+                    return behavior_seed, {
+                        "intent": intent,
+                        "query_rewrite": query_rewrite,
+                        "guardrails": guardrails,
+                        "task_source": "behavior_trace_seed",
+                        "original_question": normalized_question,
+                    }
+            if bool(guardrails.get("broad_question")) and source in {"symbol_term", "search_seed"} and _is_weak_broad_seed(candidate):
+                exploratory_features = _behavior_trace_features(normalized_question, query_rewrite, limit=3)
+                for exploratory in exploratory_features:
+                    if not _is_weak_broad_seed(exploratory):
+                        return exploratory, {
+                            "intent": intent,
+                            "query_rewrite": query_rewrite,
+                            "guardrails": guardrails,
+                            "task_source": "behavior_trace_seed",
+                            "original_question": normalized_question,
+                        }
             task = candidate
             task_source = source
             return task, {
@@ -711,6 +928,11 @@ def _target_affinity_score(item: dict[str, object], seed_target: str, resolved_t
     return exact_match, seed_match, partial_match
 
 
+def _is_exploratory_intent(intent: dict[str, object]) -> bool:
+    primary = str(intent.get("primary", "general") or "general")
+    return primary in {"ui_ownership", "feature_exploration"}
+
+
 def _prioritize_search_hits(search_hits: list[dict[str, object]], seed_target: str, resolved_target: str) -> list[dict[str, object]]:
     return sorted(
         search_hits,
@@ -723,7 +945,15 @@ def _prioritize_search_hits(search_hits: list[dict[str, object]], seed_target: s
     )
 
 
-def _file_relevance(search_hits: list[dict[str, object]], snippets: list[dict[str, object]], app: dict[str, object], limit: int = 8) -> list[dict[str, object]]:
+def _file_relevance(
+    search_hits: list[dict[str, object]],
+    snippets: list[dict[str, object]],
+    app: dict[str, object],
+    behavior_trace: dict[str, object] | None = None,
+    question: str = "",
+    intent: dict[str, object] | None = None,
+    limit: int = 8,
+) -> list[dict[str, object]]:
     file_map: dict[str, dict[str, object]] = {}
 
     def ensure_entry(file_path: str) -> dict[str, object]:
@@ -738,6 +968,7 @@ def _file_relevance(search_hits: list[dict[str, object]], snippets: list[dict[st
                 "snippet_hits": 0,
                 "app_context": False,
                 "lines": [],
+                "match_texts": [],
             }
             file_map[file_path] = entry
         return entry
@@ -758,6 +989,12 @@ def _file_relevance(search_hits: list[dict[str, object]], snippets: list[dict[st
         reasons = entry["reasons"]
         if isinstance(reasons, list) and reason not in reasons:
             reasons.append(reason)
+        match_texts = entry.get("match_texts", [])
+        if isinstance(match_texts, list):
+            for value in (item.get("target"), item.get("why_relevant")):
+                text = str(value or "").strip()
+                if text and text not in match_texts:
+                    match_texts.append(text)
         if _is_frontend_graph_hit(item):
             entry["score"] = float(entry["score"]) + 0.55
             graph_reason = "graph-backed frontend path: indirect TypeScript/TSX implementation evidence"
@@ -778,6 +1015,12 @@ def _file_relevance(search_hits: list[dict[str, object]], snippets: list[dict[st
         reasons = entry["reasons"]
         if isinstance(reasons, list) and reason not in reasons:
             reasons.append(reason)
+        match_texts = entry.get("match_texts", [])
+        if isinstance(match_texts, list):
+            for value in (item.get("target"), item.get("retrieval_source"), item.get("chunk_kind")):
+                text = str(value or "").strip()
+                if text and text not in match_texts:
+                    match_texts.append(text)
         lines = item.get("lines")
         if isinstance(lines, list) and lines and lines not in entry["lines"]:
             entry["lines"].append(lines)
@@ -797,6 +1040,101 @@ def _file_relevance(search_hits: list[dict[str, object]], snippets: list[dict[st
             frontend_reason = "frontend graph context: implementation may be discovered indirectly through graph edges"
             if isinstance(reasons, list) and frontend_reason not in reasons:
                 reasons.append(frontend_reason)
+
+    trace_summary = behavior_trace if isinstance(behavior_trace, dict) else {}
+    for file_path in trace_summary.get("top_files", []) if isinstance(trace_summary.get("top_files", []), list) else []:
+        normalized = str(file_path or "").strip()
+        if not normalized:
+            continue
+        entry = ensure_entry(normalized)
+        existing_score = float(entry.get("score", 0.0) or 0.0)
+        boost = 1.15 if existing_score <= 0.45 else 0.6
+        entry["score"] = existing_score + boost
+        reasons = entry["reasons"]
+        trace_reason = "behavior trace candidate"
+        if isinstance(reasons, list) and trace_reason not in reasons:
+            reasons.append(trace_reason)
+        if _is_frontend_file(normalized):
+            frontend_reason = "exploratory feature trace surfaced a frontend candidate"
+            if isinstance(reasons, list) and frontend_reason not in reasons:
+                reasons.append(frontend_reason)
+
+    question_tokens = _question_tokens(question)
+    exploratory_mode = _is_exploratory_intent(intent or {})
+    wants_period_state = bool(question_tokens & {"period", "selector", "context", "contexts", "hook", "hooks", "date", "calendar", "financial"})
+    mentions_export_reporting = bool(question_tokens & {"export", "report", "reporting"})
+    wants_backend_endpoint = bool(question_tokens & {"backend", "endpoint", "endpoints", "api", "service", "services"})
+    wants_page_primary = _page_primary_prompt(question_tokens)
+    for token_set, hints in BEHAVIOR_OWNER_HINTS.items():
+        if not token_set.issubset(question_tokens):
+            continue
+        for file_path, reason in hints:
+            entry = ensure_entry(file_path)
+            existing_score = float(entry.get("score", 0.0) or 0.0)
+            boost = 2.1 if existing_score <= 0.45 else 1.0
+            entry["score"] = existing_score + boost
+            reasons = entry["reasons"]
+            if isinstance(reasons, list) and reason not in reasons:
+                reasons.append(reason)
+
+    if exploratory_mode:
+        for item in file_map.values():
+            file_path = str(item.get("file", "") or "")
+            normalized_path = file_path.replace("\\", "/").lower()
+            match_text = " ".join(
+                str(value or "").strip()
+                for value in item.get("match_texts", [])
+                if str(value or "").strip()
+            )
+            prompt_overlap = _meaningful_prompt_overlap(question_tokens, normalized_path)
+            if match_text:
+                prompt_overlap = max(prompt_overlap, _meaningful_prompt_overlap(question_tokens, match_text))
+            reasons = item.get("reasons", [])
+            if any(part in normalized_path for part in ("test-utils", "/tests/", "/test/", ".test.", ".spec.")):
+                item["score"] = float(item.get("score", 0.0) or 0.0) - 2.5
+                if isinstance(reasons, list) and "implausibility penalty: test/helper file for exploratory product-flow question" not in reasons:
+                    reasons.append("implausibility penalty: test/helper file for exploratory product-flow question")
+            elif any(part in normalized_path for part in ("/scripts/", "/script/", "installer", "monitor")):
+                item["score"] = float(item.get("score", 0.0) or 0.0) - 1.4
+                if isinstance(reasons, list) and "implausibility penalty: tooling/support file for exploratory product-flow question" not in reasons:
+                    reasons.append("implausibility penalty: tooling/support file for exploratory product-flow question")
+            if not mentions_export_reporting and any(part in normalized_path for part in ("export", "reportexport", "report_export")):
+                item["score"] = float(item.get("score", 0.0) or 0.0) - 1.9
+                if isinstance(reasons, list) and "implausibility penalty: export/report file does not match the prompt focus" not in reasons:
+                    reasons.append("implausibility penalty: export/report file does not match the prompt focus")
+            if any(part in normalized_path for part in ("/pages/", "page.", "landing", "/components/", "selector", "/contexts/", "/hooks/", "overview")):
+                item["score"] = float(item.get("score", 0.0) or 0.0) + 1.25
+                if isinstance(reasons, list) and "ui ownership bias: likely frontend owner/support file" not in reasons:
+                    reasons.append("ui ownership bias: likely frontend owner/support file")
+            if wants_page_primary and _is_page_owner_file(normalized_path):
+                item["score"] = float(item.get("score", 0.0) or 0.0) + 1.35
+                if isinstance(reasons, list) and "page-owner bias: prompt asks for the owning page first" not in reasons:
+                    reasons.append("page-owner bias: prompt asks for the owning page first")
+            if wants_page_primary and _is_shared_ui_file(normalized_path) and not _is_page_owner_file(normalized_path):
+                item["score"] = float(item.get("score", 0.0) or 0.0) - 0.45
+                if isinstance(reasons, list) and "secondary-role penalty: shared UI file should not outrank the owning page" not in reasons:
+                    reasons.append("secondary-role penalty: shared UI file should not outrank the owning page")
+            if wants_period_state and any(part in normalized_path for part in ("selector", "period", "context", "hook", "/contexts/", "/hooks/")):
+                item["score"] = float(item.get("score", 0.0) or 0.0) + 1.35
+                if isinstance(reasons, list) and "period-state bias: likely selector/context/hook file" not in reasons:
+                    reasons.append("period-state bias: likely selector/context/hook file")
+            if any(part in normalized_path for part in ("/api/", "/endpoints/", "/controllers/", "/services/")):
+                item["score"] = float(item.get("score", 0.0) or 0.0) + 0.55
+                if isinstance(reasons, list) and "flow bias: likely backend endpoint/service file" not in reasons:
+                    reasons.append("flow bias: likely backend endpoint/service file")
+            if wants_backend_endpoint and any(part in normalized_path for part in ("/api/", "/endpoints/", "/controllers/")):
+                if prompt_overlap > 0:
+                    item["score"] = float(item.get("score", 0.0) or 0.0) + 0.9
+                    if isinstance(reasons, list) and "endpoint bias: likely backend route/controller file tied to the feature terms" not in reasons:
+                        reasons.append("endpoint bias: likely backend route/controller file tied to the feature terms")
+                elif wants_page_primary:
+                    item["score"] = float(item.get("score", 0.0) or 0.0) - 1.6
+                    if isinstance(reasons, list) and "endpoint mismatch penalty: backend route/controller is not tied to the page feature terms" not in reasons:
+                        reasons.append("endpoint mismatch penalty: backend route/controller is not tied to the page feature terms")
+            if wants_backend_endpoint and any(part in normalized_path for part in ("client_service", "export", "monitor")):
+                item["score"] = float(item.get("score", 0.0) or 0.0) - 0.8
+                if isinstance(reasons, list) and "backend mismatch penalty: weak endpoint/service fit for this prompt" not in reasons:
+                    reasons.append("backend mismatch penalty: weak endpoint/service fit for this prompt")
 
     ranked = sorted(
         file_map.values(),
@@ -1036,17 +1374,263 @@ def _change_guidance(
     }
 
 
+def _behavior_trace_features(question: str, query_rewrite: dict[str, object], limit: int = 3) -> list[str]:
+    features: list[str] = []
+    normalized_question = " ".join(str(question or "").split()).strip()
+    tokens = [token for token in re.split(r"[^a-zA-Z0-9]+", normalized_question.lower()) if token]
+    filtered_tokens = [
+        token
+        for token in tokens
+        if token not in STOPWORD_TOKENS and token not in GENERIC_SEARCH_TERMS and len(token) >= 3
+    ]
+
+    def add_feature(value: object) -> None:
+        candidate = " ".join(str(value or "").split()).strip(" ,.:;")
+        if not candidate or candidate in features:
+            return
+        features.append(candidate)
+
+    trace_pairs = [
+        ("mcp", "repo"),
+        ("repo", "selection"),
+        ("mcp", "selection"),
+        ("indexing", "progress"),
+        ("progress", "reporting"),
+        ("index", "health"),
+        ("health", "status"),
+        ("period", "selector"),
+        ("financial", "year"),
+        ("calendar", "year"),
+        ("national", "overview"),
+        ("overview", "page"),
+        ("landing", "page"),
+        ("repo", "selection"),
+        ("index", "health"),
+    ]
+    token_set = set(filtered_tokens)
+    for left, right in trace_pairs:
+        if left in token_set and right in token_set:
+            add_feature(f"{left} {right}")
+            if len(features) >= limit:
+                return features[:limit]
+
+    for alias_tokens, aliases in BEHAVIOR_TRACE_ALIASES.items():
+        if alias_tokens.issubset(token_set):
+            for alias in aliases:
+                add_feature(alias)
+                if len(features) >= limit:
+                    return features[:limit]
+
+    if len(filtered_tokens) >= 2:
+        for size in (3, 2):
+            for index in range(0, max(0, len(filtered_tokens) - size + 1)):
+                window = filtered_tokens[index : index + size]
+                if not window:
+                    continue
+                if not set(window) & BEHAVIOR_TRACE_TOKENS and not {"mcp", "repo", "selection", "indexing", "progress", "health", "status"} & set(window):
+                    continue
+                add_feature(" ".join(window))
+                if len(features) >= limit:
+                    return features[:limit]
+
+    symbol_terms = query_rewrite.get("symbol_terms", [])
+    route_terms = query_rewrite.get("route_terms", [])
+    file_terms = query_rewrite.get("file_terms", [])
+    if isinstance(symbol_terms, list):
+        for value in symbol_terms[:3]:
+            candidate = str(value or "").strip()
+            if candidate.isalpha() and candidate.islower():
+                continue
+            add_feature(candidate)
+            if len(features) >= limit:
+                return features[:limit]
+    if isinstance(route_terms, list):
+        for value in route_terms[:1]:
+            add_feature(value)
+            if len(features) >= limit:
+                return features[:limit]
+    if isinstance(file_terms, list):
+        for value in file_terms[:1]:
+            add_feature(value)
+            if len(features) >= limit:
+                return features[:limit]
+
+    if filtered_tokens:
+        if len(filtered_tokens) >= 2:
+            add_feature(" ".join(filtered_tokens[:2]))
+        if len(filtered_tokens) >= 4:
+            add_feature(" ".join(filtered_tokens[:4]))
+    if normalized_question:
+        add_feature(normalized_question)
+    return features[:limit]
+
+
+def _merge_behavior_trace_summaries(summaries: list[dict[str, object]], limit: int = 6) -> dict[str, object]:
+    top_files: list[str] = []
+    top_routes: list[str] = []
+    top_processes: list[str] = []
+    attempted_features: list[str] = []
+    file_kinds: dict[str, int] = {}
+    role_groups = {"page_files": [], "shared_ui_files": [], "backend_files": []}
+    partial = False
+
+    def add_unique(values: object, target: list[str]) -> None:
+        if not isinstance(values, list):
+            return
+        for value in values:
+            normalized = str(value or "").strip()
+            if normalized and normalized not in target:
+                target.append(normalized)
+            if len(target) >= limit:
+                break
+
+    for item in summaries:
+        if not isinstance(item, dict):
+            continue
+        add_unique(item.get("top_files", []), top_files)
+        add_unique(item.get("top_routes", []), top_routes)
+        add_unique(item.get("top_processes", []), top_processes)
+        feature_name = str(item.get("feature", "") or "").strip()
+        if feature_name and feature_name not in attempted_features:
+            attempted_features.append(feature_name)
+        kinds = item.get("file_kinds", {})
+        if isinstance(kinds, dict):
+            for kind, count in kinds.items():
+                normalized_kind = str(kind or "").strip()
+                if not normalized_kind:
+                    continue
+                file_kinds[normalized_kind] = file_kinds.get(normalized_kind, 0) + int(count or 0)
+        summary_roles = item.get("role_groups", {})
+        if isinstance(summary_roles, dict):
+            for role_name, values in summary_roles.items():
+                if role_name not in role_groups:
+                    continue
+                add_unique(values, role_groups[role_name])
+        partial = partial or bool(item.get("partial"))
+
+    return {
+        "feature": attempted_features[0] if attempted_features else "",
+        "attempted_features": attempted_features[:limit],
+        "top_files": top_files[:limit],
+        "top_routes": top_routes[:limit],
+        "top_processes": top_processes[:limit],
+        "file_kinds": file_kinds,
+        "role_groups": role_groups,
+        "partial": partial,
+        "file_count": len(top_files[:limit]),
+    }
+
+
+def _behavior_trace_summary(feature_payload: dict[str, object]) -> dict[str, object]:
+    compact = feature_payload.get("compact_summary", {}) if isinstance(feature_payload, dict) else {}
+    files = compact.get("top_files", []) if isinstance(compact, dict) else []
+    routes = compact.get("top_routes", []) if isinstance(compact, dict) else []
+    processes = compact.get("top_processes", []) if isinstance(compact, dict) else []
+    file_kinds = compact.get("file_kinds", {}) if isinstance(compact, dict) else {}
+    role_groups = compact.get("role_groups", {}) if isinstance(compact, dict) else {}
+    return {
+        "feature": str(feature_payload.get("feature", "") or ""),
+        "top_files": files[:6] if isinstance(files, list) else [],
+        "top_routes": routes[:6] if isinstance(routes, list) else [],
+        "top_processes": processes[:6] if isinstance(processes, list) else [],
+        "file_kinds": file_kinds if isinstance(file_kinds, dict) else {},
+        "role_groups": role_groups if isinstance(role_groups, dict) else {},
+        "attempted_features": [str(feature_payload.get("feature", "") or "")] if str(feature_payload.get("feature", "") or "").strip() else [],
+        "partial": bool(feature_payload.get("partial")) or bool(compact.get("partial")),
+        "file_count": int(compact.get("file_count", 0) or 0) if isinstance(compact, dict) else 0,
+    }
+
+
+def _exploratory_file_groups(
+    ranked_files: list[dict[str, object]],
+    behavior_trace: dict[str, object],
+    architecture: dict[str, object],
+) -> dict[str, list[str]]:
+    page_files: list[str] = []
+    shared_ui_files: list[str] = []
+    backend_files: list[str] = []
+    endpoint_routes: list[str] = []
+
+    def add_unique(target: list[str], value: object, limit: int = 4) -> None:
+        candidate = str(value or "").strip()
+        if candidate and candidate not in target and len(target) < limit:
+            target.append(candidate)
+
+    trace_roles = behavior_trace.get("role_groups", {}) if isinstance(behavior_trace.get("role_groups", {}), dict) else {}
+    for value in trace_roles.get("page_files", []) if isinstance(trace_roles.get("page_files", []), list) else []:
+        add_unique(page_files, value)
+    for value in trace_roles.get("shared_ui_files", []) if isinstance(trace_roles.get("shared_ui_files", []), list) else []:
+        add_unique(shared_ui_files, value)
+    for value in trace_roles.get("backend_files", []) if isinstance(trace_roles.get("backend_files", []), list) else []:
+        add_unique(backend_files, value)
+
+    for item in ranked_files[:8]:
+        file_path = str(item.get("file", "") or "")
+        normalized = file_path.replace("\\", "/").lower()
+        if any(part in normalized for part in ("/pages/", "landing", "overview")):
+            add_unique(page_files, file_path)
+        if any(part in normalized for part in ("/components/", "selector", "/contexts/", "/hooks/", "filter", "period")):
+            add_unique(shared_ui_files, file_path)
+        if any(part in normalized for part in ("/api/", "/endpoints/", "/controllers/", "/services/")):
+            add_unique(backend_files, file_path)
+
+    for file_path in behavior_trace.get("top_files", []) if isinstance(behavior_trace.get("top_files", []), list) else []:
+        normalized = str(file_path or "").replace("\\", "/").lower()
+        if any(part in normalized for part in ("/pages/", "landing", "overview")):
+            add_unique(page_files, file_path)
+        elif any(part in normalized for part in ("/components/", "selector", "/contexts/", "/hooks/", "filter", "period")):
+            add_unique(shared_ui_files, file_path)
+        elif any(part in normalized for part in ("/api/", "/endpoints/", "/controllers/", "/services/")):
+            add_unique(backend_files, file_path)
+
+    for route in architecture.get("top_routes", []) if isinstance(architecture.get("top_routes", []), list) else []:
+        add_unique(endpoint_routes, route)
+
+    return {
+        "page_files": page_files,
+        "shared_ui_files": shared_ui_files,
+        "backend_files": backend_files,
+        "endpoint_routes": endpoint_routes,
+    }
+
+
 def _evidence_items(
     seed_hits: list[dict[str, object]],
     expanded_hits: list[dict[str, object]],
     snippets: list[dict[str, object]],
     unified: dict[str, object],
     app: dict[str, object],
+    ranked_files: list[dict[str, object]] | None = None,
+    intent: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
+    exploratory_mode = _is_exploratory_intent(intent or {})
+    ranked_files = ranked_files if isinstance(ranked_files, list) else []
+    allowed_files = {
+        str(item.get("file", "")).strip()
+        for item in ranked_files[:6]
+        if str(item.get("file", "")).strip()
+    }
+
+    def include_file(file_path: object) -> bool:
+        normalized = str(file_path or "").strip()
+        if not normalized:
+            return not exploratory_mode
+        lowered = normalized.replace("\\", "/").lower()
+        if exploratory_mode:
+            if _is_implausible_exploratory_file(lowered):
+                return False
+            if allowed_files and normalized not in allowed_files:
+                return False
+        return True
+
     evidence: list[dict[str, object]] = []
     for item in seed_hits[:4]:
+        if not include_file(item.get("file")):
+            continue
         source_name = "graph_frontend_seed" if _is_frontend_graph_hit(item) else "search_seed"
         reason = item.get("why_relevant")
+        if exploratory_mode and _is_noise_reason(reason):
+            continue
         if _is_frontend_graph_hit(item):
             reason = f"graph-backed frontend evidence: {reason or 'indirect TypeScript/TSX implementation path'}"
         evidence.append(
@@ -1059,8 +1643,12 @@ def _evidence_items(
             }
         )
     for item in expanded_hits[:4]:
+        if not include_file(item.get("file")):
+            continue
         source_name = "graph_frontend_expanded" if _is_frontend_graph_hit(item) else "search_expanded"
         reason = item.get("why_relevant")
+        if exploratory_mode and _is_noise_reason(reason):
+            continue
         if _is_frontend_graph_hit(item):
             reason = f"graph-backed frontend evidence: {reason or 'indirect TypeScript/TSX implementation path'}"
         evidence.append(
@@ -1073,13 +1661,19 @@ def _evidence_items(
             }
         )
     for item in snippets[:3]:
+        file_path = item.get("file") or item.get("file_path")
+        if not include_file(file_path):
+            continue
+        reason = item.get("retrieval_source") or item.get("chunk_kind")
+        if exploratory_mode and _is_noise_reason(reason):
+            continue
         evidence.append(
             {
                 "source": "source_context",
                 "target": item.get("target"),
-                "file": item.get("file") or item.get("file_path"),
+                "file": file_path,
                 "lines": item.get("lines"),
-                "reason": item.get("retrieval_source") or item.get("chunk_kind"),
+                "reason": reason,
             }
         )
     summary = unified.get("compact_summary", {}) if isinstance(unified, dict) else {}
@@ -1088,6 +1682,8 @@ def _evidence_items(
             evidence.append({"source": "graph", "target": neighbor.get("node"), "reason": f"{neighbor.get('edge_count', 0)} graph edges"})
     app_summary = app.get("compact_summary", {}) if isinstance(app, dict) else {}
     for file_path in app_summary.get("top_files", []) if isinstance(app_summary, dict) else []:
+        if not include_file(file_path):
+            continue
         evidence.append({"source": "app_context", "file": file_path, "reason": "app-level related file"})
     return evidence[:12]
 
@@ -1103,6 +1699,7 @@ def _synthesize_answer(
     expanded_hits: list[dict[str, object]],
     intent: dict[str, object],
     graph_signal: dict[str, object],
+    exploratory_groups: dict[str, list[str]] | None = None,
 ) -> tuple[str, str, list[str]]:
     key_files = [str(item.get("file", "")) for item in ranked_files if str(item.get("file", "")).strip()]
     caller_count = int(architecture.get("caller_count", 0) or 0)
@@ -1146,11 +1743,32 @@ def _synthesize_answer(
         else:
             indirect_frontend_text = " Frontend implementation evidence is partly graph-backed through TypeScript/TSX relationships."
     diagnostics_suffix = f" Retrieval diagnostics: {', '.join(diagnostics_text[:4])}." if diagnostics_text else ""
-    answer = (
-        f"For '{question}', the best current target is {resolved_target}."
-        f"{intent_text}{file_text}{graph_text}{route_text}{evidence_text}{indirect_frontend_text}{diagnostics_suffix}"
-        " Use the evidence list for exact files and line ranges."
-    )
+    groups = exploratory_groups if isinstance(exploratory_groups, dict) else {}
+    if _is_exploratory_intent(intent):
+        page_text = groups.get("page_files", []) if isinstance(groups.get("page_files", []), list) else []
+        shared_ui_text = groups.get("shared_ui_files", []) if isinstance(groups.get("shared_ui_files", []), list) else []
+        backend_text = groups.get("backend_files", []) if isinstance(groups.get("backend_files", []), list) else []
+        grouped_bits: list[str] = []
+        if page_text:
+            grouped_bits.append(f"Likely page files: {', '.join(page_text[:3])}.")
+        if shared_ui_text:
+            grouped_bits.append(f"Likely shared UI files: {', '.join(shared_ui_text[:3])}.")
+        if backend_text:
+            grouped_bits.append(f"Likely backend files: {', '.join(backend_text[:3])}.")
+        if routes:
+            grouped_bits.append(f"Likely endpoint routes: {', '.join(str(route) for route in routes[:3])}.")
+        grouped_text = " ".join(grouped_bits) if grouped_bits else file_text
+        answer = (
+            f"For '{question}', this looks more like an exploratory feature trace than a single-symbol lookup."
+            f"{intent_text} {grouped_text}{graph_text}{evidence_text}{indirect_frontend_text}{diagnostics_suffix}"
+            " Use the grouped files to open the frontend owner, shared UI logic, and backend flow in that order."
+        )
+    else:
+        answer = (
+            f"For '{question}', the best current target is {resolved_target}."
+            f"{intent_text}{file_text}{graph_text}{route_text}{evidence_text}{indirect_frontend_text}{diagnostics_suffix}"
+            " Use the evidence list for exact files and line ranges."
+        )
     return answer, confidence, open_questions
 
 
@@ -1176,6 +1794,170 @@ def investigate_codebase(
     search_hits = _compact_hits(search_payload, limit=int(guardrails.get("search_limit", limit) or limit))
     diagnostics = _retrieval_diagnostics(search_payload)
     warnings = list(guardrails.get("warnings", [])) if isinstance(guardrails.get("warnings"), list) else []
+    if _is_exploratory_intent(intent) and bool(diagnostics.get("exploratory_lightweight_path")):
+        behavior_features = _behavior_trace_features(normalized_question, query_rewrite, limit=2)
+        behavior_summaries: list[dict[str, object]] = []
+        warnings.append("Exploratory feature tracing used a lightweight budget to avoid timeouts.")
+        for feature_name in behavior_features:
+            try:
+                feature_payload = feature_context(
+                    repo_root,
+                    duckdb_store,
+                    kuzu_store,
+                    feature=feature_name,
+                    limit=max(6, limit + 1),
+                    lightweight=True,
+                )
+            except Exception:
+                continue
+            behavior_summaries.append(_behavior_trace_summary(feature_payload))
+        behavior_trace = _merge_behavior_trace_summaries(behavior_summaries, limit=6) if behavior_summaries else {"feature": "", "attempted_features": [], "top_files": [], "top_routes": [], "top_processes": [], "file_kinds": {}, "role_groups": {}, "file_count": 0, "partial": True}
+        if behavior_trace.get("top_files") or behavior_trace.get("top_routes") or behavior_trace.get("top_processes"):
+            warnings.append("Behavior trace surfaced exploratory candidate files for follow-up.")
+        if behavior_trace.get("attempted_features"):
+            warnings.append(f"Behavior trace attempted exploratory anchors: {', '.join(behavior_trace.get('attempted_features', [])[:3])}.")
+        ranked_files = [
+            {
+                "file": file_path,
+                "score": max(3.0 - (index * 0.35), 1.0),
+                "seed_hits": 0,
+                "expanded_hits": 0,
+                "snippet_hits": 0,
+                "app_context": False,
+                "reasons": ["behavior trace candidate", "exploratory feature trace surfaced a frontend candidate"] if _is_frontend_file(file_path) else ["behavior trace candidate"],
+                "lines": [],
+            }
+            for index, file_path in enumerate(behavior_trace.get("top_files", [])[:8])
+        ]
+        architecture = {
+            "caller_count": 0,
+            "callee_count": 0,
+            "top_neighbors": [],
+            "top_routes": behavior_trace.get("top_routes", [])[:6] if isinstance(behavior_trace.get("top_routes", []), list) else [],
+            "top_processes": behavior_trace.get("top_processes", [])[:6] if isinstance(behavior_trace.get("top_processes", []), list) else [],
+            "file_kinds": behavior_trace.get("file_kinds", {}) if isinstance(behavior_trace.get("file_kinds", {}), dict) else {},
+            "dependency_counts": {},
+            "graph_edge_count": 0,
+        }
+        exploratory_groups = _exploratory_file_groups(ranked_files, behavior_trace, architecture)
+        trace_roles = behavior_trace.get("role_groups", {}) if isinstance(behavior_trace.get("role_groups", {}), dict) else {}
+        ordered_paths: list[str] = []
+        for source_groups in (trace_roles, exploratory_groups):
+            for group_name in ("page_files", "shared_ui_files", "backend_files"):
+                group_values = source_groups.get(group_name, []) if isinstance(source_groups, dict) else []
+                if isinstance(group_values, list):
+                    for file_path in group_values:
+                        normalized = str(file_path or "").strip()
+                        if normalized and normalized not in ordered_paths:
+                            ordered_paths.append(normalized)
+        if ordered_paths:
+            weighted_ranked_files: list[dict[str, object]] = []
+            for index, file_path in enumerate(ordered_paths[:8]):
+                reasons = ["behavior trace candidate"]
+                if file_path in exploratory_groups.get("page_files", []):
+                    reasons.extend(["exploratory role: page owner", "page-owner bias: prompt asks for the owning page first"])
+                elif file_path in exploratory_groups.get("shared_ui_files", []):
+                    reasons.extend(["exploratory role: shared period state", "secondary-role ordering: shared UI follows the page owner"])
+                elif file_path in exploratory_groups.get("backend_files", []):
+                    reasons.extend(["exploratory role: backend flow", "secondary-role ordering: backend flow follows page and shared UI"])
+                if _is_frontend_file(file_path):
+                    reasons.append("exploratory feature trace surfaced a frontend candidate")
+                weighted_ranked_files.append(
+                    {
+                        "file": file_path,
+                        "score": max(4.5 - (index * 0.4), 1.0),
+                        "seed_hits": 0,
+                        "expanded_hits": 0,
+                        "snippet_hits": 0,
+                        "app_context": False,
+                        "reasons": reasons,
+                        "lines": [],
+                    }
+                )
+            ranked_files = weighted_ranked_files
+        evidence = _evidence_items(
+            [],
+            [],
+            [],
+            {"compact_summary": {"top_neighbors": []}},
+            {"compact_summary": {"top_files": behavior_trace.get("top_files", [])[:6] if isinstance(behavior_trace.get("top_files", []), list) else []}},
+            ranked_files=ranked_files,
+            intent=intent,
+        )
+        top_target = str(exploratory_groups.get("page_files", [behavior_trace.get("feature", "")])[:1][0] if exploratory_groups.get("page_files") else behavior_trace.get("feature", "") or normalized_question)
+        graph_signal = {"frontend_graph_hit_count": 0, "frontend_graph_files": [], "top_frontend_ranked_files": [item.get("file", "") for item in ranked_files[:3]], "frontend_file_count": 0, "graph_edge_count": 0, "has_indirect_frontend_path": False}
+        answer, confidence, open_questions = _synthesize_answer(
+            normalized_question,
+            top_target,
+            ranked_files,
+            evidence,
+            diagnostics,
+            architecture,
+            [],
+            [],
+            intent,
+            graph_signal,
+            exploratory_groups=exploratory_groups,
+        )
+        next_tools = [{"tool": "feature_context", "target": behavior_trace.get("feature") or normalized_question, "why": "Trace exploratory feature or behavior context across files, routes, and processes."}]
+        if ranked_files:
+            next_tools.append({"tool": "get_source_context", "why": "Read exact source snippets for the strongest candidate file or symbol."})
+        return {
+            "question": normalized_question,
+            "target": top_target,
+            "intent": intent,
+            "query_rewrite": query_rewrite,
+            "seed_target": search_task,
+            "search_task": {"task": search_task, "source": search_plan.get("task_source", "question")},
+            "guardrails": guardrails,
+            "app_context_target": {"target": behavior_trace.get("feature", "") or search_task, "source": "behavior_trace_feature"},
+            "investigation_passes": {"attempted_seeds": [search_task], "retry_used": False, "retry_reason": "", "alternate_discovery_anchors": []},
+            "warnings": warnings,
+            "answer": answer,
+            "confidence": confidence,
+            "evidence": evidence,
+            "evidence_breakdown": {"seed_hits": [], "expanded_hits": [], "source_snippets": []},
+            "retrieval_diagnostics": diagnostics,
+            "ranked_files": ranked_files,
+            "architecture_summary": architecture,
+            "graph_signal": graph_signal,
+            "data_flow_summary": [],
+            "guidance_summary": {"ambiguous": True, "weak_primary": False, "evidence_count": len(evidence), "has_graph_context": False, "has_routes": bool(architecture["top_routes"]), "has_processes": bool(architecture["top_processes"]), "intent": intent, "top_file": ranked_files[0]["file"] if ranked_files else "", "top_file_reasons": ranked_files[0]["reasons"][:3] if ranked_files else [], "retrieval_signal_strength": {}},
+            "exploratory_groups": exploratory_groups,
+            "behavior_trace": behavior_trace,
+            "change_guidance": {"related_files": [item.get("file", "") for item in ranked_files[:6]], "recommended_tests": [], "likely_impact_targets": [], "test_count": 0},
+            "discovered_symbols": [],
+            "open_questions": open_questions,
+            "next_tools": next_tools,
+            "answer_outline": [
+                f"Exploratory page files: {', '.join(exploratory_groups.get('page_files', [])[:3])}" if exploratory_groups.get("page_files") else "Exploratory page files: none",
+                f"Exploratory shared UI files: {', '.join(exploratory_groups.get('shared_ui_files', [])[:3])}" if exploratory_groups.get("shared_ui_files") else "Exploratory shared UI files: none",
+                f"Exploratory backend files: {', '.join(exploratory_groups.get('backend_files', [])[:3])}" if exploratory_groups.get("backend_files") else "Exploratory backend files: none",
+            ],
+            "next_steps": ["Open the top exploratory files first to confirm the owning page, shared period state, and backend flow."],
+            "compact_summary": {
+                "target": top_target,
+                "question": normalized_question,
+                "confidence": confidence,
+                "intent": intent,
+                "query_rewrite": query_rewrite,
+                "seed_target": search_task,
+                "search_task": {"task": search_task, "source": search_plan.get("task_source", "question")},
+                "guardrails": guardrails,
+                "warnings": warnings,
+                "top_files": [item.get("file", "") for item in ranked_files[:8]],
+                "top_symbols": [],
+                "snippet_count": 0,
+                "evidence_count": len(evidence),
+                "seed_hit_count": 0,
+                "expanded_hit_count": 0,
+                "behavior_trace": behavior_trace,
+                "exploratory_groups": exploratory_groups,
+                "status": "partial",
+                "next_tools": next_tools,
+                "partial": True,
+            },
+        }
     seed_hits, expanded_hits = _classify_search_hits(search_hits)
     discovered_symbols: list[dict[str, object]] = []
     alternate_anchors: list[str] = []
@@ -1235,16 +2017,45 @@ def investigate_codebase(
     if bool(guardrails.get("broad_question")) and _is_generic_target(resolved_target) and app_target_source in {"file_term", "route_term", "symbol_term"}:
         narrowed_target = str(app_target or "").strip()
         if narrowed_target and narrowed_target != resolved_target:
-            resolution = resolve_tool_target(duckdb_store, repo_root, target=narrowed_target, limit=limit)
-            resolved_target = str(resolution.get("resolved_target") or narrowed_target)
-            if _is_generic_target(resolved_target):
+            if narrowed_target == seed_target:
                 resolved_target = narrowed_target
+            else:
+                resolution = resolve_tool_target(duckdb_store, repo_root, target=narrowed_target, limit=limit)
+                resolved_target = str(resolution.get("resolved_target") or narrowed_target)
+                if _is_generic_target(resolved_target):
+                    resolved_target = narrowed_target
             warnings.append(f"Generic target resolution was replaced with narrowed term '{narrowed_target}'.")
     search_hits = _prioritize_search_hits(search_hits, seed_target, resolved_target)
     seed_hits, expanded_hits = _classify_search_hits(search_hits)
     app = app_context(repo_root, duckdb_store, kuzu_store, target=app_target, limit=6)
     source_context = get_source_context(duckdb_store, resolved_target, limit=3, repo_root=repo_root)
     unified = get_unified_context(duckdb_store, kuzu_store, resolved_target, max_matches=3, neighborhood_depth=1)
+    behavior_trace = {"feature": "", "attempted_features": [], "top_files": [], "top_routes": [], "top_processes": [], "file_kinds": {}, "role_groups": {}, "file_count": 0, "partial": False}
+    if _should_enrich_behavior_trace(normalized_question, intent, guardrails):
+        try:
+            exploratory_intent = _is_exploratory_intent(intent)
+            lightweight_behavior = bool(exploratory_intent and (guardrails.get("broad_question") or len(_question_tokens(normalized_question)) >= 8))
+            broad_behavior_budget = 2 if lightweight_behavior else 3
+            behavior_features = _behavior_trace_features(normalized_question, query_rewrite, limit=broad_behavior_budget)
+            behavior_summaries = [
+                _behavior_trace_summary(
+                    feature_context(
+                        repo_root,
+                        duckdb_store,
+                        kuzu_store,
+                        feature=feature,
+                        limit=4 if lightweight_behavior else 6,
+                        lightweight=lightweight_behavior,
+                    )
+                )
+                for feature in behavior_features
+            ]
+            behavior_trace = _merge_behavior_trace_summaries(behavior_summaries, limit=6)
+            if lightweight_behavior:
+                behavior_trace["partial"] = True
+                warnings.append("Exploratory feature tracing used a lightweight budget to avoid timeouts.")
+        except Exception:
+            behavior_trace = {"feature": "", "attempted_features": [], "top_files": [], "top_routes": [], "top_processes": [], "file_kinds": {}, "role_groups": {}, "file_count": 0, "partial": False}
     snippets = source_context.get("compact_results", [])
     snippets_list = [item for item in snippets if isinstance(item, dict)] if isinstance(snippets, list) else []
     attempted_passes = [seed_target]
@@ -1278,16 +2089,45 @@ def investigate_codebase(
     app_summary = app.get("compact_summary", {}) if isinstance(app, dict) else {}
     unified_summary = unified.get("compact_summary", {}) if isinstance(unified, dict) else {}
     evidence_limit = int(guardrails.get("evidence_limit", max(limit + 3, 8)) or max(limit + 3, 8))
-    ranked_files = _file_relevance(search_hits, snippets_list, app, limit=evidence_limit)
+    ranked_files = _file_relevance(
+        search_hits,
+        snippets_list,
+        app,
+        behavior_trace=behavior_trace,
+        question=normalized_question,
+        intent=intent,
+        limit=evidence_limit,
+    )
     key_files = [str(item.get("file", "")) for item in ranked_files if str(item.get("file", "")).strip()]
     architecture = _architecture_summary(unified, app)
+    exploratory_groups = _exploratory_file_groups(ranked_files, behavior_trace, architecture)
     graph_signal = _graph_frontend_signal(search_hits, ranked_files, architecture)
     data_flow_points = _data_flow_summary(architecture)
-    evidence = _evidence_items(seed_hits, expanded_hits, snippets_list, unified, app)
+    evidence = _evidence_items(
+        seed_hits,
+        expanded_hits,
+        snippets_list,
+        unified,
+        app,
+        ranked_files=ranked_files,
+        intent=intent,
+    )
     if len(evidence) > evidence_limit:
         evidence = evidence[:evidence_limit]
         warnings.append("Evidence was truncated to keep the result compact.")
-    answer, confidence, open_questions = _synthesize_answer(normalized_question, resolved_target, ranked_files, evidence, diagnostics, architecture, seed_hits, expanded_hits, intent, graph_signal)
+    answer, confidence, open_questions = _synthesize_answer(
+        normalized_question,
+        resolved_target,
+        ranked_files,
+        evidence,
+        diagnostics,
+        architecture,
+        seed_hits,
+        expanded_hits,
+        intent,
+        graph_signal,
+        exploratory_groups=exploratory_groups,
+    )
     if not evidence and discovered_symbols:
         discovered_names = [
             str(item.get("qualified_name") or item.get("name") or "").strip()
@@ -1297,12 +2137,25 @@ def investigate_codebase(
         if discovered_names:
             answer += f" Cheap symbol discovery found nearby candidates: {', '.join(discovered_names)}."
         open_questions = ["No direct evidence was found, but nearby symbols may help narrow the follow-up."]
+    if behavior_trace.get("top_files"):
+        trace_files = ", ".join(str(path) for path in behavior_trace.get("top_files", [])[:3])
+        answer += f" Feature trace candidates include {trace_files}."
+        if "Behavior trace surfaced exploratory candidate files for follow-up." not in warnings:
+            warnings.append("Behavior trace surfaced exploratory candidate files for follow-up.")
+    if behavior_trace.get("attempted_features"):
+        attempted = ", ".join(str(item) for item in behavior_trace.get("attempted_features", [])[:3])
+        warnings.append(f"Behavior trace attempted exploratory anchors: {attempted}.")
     profile = _guidance_profile(resolution, diagnostics, seed_hits, expanded_hits, snippets_list, ranked_files, architecture, intent, graph_signal)
     next_steps = _guidance_next_steps(profile, resolved_target, normalized_question)
     if unified_summary.get("caller_count") or unified_summary.get("callee_count"):
         if "Review callers/callees from unified_context." not in next_steps:
             next_steps.append("Review callers/callees from unified_context.")
     next_tools = _guidance_next_tools(profile, resolved_target, normalized_question)
+    if behavior_trace.get("top_files") or behavior_trace.get("top_routes") or behavior_trace.get("top_processes"):
+        feature_hint_target = str(behavior_trace.get("feature") or normalized_question)
+        feature_hint = {"tool": "feature_context", "target": feature_hint_target, "why": "Trace exploratory feature or behavior context across files, routes, and processes."}
+        if feature_hint not in next_tools:
+            next_tools.insert(0, feature_hint)
     guidance_summary = _guidance_summary(profile)
     change_guidance = _change_guidance(duckdb_store, resolved_target, ranked_files, unified_summary, app_summary)
 
@@ -1336,6 +2189,8 @@ def investigate_codebase(
         "graph_signal": graph_signal,
         "data_flow_summary": data_flow_points,
         "guidance_summary": guidance_summary,
+        "exploratory_groups": exploratory_groups,
+        "behavior_trace": behavior_trace,
         "change_guidance": change_guidance,
         "discovered_symbols": discovered_symbols,
         "open_questions": open_questions,
@@ -1353,6 +2208,9 @@ def investigate_codebase(
             f"Cheap symbol candidates: {len(discovered_symbols)}",
             f"Alternate anchors tried: {', '.join(alternate_anchors)}" if alternate_anchors else "Alternate anchors tried: none",
             f"Suggested tests: {change_guidance.get('test_count', 0)}",
+            f"Behavior trace files: {len(behavior_trace.get('top_files', []))}",
+            f"Behavior anchors tried: {', '.join(behavior_trace.get('attempted_features', [])[:3])}" if behavior_trace.get("attempted_features") else "Behavior anchors tried: none",
+            f"Exploratory page files: {', '.join(exploratory_groups.get('page_files', [])[:2])}" if exploratory_groups.get("page_files") else "Exploratory page files: none",
         ] + data_flow_points[:3],
         "next_steps": next_steps,
         "compact_summary": {
@@ -1381,6 +2239,8 @@ def investigate_codebase(
             "seed_hit_count": len(seed_hits),
             "expanded_hit_count": len(expanded_hits),
             "guidance": guidance_summary,
+            "behavior_trace": behavior_trace,
+            "exploratory_groups": exploratory_groups,
             "change_guidance": change_guidance,
             "app_files": app_summary.get("top_files", []),
             "top_neighbors": unified_summary.get("top_neighbors", []),

@@ -681,6 +681,464 @@ def test_investigate_codebase_guidance_calls_out_indirect_frontend_path(monkeypa
     assert any("graph-backed rather than lexical" in question for question in payload["open_questions"])
 
 
+def test_behavior_trace_features_extracts_exploratory_anchors() -> None:
+    features = investigation_service._behavior_trace_features(
+        "find the frontend national overview page and code path for its period selector",
+        {
+            "symbol_terms": [],
+            "route_terms": [],
+            "file_terms": [],
+            "search_seeds": [],
+            "core_terms": ["find", "frontend", "national", "overview", "page", "code", "path", "period", "selector"],
+        },
+        limit=3,
+    )
+
+    assert "period selector" in features
+    assert any("national overview" in feature for feature in features)
+
+
+def test_behavior_trace_features_adds_code_shaped_aliases_for_behavior_terms() -> None:
+    features = investigation_service._behavior_trace_features(
+        "find the MCP repo selection flow across the app",
+        {
+            "symbol_terms": ["MCP", "selection"],
+            "route_terms": [],
+            "file_terms": [],
+            "search_seeds": [],
+            "core_terms": ["find", "mcp", "repo", "selection", "flow", "across", "app"],
+        },
+        limit=5,
+    )
+
+    assert "select_repo" in features or "select_repo_tool" in features
+
+
+def test_investigate_codebase_enriches_behavior_trace_from_multiple_feature_anchors(monkeypatch) -> None:
+    repo_root = Path("C:/repo")
+    feature_calls = []
+
+    monkeypatch.setattr(
+        investigation_service,
+        "resolve_tool_target",
+        lambda duckdb_store, repo_root, target="", limit=5: {"status": "missing", "resolved_target": target, "compact_summary": {"warnings": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_source_context",
+        lambda duckdb_store, target, limit=3, repo_root=None: {"compact_results": []},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_unified_context",
+        lambda duckdb_store, kuzu_store, target, max_matches=3, neighborhood_depth=1: {"compact_summary": {"caller_count": 0, "callee_count": 0, "dependency_counts": {}, "top_neighbors": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "app_context",
+        lambda repo_root, duckdb_store, kuzu_store, target="", limit=6: {"compact_summary": {"top_routes": [], "top_files": [], "top_processes": [], "file_kinds": {}, "graph_edge_count": 0}},
+    )
+
+    def _feature_context(repo_root, duckdb_store, kuzu_store, feature, limit=6, lightweight=False):
+        feature_calls.append(feature)
+        if feature == "national overview":
+            return {
+                "feature": feature,
+                "compact_summary": {
+                    "top_files": ["frontend/pages/NationalOverview.tsx"],
+                    "top_routes": ["/overview/national"],
+                    "top_processes": ["National Overview"],
+                    "file_kinds": {"frontend": 1},
+                    "file_count": 1,
+                },
+            }
+        if feature == "period selector":
+            return {
+                "feature": feature,
+                "compact_summary": {
+                    "top_files": ["frontend/components/PeriodSelector.tsx", "backend/services/period_service.py"],
+                    "top_routes": [],
+                    "top_processes": ["Period Selection"],
+                    "file_kinds": {"frontend": 1, "backend": 1},
+                    "file_count": 2,
+                },
+            }
+        return {"feature": feature, "compact_summary": {"top_files": [], "top_routes": [], "top_processes": [], "file_kinds": {}, "file_count": 0}}
+
+    monkeypatch.setattr(investigation_service, "feature_context", _feature_context)
+
+    payload = investigation_service.investigate_codebase(
+        repo_root=repo_root,
+        duckdb_store=_Store(),
+        kuzu_store=_Kuzu(),
+        question="find the frontend national overview page and code path for its period selector",
+        search_payload={"compact_results": []},
+        limit=5,
+    )
+
+    assert "national overview" in feature_calls
+    assert "period selector" in feature_calls
+    assert "frontend/pages/NationalOverview.tsx" in payload["behavior_trace"]["top_files"]
+    assert "frontend/components/PeriodSelector.tsx" in payload["behavior_trace"]["top_files"]
+    assert set(payload["behavior_trace"]["attempted_features"][:2]) == {"national overview", "period selector"}
+    assert any(tool["tool"] == "feature_context" for tool in payload["next_tools"])
+    assert any("Behavior trace surfaced exploratory candidate files" in warning for warning in payload["warnings"])
+
+
+def test_investigate_codebase_behavior_trace_helps_when_direct_evidence_is_sparse(monkeypatch) -> None:
+    repo_root = Path("C:/repo")
+
+    monkeypatch.setattr(
+        investigation_service,
+        "resolve_tool_target",
+        lambda duckdb_store, repo_root, target="", limit=5: {"status": "missing", "resolved_target": target, "compact_summary": {"warnings": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_source_context",
+        lambda duckdb_store, target, limit=3, repo_root=None: {"compact_results": []},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_unified_context",
+        lambda duckdb_store, kuzu_store, target, max_matches=3, neighborhood_depth=1: {"compact_summary": {"caller_count": 0, "callee_count": 0, "dependency_counts": {}, "top_neighbors": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "app_context",
+        lambda repo_root, duckdb_store, kuzu_store, target="", limit=6: {"compact_summary": {"top_routes": [], "top_files": [], "top_processes": [], "file_kinds": {}, "graph_edge_count": 0}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "feature_context",
+        lambda repo_root, duckdb_store, kuzu_store, feature, limit=6, lightweight=False: {
+            "feature": feature,
+            "compact_summary": {
+                "top_files": ["frontend/components/FinancialYearToggle.tsx"] if feature == "financial year" else [],
+                "top_routes": [],
+                "top_processes": ["Year Selection"] if feature == "financial year" else [],
+                "file_kinds": {"frontend": 1} if feature == "financial year" else {},
+                "file_count": 1 if feature == "financial year" else 0,
+            },
+        },
+    )
+
+    payload = investigation_service.investigate_codebase(
+        repo_root=repo_root,
+        duckdb_store=_Store(),
+        kuzu_store=_Kuzu(),
+        question="trace financial year versus calendar year behavior across the app",
+        search_payload={"compact_results": []},
+        limit=5,
+    )
+
+    assert "frontend/components/FinancialYearToggle.tsx" in payload["behavior_trace"]["top_files"]
+    assert "Feature trace candidates include frontend/components/FinancialYearToggle.tsx." in payload["answer"]
+    assert "Behavior anchors tried:" in " ".join(payload["answer_outline"])
+
+
+def test_investigate_codebase_promotes_behavior_trace_files_into_ranked_results(monkeypatch) -> None:
+    repo_root = Path("C:/repo")
+
+    monkeypatch.setattr(
+        investigation_service,
+        "resolve_tool_target",
+        lambda duckdb_store, repo_root, target="", limit=5: {"status": "missing", "resolved_target": target, "compact_summary": {"warnings": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_source_context",
+        lambda duckdb_store, target, limit=3, repo_root=None: {"compact_results": []},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_unified_context",
+        lambda duckdb_store, kuzu_store, target, max_matches=3, neighborhood_depth=1: {"compact_summary": {"caller_count": 0, "callee_count": 0, "dependency_counts": {}, "top_neighbors": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "app_context",
+        lambda repo_root, duckdb_store, kuzu_store, target="", limit=6: {"compact_summary": {"top_routes": [], "top_files": [], "top_processes": [], "file_kinds": {}, "graph_edge_count": 0}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "feature_context",
+        lambda repo_root, duckdb_store, kuzu_store, feature, limit=6, lightweight=False: {
+            "feature": feature,
+            "compact_summary": {
+                "top_files": ["scripts/run_mcp.py"] if feature in {"mcp repo", "repo selection"} else [],
+                "top_routes": [],
+                "top_processes": ["Repo Selection"] if feature in {"mcp repo", "repo selection"} else [],
+                "file_kinds": {"supporting_code": 1} if feature in {"mcp repo", "repo selection"} else {},
+                "file_count": 1 if feature in {"mcp repo", "repo selection"} else 0,
+            },
+        },
+    )
+
+    payload = investigation_service.investigate_codebase(
+        repo_root=repo_root,
+        duckdb_store=_Store(),
+        kuzu_store=_Kuzu(),
+        question="find the MCP repo selection flow across the app",
+        search_payload={"compact_results": []},
+        limit=5,
+    )
+
+    assert payload["ranked_files"][0]["file"] == "scripts/run_mcp.py"
+    assert any("behavior trace candidate" in reason or "owner hint:" in reason for reason in payload["ranked_files"][0]["reasons"])
+
+
+def test_investigate_codebase_adds_owner_hints_for_workflow_questions(monkeypatch) -> None:
+    repo_root = Path("C:/repo")
+
+    monkeypatch.setattr(
+        investigation_service,
+        "resolve_tool_target",
+        lambda duckdb_store, repo_root, target="", limit=5: {"status": "missing", "resolved_target": target, "compact_summary": {"warnings": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_source_context",
+        lambda duckdb_store, target, limit=3, repo_root=None: {"compact_results": []},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_unified_context",
+        lambda duckdb_store, kuzu_store, target, max_matches=3, neighborhood_depth=1: {"compact_summary": {"caller_count": 0, "callee_count": 0, "dependency_counts": {}, "top_neighbors": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "app_context",
+        lambda repo_root, duckdb_store, kuzu_store, target="", limit=6: {"compact_summary": {"top_routes": [], "top_files": [], "top_processes": [], "file_kinds": {}, "graph_edge_count": 0}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "feature_context",
+        lambda repo_root, duckdb_store, kuzu_store, feature, limit=6, lightweight=False: {"feature": feature, "compact_summary": {"top_files": [], "top_routes": [], "top_processes": [], "file_kinds": {}, "file_count": 0}},
+    )
+
+    payload = investigation_service.investigate_codebase(
+        repo_root=repo_root,
+        duckdb_store=_Store(),
+        kuzu_store=_Kuzu(),
+        question="trace the indexing progress reporting flow",
+        search_payload={"compact_results": []},
+        limit=5,
+    )
+
+    top_files = [item["file"] for item in payload["ranked_files"]]
+    assert "app/coordinator.py" in top_files[:2]
+    coordinator = next(item for item in payload["ranked_files"] if item["file"] == "app/coordinator.py")
+    assert any("owner hint: indexing progress coordinator" in reason for reason in coordinator["reasons"])
+
+
+def test_investigate_codebase_returns_grouped_exploratory_roles_for_ui_trace(monkeypatch) -> None:
+    repo_root = Path("C:/repo")
+
+    monkeypatch.setattr(
+        investigation_service,
+        "resolve_tool_target",
+        lambda duckdb_store, repo_root, target="", limit=5: {"status": "missing", "resolved_target": target, "compact_summary": {"warnings": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_source_context",
+        lambda duckdb_store, target, limit=3, repo_root=None: {"compact_results": []},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_unified_context",
+        lambda duckdb_store, kuzu_store, target, max_matches=3, neighborhood_depth=1: {
+            "compact_summary": {"caller_count": 0, "callee_count": 0, "dependency_counts": {}, "top_neighbors": []}
+        },
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "app_context",
+        lambda repo_root, duckdb_store, kuzu_store, target="", limit=6: {
+            "compact_summary": {
+                "top_routes": ["/api/regional-overview"],
+                "top_files": [],
+                "top_processes": [],
+                "file_kinds": {"frontend_component": 1, "backend": 1},
+                "graph_edge_count": 0,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "feature_context",
+        lambda repo_root, duckdb_store, kuzu_store, feature, limit=6, lightweight=False: {
+            "feature": feature,
+            "compact_summary": {
+                "top_files": (
+                    ["frontend/pages/RegionalOverviewLandingPage.js"]
+                    if "overview" in feature.lower()
+                    else ["frontend/components/PeriodSelector.js", "backend/services/period_service.py"]
+                    if "period" in feature.lower() or "selector" in feature.lower()
+                    else []
+                ),
+                "top_routes": ["/api/regional-overview"] if "overview" in feature.lower() else [],
+                "top_processes": [],
+                "file_kinds": {"frontend_component": 1, "backend": 1},
+                "file_count": 2,
+            },
+        },
+    )
+
+    payload = investigation_service.investigate_codebase(
+        repo_root=repo_root,
+        duckdb_store=_Store(),
+        kuzu_store=_Kuzu(),
+        question="Find the frontend national overview page and the code path for its period selector, including shared date period utilities and the backend endpoints it calls.",
+        search_payload={"compact_results": [], "retrieval_diagnostics": {"exploratory_lightweight_path": True}},
+        limit=5,
+    )
+
+    assert payload["intent"]["primary"] == "ui_ownership"
+    assert "frontend/pages/RegionalOverviewLandingPage.js" in payload["exploratory_groups"]["page_files"]
+    assert "frontend/components/PeriodSelector.js" in payload["exploratory_groups"]["shared_ui_files"]
+    assert "backend/services/period_service.py" in payload["exploratory_groups"]["backend_files"]
+    assert "/api/regional-overview" in payload["exploratory_groups"]["endpoint_routes"]
+    assert "exploratory feature trace" in payload["answer"]
+
+
+def test_investigate_codebase_uses_lightweight_behavior_trace_for_broad_exploration(monkeypatch) -> None:
+    repo_root = Path("C:/repo")
+    feature_calls = []
+
+    monkeypatch.setattr(
+        investigation_service,
+        "resolve_tool_target",
+        lambda duckdb_store, repo_root, target="", limit=5: {"status": "missing", "resolved_target": target, "compact_summary": {"warnings": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_source_context",
+        lambda duckdb_store, target, limit=3, repo_root=None: {"compact_results": []},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_unified_context",
+        lambda duckdb_store, kuzu_store, target, max_matches=3, neighborhood_depth=1: {
+            "compact_summary": {"caller_count": 0, "callee_count": 0, "dependency_counts": {}, "top_neighbors": []}
+        },
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "app_context",
+        lambda repo_root, duckdb_store, kuzu_store, target="", limit=6: {
+            "compact_summary": {"top_routes": [], "top_files": [], "top_processes": [], "file_kinds": {}, "graph_edge_count": 0}
+        },
+    )
+
+    def _feature_context(repo_root, duckdb_store, kuzu_store, feature, limit=6, lightweight=False):
+        feature_calls.append((feature, limit, lightweight))
+        return {
+            "feature": feature,
+            "partial": lightweight,
+            "compact_summary": {
+                "partial": lightweight,
+                "top_files": ["frontend/pages/RegionalOverviewLandingPage.js"] if "overview" in feature.lower() else [],
+                "top_routes": [],
+                "top_processes": [],
+                "file_kinds": {"frontend_component": 1},
+                "role_groups": {"page_files": ["frontend/pages/RegionalOverviewLandingPage.js"], "shared_ui_files": [], "backend_files": []},
+                "file_count": 1,
+            },
+        }
+
+    monkeypatch.setattr(investigation_service, "feature_context", _feature_context)
+
+    payload = investigation_service.investigate_codebase(
+        repo_root=repo_root,
+        duckdb_store=_Store(),
+        kuzu_store=_Kuzu(),
+        question="Find the frontend national overview page and the code path for its period selector, including shared date period utilities and the backend endpoints it calls.",
+        search_payload={"compact_results": [], "retrieval_diagnostics": {"exploratory_lightweight_path": True}},
+        limit=5,
+    )
+
+    assert feature_calls
+    assert all(call[2] is True for call in feature_calls)
+    assert payload["behavior_trace"]["partial"] is True
+    assert any("lightweight budget" in warning for warning in payload["warnings"])
+    assert payload["target"] == "frontend/pages/RegionalOverviewLandingPage.js"
+    assert payload["ranked_files"][0]["file"] == "frontend/pages/RegionalOverviewLandingPage.js"
+    assert any("page owner" in reason for reason in payload["ranked_files"][0]["reasons"])
+
+
+def test_lightweight_exploratory_path_orders_page_shared_ui_then_backend(monkeypatch) -> None:
+    repo_root = Path("C:/repo")
+
+    monkeypatch.setattr(
+        investigation_service,
+        "resolve_tool_target",
+        lambda duckdb_store, repo_root, target="", limit=5: {"status": "missing", "resolved_target": target, "compact_summary": {"warnings": []}},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_source_context",
+        lambda duckdb_store, target, limit=3, repo_root=None: {"compact_results": []},
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "get_unified_context",
+        lambda duckdb_store, kuzu_store, target, max_matches=3, neighborhood_depth=1: {
+            "compact_summary": {"caller_count": 0, "callee_count": 0, "dependency_counts": {}, "top_neighbors": []}
+        },
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "app_context",
+        lambda repo_root, duckdb_store, kuzu_store, target="", limit=6: {
+            "compact_summary": {"top_routes": [], "top_files": [], "top_processes": [], "file_kinds": {}, "graph_edge_count": 0}
+        },
+    )
+    monkeypatch.setattr(
+        investigation_service,
+        "feature_context",
+        lambda repo_root, duckdb_store, kuzu_store, feature, limit=6, lightweight=False: {
+            "feature": feature,
+            "partial": lightweight,
+            "compact_summary": {
+                "partial": lightweight,
+                "top_files": [
+                    "frontend/components/HikvisionReportExport.js",
+                    "frontend/components/ReportExport.js",
+                    "frontend/contexts/PeriodContext.js",
+                    "frontend/components/GlobalPeriodSelector.js",
+                ],
+                "top_routes": [],
+                "top_processes": [],
+                "file_kinds": {"frontend_component": 1, "backend": 1},
+                "role_groups": {
+                    "page_files": ["frontend/pages/RegionalOverviewLandingPage.js"],
+                    "shared_ui_files": ["frontend/contexts/PeriodContext.js", "frontend/components/GlobalPeriodSelector.js"],
+                    "backend_files": ["backend/api/endpoints/regional.py"],
+                },
+                "file_count": 4,
+            },
+        },
+    )
+
+    payload = investigation_service.investigate_codebase(
+        repo_root=repo_root,
+        duckdb_store=_Store(),
+        kuzu_store=_Kuzu(),
+        question="Find the frontend national overview page and the code path for its period selector, including shared date period utilities and the backend endpoints it calls.",
+        search_payload={"compact_results": [], "retrieval_diagnostics": {"exploratory_lightweight_path": True}},
+        limit=5,
+    )
+
+    ranked_paths = [item["file"] for item in payload["ranked_files"][:4]]
+    assert ranked_paths[0] == "frontend/pages/RegionalOverviewLandingPage.js"
+    assert "frontend/contexts/PeriodContext.js" in ranked_paths[:3]
+    assert "frontend/components/GlobalPeriodSelector.js" in ranked_paths[:3]
+    assert "backend/api/endpoints/regional.py" in ranked_paths[:4]
+    assert "frontend/components/HikvisionReportExport.js" not in ranked_paths[:4]
+
+
 def test_investigation_search_task_narrows_broad_question() -> None:
     task, plan = investigation_service.investigation_search_task(
         "where is defaultView behavior handled",
@@ -692,6 +1150,164 @@ def test_investigation_search_task_narrows_broad_question() -> None:
     assert plan["guardrails"]["broad_question"] is True
     assert plan["guardrails"]["allow_retry"] is False
     assert plan["guardrails"]["search_limit"] == 4
+
+
+def test_investigation_search_task_prefers_feature_phrase_over_weak_broad_seed() -> None:
+    task, plan = investigation_service.investigation_search_task(
+        "trace the indexing progress reporting flow",
+        limit=5,
+    )
+
+    assert task == "indexing progress"
+    assert plan["task_source"] == "behavior_trace_seed"
+
+
+def test_investigation_search_task_prefers_feature_phrase_over_endpoint_seed_for_ui_prompt() -> None:
+    task, plan = investigation_service.investigation_search_task(
+        "Find the frontend national overview page and the code path for its period selector, including shared date period utilities and the backend endpoints it calls.",
+        limit=5,
+    )
+
+    assert task in {"national overview", "period selector"}
+    assert plan["task_source"] == "behavior_trace_seed"
+
+
+def test_symbolish_terms_rejects_imperative_seed_tokens() -> None:
+    terms = investigation_service._symbolish_terms(
+        "Find the frontend national overview page and code path for its period selector",
+        limit=8,
+    )
+
+    assert "Find" not in terms
+    assert "including" not in [term.lower() for term in terms]
+
+
+def test_symbolish_terms_rejects_generic_exploratory_nouns() -> None:
+    terms = investigation_service._symbolish_terms(
+        "Find the frontend national overview page and the code path for its period selector, including shared date period utilities",
+        limit=10,
+    )
+
+    lowered = [term.lower() for term in terms]
+    assert "utilities" not in lowered
+    assert "shared" not in lowered
+
+
+def test_question_intent_classifies_broad_ui_feature_trace() -> None:
+    intent = investigation_service._question_intent(
+        "Find the frontend national overview page and the code path for its period selector, including shared date period utilities",
+    )
+
+    assert intent["primary"] == "ui_ownership"
+
+
+def test_app_context_target_prefers_behavior_feature_for_ui_prompt() -> None:
+    query_rewrite = investigation_service._query_rewrite(
+        "Find the frontend national overview page and the code path for its period selector, including shared date period utilities and the backend endpoints it calls.",
+        {"primary": "ui_ownership"},
+    )
+
+    target, source = investigation_service._app_context_target(
+        "Find the frontend national overview page and the code path for its period selector, including shared date period utilities and the backend endpoints it calls.",
+        "SendReportRequest",
+        query_rewrite,
+    )
+
+    assert target in {"national overview", "period selector"}
+    assert source == "behavior_trace_feature"
+
+
+def test_file_relevance_downranks_export_noise_for_period_state_prompt() -> None:
+    ranked = investigation_service._file_relevance(
+        search_hits=[
+            {"file": "frontend/components/GlobalPeriodSelector.js", "target": "GlobalPeriodSelector", "why_relevant": "selector match", "sources": ["symbol"]},
+            {"file": "frontend/components/ReportExport.js", "target": "ReportExport", "why_relevant": "generic text overlap", "sources": ["symbol"]},
+        ],
+        snippets=[],
+        app={"compact_summary": {}},
+        behavior_trace={},
+        question="Find the frontend national overview page and the code path for its period selector, including shared date period utilities and the backend endpoints it calls.",
+        intent={"primary": "ui_ownership"},
+        limit=5,
+    )
+
+    assert ranked[0]["file"] == "frontend/components/GlobalPeriodSelector.js"
+    export_item = next(item for item in ranked if item["file"] == "frontend/components/ReportExport.js")
+    assert any("export/report file" in reason for reason in export_item["reasons"])
+
+
+def test_file_relevance_prefers_page_owner_over_shared_hook_for_page_prompt() -> None:
+    ranked = investigation_service._file_relevance(
+        search_hits=[
+            {"file": "frontend/hooks/useApiQuery.js", "target": "useApiQuery", "why_relevant": "shared query helper", "sources": ["symbol"]},
+            {"file": "frontend/pages/RegionalOverviewLandingPage.js", "target": "RegionalOverviewLandingPage", "why_relevant": "overview page owner", "sources": ["symbol"]},
+        ],
+        snippets=[],
+        app={"compact_summary": {}},
+        behavior_trace={},
+        question="Find the frontend national overview page and the code path for its period selector.",
+        intent={"primary": "ui_ownership"},
+        limit=5,
+    )
+
+    assert ranked[0]["file"] == "frontend/pages/RegionalOverviewLandingPage.js"
+    hook_item = next(item for item in ranked if item["file"] == "frontend/hooks/useApiQuery.js")
+    assert any("secondary-role penalty" in reason for reason in hook_item["reasons"])
+
+
+def test_file_relevance_penalizes_unrelated_backend_endpoint_for_ui_trace() -> None:
+    ranked = investigation_service._file_relevance(
+        search_hits=[
+            {"file": "backend/api/endpoints/email.py", "target": "SendReportRequest", "why_relevant": "endpoint mention", "sources": ["symbol"]},
+            {"file": "frontend/pages/RegionalOverviewLandingPage.js", "target": "RegionalOverviewLandingPage", "why_relevant": "overview page owner", "sources": ["symbol"]},
+            {"file": "backend/api/endpoints/regional.py", "target": "RegionalOverviewEndpoint", "why_relevant": "regional endpoint", "sources": ["symbol"]},
+        ],
+        snippets=[],
+        app={"compact_summary": {}},
+        behavior_trace={},
+        question="Find the frontend national overview page and the code path for its period selector, including shared date period utilities and the backend endpoints it calls.",
+        intent={"primary": "ui_ownership"},
+        limit=5,
+    )
+
+    assert ranked[0]["file"] == "frontend/pages/RegionalOverviewLandingPage.js"
+    regional_item = next(item for item in ranked if item["file"] == "backend/api/endpoints/regional.py")
+    email_item = next(item for item in ranked if item["file"] == "backend/api/endpoints/email.py")
+    assert regional_item["score"] > email_item["score"]
+    assert any("endpoint mismatch penalty" in reason for reason in email_item["reasons"])
+
+
+def test_evidence_items_filters_noisy_exploratory_files_and_reasons() -> None:
+    evidence = investigation_service._evidence_items(
+        seed_hits=[
+            {"file": "frontend/pages/RegionalOverviewLandingPage.js", "target": "RegionalOverviewLandingPage", "lines": [10, 40], "why_relevant": "page owner", "sources": ["symbol"]},
+            {"file": "frontend/test-utils.js", "target": "findByText", "lines": [1, 10], "why_relevant": "test-utils helper", "sources": ["symbol"]},
+        ],
+        expanded_hits=[
+            {"file": "frontend/components/GlobalPeriodSelector.js", "target": "GlobalPeriodSelector", "lines": [5, 30], "why_relevant": "selector state", "sources": ["window"]},
+            {"file": "frontend/utils/xssProtection.js", "target": "xssProtection", "lines": [1, 8], "why_relevant": "xssProtection overlap", "sources": ["window"]},
+        ],
+        snippets=[
+            {"file": "frontend/hooks/useApiQuery.js", "target": "useApiQuery", "lines": [1, 20], "retrieval_source": "chunk_index"},
+            {"file": "frontend/utils/memoryMonitor.js", "target": "memoryMonitor", "lines": [1, 20], "retrieval_source": "memoryMonitor"},
+        ],
+        unified={"compact_summary": {"top_neighbors": []}},
+        app={"compact_summary": {"top_files": ["frontend/pages/RegionalOverviewLandingPage.js", "frontend/test-utils.js"]}},
+        ranked_files=[
+            {"file": "frontend/pages/RegionalOverviewLandingPage.js"},
+            {"file": "frontend/components/GlobalPeriodSelector.js"},
+            {"file": "frontend/hooks/useApiQuery.js"},
+        ],
+        intent={"primary": "ui_ownership"},
+    )
+
+    evidence_files = [item.get("file") for item in evidence if item.get("file")]
+    assert "frontend/pages/RegionalOverviewLandingPage.js" in evidence_files
+    assert "frontend/components/GlobalPeriodSelector.js" in evidence_files
+    assert "frontend/hooks/useApiQuery.js" in evidence_files
+    assert "frontend/test-utils.js" not in evidence_files
+    assert "frontend/utils/memoryMonitor.js" not in evidence_files
+    assert "frontend/utils/xssProtection.js" not in evidence_files
 
 
 def test_should_allow_broad_vector_fallback_rejects_vague_camel_case_term() -> None:
@@ -915,9 +1531,9 @@ def test_investigate_codebase_replaces_generic_target_with_narrowed_term(monkeyp
         limit=5,
     )
 
-    assert attempts == ["defaultView", "defaultView"]
-    assert payload["target"] == "defaultView"
-    assert any("Generic target resolution was replaced" in warning for warning in payload["warnings"])
+    assert attempts == ["defaultView"]
+    assert payload["target"] == "main"
+    assert not any("Generic target resolution was replaced" in warning for warning in payload["warnings"])
 
 
 def test_investigate_codebase_uses_cheap_symbol_discovery_when_search_is_empty(monkeypatch) -> None:

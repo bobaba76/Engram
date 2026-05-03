@@ -95,14 +95,31 @@ def _run_case(
         checks.append("target")
 
     expected_file = str(case.get("expect_top_file_contains", "") or "").strip()
-    if not expected_file or any(expected_file.lower() in str(file_path).lower() for file_path in top_files[:3]):
+    expected_any_files = case.get("expect_any_top_file_contains", [])
+    if expected_file and any(expected_file.lower() in str(file_path).lower() for file_path in top_files[:3]):
+        score += 1
+        checks.append("top_file")
+    elif isinstance(expected_any_files, list) and expected_any_files and any(
+            any(str(expected).lower() in str(file_path).lower() for file_path in top_files[:4])
+            for expected in expected_any_files
+    ):
+        score += 1
+        checks.append("top_file")
+    elif not expected_file and (not isinstance(expected_any_files, list) or not expected_any_files):
         score += 1
         checks.append("top_file")
 
     expected_tools = case.get("expect_next_tools", [])
     if not isinstance(expected_tools, list):
         expected_tools = []
-    if all(tool in next_tool_names for tool in expected_tools):
+    expected_any_tools = case.get("expect_any_next_tools", [])
+    if expected_tools and all(tool in next_tool_names for tool in expected_tools):
+        score += 1
+        checks.append("next_tools")
+    elif isinstance(expected_any_tools, list) and expected_any_tools and any(tool in next_tool_names for tool in expected_any_tools):
+        score += 1
+        checks.append("next_tools")
+    elif not expected_tools and (not isinstance(expected_any_tools, list) or not expected_any_tools):
         score += 1
         checks.append("next_tools")
 

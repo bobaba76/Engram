@@ -72,7 +72,14 @@ def get_source_context(duckdb_store: DuckDBStore, target: str, limit: int = 5, r
             }
         )
 
-    results = duckdb_store.chunks.fetch_for_target(lookup_target or target, limit=limit)
+    results = []
+    for symbol in symbol_matches[:limit]:
+        file_path = str(symbol.get("file_path", "") or "").strip()
+        start_line = symbol.get("start_line")
+        end_line = symbol.get("end_line")
+        results = duckdb_store.chunks.fetch_for_file_range(file_path, start_line=start_line, end_line=end_line, limit=limit)
+        if results:
+            break
     if not results:
         fallback_targets: list[str] = []
         for symbol in symbol_matches[:limit]:
@@ -87,13 +94,7 @@ def get_source_context(duckdb_store: DuckDBStore, target: str, limit: int = 5, r
             if results:
                 break
     if not results:
-        for symbol in symbol_matches[:limit]:
-            file_path = str(symbol.get("file_path", "") or "").strip()
-            start_line = symbol.get("start_line")
-            end_line = symbol.get("end_line")
-            results = duckdb_store.chunks.fetch_for_file_range(file_path, start_line=start_line, end_line=end_line, limit=limit)
-            if results:
-                break
+        results = duckdb_store.chunks.fetch_for_target(lookup_target or target, limit=limit)
 
     snippet_results = [
         {

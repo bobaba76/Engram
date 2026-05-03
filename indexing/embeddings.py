@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from functools import lru_cache
 from typing import Iterable
 
@@ -159,6 +160,62 @@ def _load_jina_model(model_name: str):
         return tokenizer, model
     except Exception:
         return None, None
+
+
+# ---------------------------------------------------------------------------
+# Pre-warming: load the model on a background daemon thread so the MCP server
+# process is never blocked by the first from_pretrained() call.
+# ---------------------------------------------------------------------------
+
+_prewarm_lock = threading.Lock()
+_prewarm_started: dict[str, bool] = {}
+_prewarm_ready: dict[str, bool] = {}
+_prewarm_error: dict[str, str] = {}
+
+
+def prewarm_jina_model(model_name: str, device: str = "cpu") -> None:
+    """Start loading *model_name* on a background daemon thread.
+
+    Safe to call multiple times — only one load per model_name is started.
+    The caller should check ``is_model_ready(model_name)`` before relying on
+    vector search being available.
+    """
+    with _prewarm_lock:
+        if _prewarm_started.get(model_name):
+            return
+        _prewarm_started[model_name] = True
+
+    def _load() -> None:
+        try:
+            _load_jina_model(model_name)
+            # Also move the model to the resolved device so the first real
+            # inference call doesn't pay that cost either.
+            if torch is not None:
+                resolved = _resolve_device(device)
+                tokenizer, model = _load_jina_model(model_name)
+                if model is not None:
+                    model.to(resolved)
+            with _prewarm_lock:
+                _prewarm_ready[model_name] = True
+        except Exception as exc:  # noqa: BLE001
+            with _prewarm_lock:
+                _prewarm_error[model_name] = str(exc)
+                _prewarm_ready[model_name] = False
+
+    thread = threading.Thread(target=_load, daemon=True, name=f"coder-prewarm-{model_name}")
+    thread.start()
+
+
+def is_model_ready(model_name: str) -> bool:
+    """Return True only if the model has finished loading without errors."""
+    with _prewarm_lock:
+        return bool(_prewarm_ready.get(model_name))
+
+
+def get_model_load_error(model_name: str) -> str:
+    """Return a human-readable error string if model loading failed, else empty string."""
+    with _prewarm_lock:
+        return _prewarm_error.get(model_name, "")
 
 
 def embed_texts(

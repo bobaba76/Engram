@@ -28,7 +28,7 @@ def _python_symbol_kind(node: ast.AST, parents: list[str]) -> str:
 
 
 def extract_symbols(file_path: Path) -> list[SymbolRecord]:
-    source = file_path.read_text(encoding="utf-8")
+    source = file_path.read_text(encoding="utf-8-sig")
     tree = ast.parse(source)
     symbols: list[SymbolRecord] = []
     file_imports: set[str] = set()
