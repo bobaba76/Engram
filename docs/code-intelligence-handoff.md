@@ -446,6 +446,104 @@ Recommended next work:
 - Add fixture repos for inheritance and field access once those graph relations exist.
 - Add MCP smoke tests around registered tool outputs.
 
+### 8. C/C++/C# Workflow Intelligence
+
+Current status:
+
+- C/C++ files are scanned and parsed through the C-family parser.
+- C/C++ parsing prefers `libclang`, falls back to tree-sitter, then regex.
+- C/C++ extensions currently include `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, and `.hxx`.
+- C# has parser support, but does not yet have deep ASP.NET / DTO / dependency-injection workflow intelligence.
+- The recent GitNexus-style workflow improvements were mostly optimized around Python backends and React/TypeScript frontends.
+
+Goal:
+
+- Bring C/C++ and C# closer to the Python/React workflow-intelligence depth: symbol context, process/flow tracing, API/handler impact where applicable, risk-aware change reports, and pre-commit guidance.
+
+Recommended C/C++ roadmap:
+
+1. Build-context discovery.
+   - Detect `compile_commands.json`.
+   - Parse common CMake build directories.
+   - Capture include paths, defines, language standard, compiler flags, and target ownership.
+   - Surface build-context confidence in index status and change reports.
+
+2. Source/header pairing and ownership.
+   - Link `.h/.hpp` declarations to `.c/.cpp` definitions.
+   - Add relations such as `DECLARES`, `DEFINES_IMPLEMENTATION`, `DECLARES_IN_HEADER`, and `INCLUDES_HEADER`.
+   - Prefer implementation definitions in caller/callee flows while retaining header context.
+
+3. Semantic call graph hardening.
+   - Use clang USRs/canonical names where available.
+   - Resolve overloads and namespaces for C++.
+   - Track function pointers, callbacks, and virtual dispatch as lower-confidence edges.
+   - Mark macro-expanded or unresolved call edges with confidence metadata.
+
+4. Entrypoint and terminal detection.
+   - Detect `main`, exported symbols, task/thread entrypoints, callback registrations, CLI handlers, RPC/HTTP handlers, and firmware loops.
+   - Detect terminal dependencies such as file I/O, sockets/network, database/client calls, hardware/register access, and external library boundaries.
+
+5. Flow tracing and change reports.
+   - Trace from entrypoints through C/C++ call chains.
+   - Overlay changed files/symbols onto flows.
+   - Add risk factors for high fan-in headers, exported ABI changes, shared structs/enums, macros, and build target ownership.
+   - Add test recommendations from nearby test files, target names, and build metadata.
+
+6. C/C++ API/ABI impact.
+   - Detect changed exported functions, public headers, structs, enums, typedefs, virtual interfaces, and public macros.
+   - Report downstream source files and build targets that include or call changed public surfaces.
+   - Add ABI-risk labels for signature/layout changes.
+
+Recommended C# roadmap:
+
+1. ASP.NET route extraction.
+   - Detect controllers, minimal APIs, endpoint maps, route attributes, HTTP method attributes, and middleware.
+   - Extract route path, method, handler symbol, request type, and response type.
+
+2. DTO and response-shape extraction.
+   - Parse records/classes used as request/response DTOs.
+   - Track serialized property names, nullable fields, collections, and nested DTOs.
+   - Compare route responses with client/consumer reads when C# clients or frontend consumers are indexed.
+
+3. Dependency-injection graph.
+   - Parse `AddScoped`, `AddTransient`, `AddSingleton`, factory registrations, and interface-to-implementation mappings.
+   - Use DI edges to improve caller/callee and process tracing.
+
+4. Service/repository/process flows.
+   - Trace controller/minimal API entrypoints into services, repositories, database clients, queues, and external HTTP clients.
+   - Add risk per controller/action/process.
+
+5. Test mapping.
+   - Map xUnit/NUnit/MSTest files to controllers, services, DTOs, and repositories.
+   - Recommend tests by project, namespace, class name, route, and changed symbol.
+
+6. Risk model.
+   - Escalate risk for public controller/DTO changes, auth/middleware changes, shared interface changes, migrations, DI rewires, and high fan-in services.
+   - Report risk by route, service, project, and test coverage confidence.
+
+Likely files to update:
+
+- `indexing/parsers/c_family.py`
+- `indexing/clang_extractor.py`
+- `indexing/parsers/csharp.py`
+- `indexing/scanner.py`
+- `indexing/graph_builder.py`
+- `storage/kuzu_store.py`
+- `services/process_service.py`
+- `services/detect_changes_service.py`
+- `services/change_report_service.py`
+- `services/impact_service.py`
+- `services/symbol_context_service.py`
+- `services/test_intelligence_service.py`
+- C/C++ and C# fixture tests under `tests/`
+
+Success criteria:
+
+- A changed public C/C++ header can report downstream source files, build targets, impacted entrypoint flows, and suggested tests.
+- A changed C/C++ implementation function can report callers, callees, terminal dependencies, flow membership, and risk.
+- A changed ASP.NET route/controller can report route, request/response DTOs, service/repository process flow, consumers, risk, and tests.
+- A C# service/interface/DI change can report affected controllers/processes and likely tests.
+
 ## Recommended Next Milestones
 
 ### Milestone A: Add Field Access Graph Edges
