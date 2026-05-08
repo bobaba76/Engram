@@ -2,184 +2,146 @@
 
 ## Purpose
 
-This document hands off the current Code Intelligence enhancement work for Coder. The goal is to continue moving Coder toward GitNexus-style code intelligence: richer graph context, API/route/consumer impact, shape checking, git-aware risk reporting, and process/flow-aware change analysis.
+This document is the current handoff for Coder / Engram code-intelligence work. It replaces the older incremental notes, which had become stale after the Phase 1/2 roadmap work landed.
 
-## Current Status
+The goal remains GitNexus-style workflow intelligence for IDE agents:
 
-Coder now has a solid implementation of the original Phase 1 and Phase 2 scope, plus several Phase 3-style graph/process integrations. Recent live Stock validation also confirmed deeper frontend field reads, alias-aware route/process tracing, and faster local git-change reporting for a broad working tree.
+- git-aware change detection
+- API, route, consumer, and response-shape impact
+- symbol-level graph context
+- frontend field-read blast radius
+- process/flow tracing
+- risk-sensitive change reports
+- pre-commit workflow slicing and test guidance
 
-Latest validation:
+## Current State
 
-- Full test suite: `126 passed`.
-- Stock full reindex run ID: `2b83e937`.
-- Live MCP `trace_processes` now ranks `get_product_trends` above report/test callers for `get_product_trend_data`.
-- Local Stock `detect_changes` completed in about 7 seconds for a 30-file working tree after broad-diff guardrails.
-- Local Stock `change_impact_report` completed in about 12 seconds and populated frontend graph route-consumer signals.
+Coder is now far beyond the original Phase 1 and Phase 2 baseline.
 
-## Completed Work
+Completed and validated:
 
-### MCP Startup Reliability
+- explicit git/risk scope metadata
+- per-file, per-route, and per-process risk signals
+- FastAPI, Flask, Django, and Express route extraction
+- frontend `apiClient`, `axios`, and `fetch` consumer extraction
+- frontend route constant support
+- API wrapper to component propagation
+- response-shape extraction and shape checking
+- nested frontend field reads, including array items and Recharts `dataKey`
+- graph-backed `FETCHES` and `READS_FIELD` contract impact
+- `field_impact` lookup
+- route-aware `api_impact`
+- changed-route and affected-consumer reporting in change reports
+- process/flow tracing with route-first ranking
+- pre-commit commit-slice planning
+- validation/readiness and residual risk after validation
+- safe broad-diff behavior for MCP change tools
+- README refresh
+- LLM/reviewer layer documented as currently disabled
 
-Completed in `scripts/run_mcp.py`.
+Latest local validation:
 
-Implemented:
+```text
+python -m pytest
+155 passed
+```
 
-- Removed eager repo context opening during MCP startup.
-- Removed eager Kuzu graph opening during MCP startup.
-- Moved embedding model pre-warming to the semantic-search path instead of server boot.
-- Kept lightweight tools such as `list_repos` independent of DuckDB, LanceDB, Kuzu, and transformer startup.
-- Added a regression test to keep heavy startup resources lazy.
+Latest live MCP smoke against Stock `/products/trends`:
 
-Validation:
+- `route_map` returned quickly and found backend handler plus frontend consumers.
+- `api_impact` returned route process flows, graph fetchers, field readers, risk, and shape status.
+- `field_impact` found `chart_data[].intransit_stock` readers.
+- `shape_check` returned `OK`.
 
-- `list_repos` returned successfully through the live MCP attachment in ~0.02s after the fix.
+## What Is Strong Today
 
-### Phase 1: Git-Aware Risk Output
+### Python Backend Intelligence
 
-Completed in `services/detect_changes_service.py` and propagated through `services/change_report_service.py`.
+Coder can extract and reason about:
 
-Implemented:
+- function/class symbols
+- imports and calls
+- FastAPI route decorators
+- Flask route decorators
+- Django `path` / `re_path` routes
+- response keys from returned dictionaries
+- common Pydantic response model fields
+- nested response keys
+- changed route handlers
+- backend route to service/repository flow traces
 
-- Structured git metadata.
-- Risk scope and risk applicability metadata.
-- Per-file risk output.
-- Confidence level and confidence explanation.
-- Risk explanations.
-- Compact summaries for change reports.
-- Propagation into `change_impact_report`.
+### TypeScript / React Frontend Intelligence
 
-Key output fields now include:
+Coder can extract and reason about:
 
-- `git`
-- `risk_scope`
-- `risk_applies_to`
-- `risk_explanation`
-- `risk_by_file`
-- `confidence`
-- `confidence_explanation`
-- `compact_summary`
+- TypeScript/TSX/JS/JSX symbols
+- imports, calls, references, and property accesses
+- direct API calls through `apiClient`, `axios`, and `fetch`
+- optional API client calls such as `apiClient?.post(...)`
+- simple route constants
+- wrapper API functions
+- wrapper-to-component consumers
+- React Query-style wrapper usage
+- optional chaining
+- destructured response fields
+- simple response aliases
+- array callback reads such as `chart_data.map(point => point.qty_sold)`
+- chart field reads such as `<Bar dataKey="intransit_stock" />`
 
-### Phase 2: API / Route / Consumer Impact
+### Git-Aware Change Intelligence
 
-Completed across:
+`detect_changes` and `change_impact_report` now report:
 
-- `services/route_map_service.py`
-- `services/route_parsing.py`
-- `services/api_impact_service.py`
-- `services/shape_check_service.py`
-- `scripts/run_mcp.py`
+- diff source and git metadata
+- changed files
+- changed symbols
+- impacted files/symbols
+- risk scope
+- risk applies-to metadata
+- confidence and confidence explanation
+- risk explanation
+- risk by file
+- changed routes
+- changed response shapes
+- affected consumers
+- affected processes
+- shape mismatches
+- broad-diff guardrail warnings
 
-Implemented:
+The broad-diff path is intentionally bounded. If a working tree is too large for exhaustive graph/process traversal, Coder returns partial but useful output instead of hanging the MCP client.
 
-- FastAPI route handler extraction.
-- Route normalization, including `/api` prefix normalization and trailing slash normalization.
-- Frontend consumer detection for `apiClient`, `axios`, and `fetch`.
-- Frontend consumer metadata, including file path, function/component name, route, and method when available.
-- API wrapper-to-component propagation.
-- Backend response key extraction.
-- Nested response key extraction.
-- Array item response key extraction, such as `items[].id`.
-- Consumer field-read extraction.
-- Shape mismatch detection between backend responses and frontend field reads.
-- `shape_check` MCP tool registration.
+### API / Route / Contract Intelligence
 
-Additional hardening completed:
+Current tools:
 
-- FastAPI decorator parsing now keeps decorator arguments such as `response_model=...`.
-- Pydantic-style response model field extraction is used as route response-shape evidence.
-- Nested Pydantic-style model fields are surfaced as nested response-shape evidence.
-- List item Pydantic-style models are surfaced as `field[]` nested response-shape evidence.
-- Simple returned payload variables are resolved back to inline dictionary shapes.
-- TypeScript API wrapper detection handles return annotations such as `Promise<any>`.
-- Frontend field-read extraction handles optional chaining, destructured response fields, and simple aliases such as `const metrics = data.metrics`.
-- Frontend field-read extraction handles common chart `dataKey="..."` usage tied to route data arrays.
-- Wrapper propagation covers React Query-style `queryFn: () => getWrapper()` consumers.
-- Wrapper propagation now links annotated API functions to UI reads in fresh-process validation.
-- Frontend direct API route call detection now uses tree-sitter AST parsing for TypeScript/TSX/JS/JSX when available, with regex fallback.
-- AST route detection handles member calls such as `apiClient.get(...)`, `axios.post(...)`, `fetch(...)`, and optional member calls such as `apiClient?.post(...)`.
+- `route_map`
+- `api_impact`
+- `shape_check`
+- `field_impact`
 
-### Git-Aware Route/API Integration
+These tools can connect:
 
-Completed in:
+- route handlers
+- response keys
+- nested response keys
+- frontend API wrappers
+- component consumers
+- graph-backed fetchers
+- graph-backed field readers
+- shape mismatches
+- process flows
 
-- `services/detect_changes_service.py`
-- `services/change_report_service.py`
+Example capability:
 
-Implemented:
+```text
+/products/trends is handled by backend/routers/products.py:get_product_trends,
+fetched by frontend/src/services/api.ts:getProductTrends,
+and read by ProductTrendModal fields such as metrics.intransit_stock and chart_data[].qty_sold.
+```
 
-- Changed route detection from git diffs.
-- Affected consumer reporting.
-- Changed response shape reporting.
-- Route-level risk output.
-- Shape mismatch risk escalation.
-- Route/API metadata propagation into `change_impact_report`.
-- Candidate-route-first change analysis so broad diffs do not shape-check every route in the repo.
-- Broad-diff guardrails that skip exhaustive graph/process traversal and return warnings instead of timing out.
-- `change_impact_report` reuses already-computed change data when suggesting tests, avoiding duplicate `detect_changes` work.
+### Symbol And Graph Context
 
-Key output fields include:
-
-- `changed_routes`
-- `affected_consumers`
-- `changed_response_shapes`
-- `risk_by_route`
-- `shape_mismatches`
-
-### Process / Flow Integration
-
-Completed in:
-
-- `services/detect_changes_service.py`
-- `services/change_report_service.py`
-
-Implemented:
-
-- Integration with existing process tracing from `services/process_service.py`.
-- Affected process reporting for changed symbols.
-- Process risk reporting.
-- Risk escalation based on process impact.
-- Propagation into `change_impact_report`.
-- Process entrypoint ranking now prefers route handlers over report helpers and tests.
-
-Key output fields include:
-
-- `affected_processes`
-- `risk_by_process`
-
-### Route Parsing Refactor
-
-Completed in:
-
-- `services/route_map_service.py`
-- `services/route_parsing.py`
-
-Implemented:
-
-- Extracted route parsing regexes and helper functions into `route_parsing.py`.
-- Kept `route_map_service.py` focused on orchestration and aggregation.
-- Fixed Windows path escaping issues in the refactor.
-
-### Deeper Symbol Graph Context
-
-Completed in:
-
-- `services/graph_service.py`
-- `services/unified_context_service.py`
-- `services/symbol_context_service.py`
-- `scripts/run_mcp.py`
-
-Implemented:
-
-- Categorized references for symbol context.
-- Backward-compatible `callers` and `callees` fields.
-- Relation metadata for available graph relations.
-- Relation counts.
-- Related symbols grouped by relation.
-- Surfaced richer graph context through `unified_context`.
-- Added optional graph enrichment to `get_symbol_context` via `kuzu_store`.
-- Wired MCP `get_symbol_context` to pass `kuzu_store`.
-
-Relations currently covered:
+Current graph/context support includes:
 
 - `CALLS`
 - `IMPORTS`
@@ -191,425 +153,464 @@ Relations currently covered:
 - `IMPLEMENTS`
 - `METHOD_OVERRIDES`
 - `METHOD_IMPLEMENTS`
+- `FETCHES`
+- `READS_FIELD`
 
-New fields include:
+Symbol context now exposes:
 
-- `categorized_references`
-- `related_symbols_by_relation`
-- `relation_counts`
-- `graph_context`
+- callers
+- callees
+- categorized references
+- related symbols by relation
+- relation counts
+- graph context
+- route/process participation where available
 
-### Richer Graph Relations
+### Process / Flow Intelligence
 
-Completed first-pass support across:
+Current process support includes:
 
+- bounded flow tracing from symbols/routes
+- route-aware process labels
+- route-first ranking over tests/report helpers
+- changed-symbol overlays in flows
+- process risk factors
+- process summaries inside `api_impact`
+- process blast-radius fields in pre-commit reports
+
+This is useful and live, but it is not yet a perfect process catalog. The next improvements should be about quality and ranking, not proving the concept.
+
+### Pre-Commit Workflow Intelligence
+
+`change_impact_report` now groups changes into recommended commit slices.
+
+Each slice can include:
+
+- files
+- routes
+- consumers
+- fields
+- affected processes
+- what can break
+- what to test
+- follow-up MCP tools
+- validation status
+- residual risk after validation
+
+This is the most important practical workflow added after the route/API work.
+
+## Current MCP Tool Surface
+
+Key tools for IDE agents:
+
+- `list_repos`
+- `select_repo`
+- `resolve_target`
+- `semantic_code_search`
+- `investigate_codebase`
+- `get_source_context`
+- `unified_context`
+- `get_symbol_context`
+- `impact_analysis`
+- `app_context`
+- `detect_changes`
+- `change_impact_report`
+- `suggest_tests_for_change`
+- `find_tests_for_target`
+- `route_map`
+- `api_impact`
+- `shape_check`
+- `field_impact`
+- `trace_processes`
+- `index_status`
+- `index_health`
+
+All broad tools should preserve predictable response fields where possible:
+
+- `status`
+- `warnings`
+- `confidence`
+- `next_tools`
+- `top_files`
+- `top_symbols`
+- `partial`
+- `compact_summary`
+
+## Important Files
+
+Core MCP/runtime:
+
+- `scripts/run_mcp.py`
+- `mcp_server/formatters.py`
+- `mcp_server/resolvers.py`
+
+Route/API/field intelligence:
+
+- `services/route_parsing.py`
+- `services/route_map_service.py`
+- `services/api_impact_service.py`
+- `services/shape_check_service.py`
+- `services/field_impact_service.py`
+
+Git/change intelligence:
+
+- `services/detect_changes_service.py`
+- `services/change_report_service.py`
+- `scripts/git_change_snapshot.py`
+
+Graph/symbol/process intelligence:
+
+- `indexing/graph_builder.py`
 - `indexing/parsers/python.py`
 - `indexing/parsers/typescript.py`
-- `indexing/graph_builder.py`
 - `storage/kuzu_store.py`
 - `services/graph_service.py`
 - `services/impact_service.py`
-- `services/semantic_search.py`
-- `services/search_ranking.py`
-
-Implemented:
-
-- Property/field access metadata from Python and TypeScript/TSX parsing.
-- Synthetic property symbols such as `property:data.metrics.intransit_stock`.
-- `ACCESSES` edges from symbols to property symbols.
-- Python class base extraction.
-- TypeScript class/interface `extends` extraction.
-- TypeScript class `implements` extraction.
-- `EXTENDS` and `IMPLEMENTS` graph edges.
-- Basic method override/implementation inference from matching method names on related classes/interfaces.
-- `METHOD_OVERRIDES` and `METHOD_IMPLEMENTS` graph edges.
-- Impact/search/graph-context visibility for the new relations.
-
-Live Coder reindex validation:
-
-- Full reindex run ID: `0c65ce72`.
-- Graph rebuilt with `15,295` edges.
-- MCP graph query reported `4,377` `ACCESSES` edges.
-- MCP graph query reported `20` `EXTENDS` edges.
-- MCP graph query reported `27` `METHOD_OVERRIDES` edges.
-
-### Process-Aware API Impact
-
-Completed in:
-
-- `services/api_impact_service.py`
-- `scripts/run_mcp.py`
 - `services/process_service.py`
-
-Implemented:
-
-- `api_impact` accepts optional Kuzu graph context.
-- MCP `api_impact` passes graph context so route handlers can include bounded execution-flow summaries.
-- Route output now includes a `processes` list with flow name, entry symbol, step count, module, symbols, and step details.
-- Compact summaries include `top_processes`.
-- Process flow labels now use ASCII `->` for Windows-safe console/MCP output.
-- Route mapping ignores obvious test fixture paths so app route maps are not polluted by test decorators.
-- Process flow ranking now prefers project/app symbols over generic runtime or collection/string terminal calls.
-- Generic terminal flows such as `max`, `now`, `values`, `items`, `lower`, and `upper` are suppressed when more actionable project flows exist.
-- API impact process names are route-aware, for example `GET /products/trends -> get_product_trends -> ...`.
-- API impact route risk now includes consumers, traced process flows, shape mismatches, and deep-flow factors.
-
-Fresh-process validation against Stock:
-
-- `/products/trends` resolved one backend handler.
-- Wrapper propagation found three frontend consumers.
-- Shape check status was `OK`.
-- Route risk was `MEDIUM` with factors for three consumers and three traced process flows.
-- Process-aware API impact found route-aware flows such as `GET /products/trends -> get_product_trends -> build_branch_breakdown -> ...`.
-
-## New / Modified Important Files
-
-### Services
-
-- `services/api_impact_service.py`
-- `services/change_report_service.py`
-- `services/detect_changes_service.py`
-- `services/graph_service.py`
-- `services/route_map_service.py`
-- `services/route_parsing.py`
-- `services/shape_check_service.py`
 - `services/symbol_context_service.py`
 - `services/unified_context_service.py`
 
-### MCP Entrypoint
+Test intelligence:
 
-- `scripts/run_mcp.py`
+- `services/test_intelligence_service.py`
 
-### Tests
+Current high-value tests:
 
 - `tests/test_api_impact_service.py`
+- `tests/test_field_impact_service.py`
+- `tests/test_graph_builder.py`
 - `tests/test_graph_service.py`
 - `tests/test_impact_change_frontend_signal.py`
+- `tests/test_mcp_formatters.py`
 - `tests/test_mcp_symbol_context_wiring.py`
+- `tests/test_parser_registry.py`
+- `tests/test_process_service.py`
 - `tests/test_route_map_service.py`
 - `tests/test_shape_check_service.py`
 - `tests/test_symbol_context_service.py`
+- `tests/test_test_intelligence_service.py`
 - `tests/test_unified_context_service.py`
 
-## Validation Command
+## Current Limitations
 
-Use this focused validation command after continuing this work:
+These are real remaining gaps, not stale Phase 1/2 items.
 
-```bash
-python -m pytest tests/test_mcp_symbol_context_wiring.py tests/test_symbol_context_service.py tests/test_unified_context_service.py tests/test_graph_service.py tests/test_route_map_service.py tests/test_api_impact_service.py tests/test_shape_check_service.py tests/test_impact_change_frontend_signal.py
-```
+### Frontend Parsing Hardening
 
-Last known result:
+Current frontend extraction is useful but still partly heuristic.
 
-```text
-20 passed
-```
+Worth doing:
 
-Before final handoff or PR, also run the full suite:
+- AST-native field-read extraction rather than mostly regex/local snippets.
+- Stronger alias import resolution across files.
+- Better wrapper-chain resolution when API calls pass through multiple layers.
+- Better dynamic route support where route strings are composed from constants/templates.
+- Better React hook/component propagation beyond common React Query patterns.
 
-```bash
-python -m pytest
-```
+Do not over-polish here unless a real repo example fails. The current Stock path is already substantially improved.
 
-## What Is Left From the Original Roadmap
+### Backend Response Shape Hardening
 
-The core Phase 1 and Phase 2 work is complete. The remaining work is mostly deeper GitNexus-parity functionality and hardening.
+Current backend shape extraction handles common inline dictionaries, returned payload variables, Pydantic-style models, and some framework variants.
 
-### 1. Richer Graph Schema and Relationship Types
+Worth doing:
 
-First-pass support is complete for:
+- helper functions that build response payloads
+- route handlers returning helper-call results
+- deeper Pydantic nesting and aliases
+- dataclass/attrs response objects
+- framework-specific serializers
+- more JS/TS backend response variants
 
-- `ACCESSES`
-- `EXTENDS`
-- `IMPLEMENTS`
-- `METHOD_OVERRIDES`
-- `METHOD_IMPLEMENTS`
+### Process Catalog Quality
 
-Recommended next work:
+Current process tracing works, but deeper GitNexus parity would require better process cataloging.
 
-- Harden property access extraction with AST-native TypeScript nodes.
-- Add explicit member ownership relations such as `HAS_METHOD` and `HAS_PROPERTY`.
-- Improve method override matching beyond same-name heuristics.
-- Add C# / C-family inheritance relation support.
+Worth doing:
 
-Likely files to update:
+- more explicit route -> service -> repository clustering
+- terminal node classification
+- entrypoint type labels
+- process ranking from real validation examples
+- better process grouping across repeated helper flows
 
-- `storage/kuzu_store.py`
-- `indexing/graph_builder.py`
-- language-specific parsers under `indexing/`
-- `services/graph_service.py`
-- `services/impact_service.py`
-- relevant tests under `tests/`
+### Risk Calibration
 
-### 2. AST-Based Frontend Parsing
+Risk is now explainable and validation-aware, but still mostly heuristic.
 
-Direct frontend route-call parsing now has a first AST-based implementation. Consumer field reads and wrapper propagation still rely mostly on regex plus local heuristics.
+Worth doing:
 
-Recommended next work:
+- calibrate thresholds from real repos and observed false positives
+- use actual test execution results when available
+- distinguish additive vs breaking contract changes more precisely
+- tune broad-diff escalation so CRITICAL/HIGH is useful rather than noisy
 
-- Extend AST-based parsing from direct API calls to consumer field reads.
-- Improve destructured response read detection.
-- Improve aliased import detection.
-- Improve dynamic route string handling.
-- Improve wrapper chain resolution.
-- Improve React hook/component propagation.
+### Fixture And Smoke Coverage
 
-Likely files to update:
+Unit coverage is good. More fixture-level coverage would help.
 
-- `services/route_parsing.py`
-- `services/route_map_service.py`
-- TypeScript parser/indexer code under `indexing/`
-- `tests/test_route_map_service.py`
-- `tests/test_api_impact_service.py`
+Worth doing:
 
-### 3. Better Backend Response Shape Extraction
+- fixture repos for route/API scenarios
+- fixture repos for process tracing
+- fixture repos for inheritance and field access
+- live MCP smoke tests that validate latency and compact output shape
 
-First-pass support is complete for Pydantic-style `response_model` fields and common inline dictionaries. It should still be hardened for more backend styles.
+### Documentation Examples
 
-Recommended next work:
+README is current, but deeper docs could still help MCP consumers.
 
-- Support helper functions that build response payloads.
-- Support route handlers returning variables assigned from helper calls.
-- Support nested Pydantic models and list item models.
-- Support framework variants beyond FastAPI where relevant.
+Worth doing:
 
-Likely files to update:
+- example outputs for `route_map`
+- example outputs for `api_impact`
+- example outputs for `shape_check`
+- example outputs for `field_impact`
+- example outputs for `detect_changes` and `change_impact_report`
 
-- `services/route_parsing.py`
-- `services/api_impact_service.py`
-- backend parser/indexing files under `indexing/`
-- `tests/test_api_impact_service.py`
-- `tests/test_shape_check_service.py`
+## C/C++/C# Status
 
-### 4. More Precise Process Modeling
+Recent GitNexus-style optimization has mostly targeted Python and React/TypeScript because Stock, the live validation repo, uses that stack.
 
-Current process integration uses existing flow tracing. API impact now includes bounded route handler flows when graph context is available. It is useful but not yet a full process catalog comparable to GitNexus.
+C/C++ and C# are supported, but they do not yet have the same workflow-intelligence depth.
 
-Recommended next work:
+### C/C++ Current Support
 
-- Connect route handlers to service/repository execution paths more explicitly.
-- Continue improving route-aware process labels and terminal ranking.
-- Include terminal nodes and entry point types in change reports.
-- Improve process clustering and ranking.
+Current support:
 
-Likely files to update:
+- scanner coverage for `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx`
+- C-family parser
+- `libclang` preferred when available
+- tree-sitter fallback
+- regex fallback
+- symbols, includes/import-like metadata, references, calls, and chunks depending on parser confidence
 
-- `services/process_service.py`
-- `services/process_catalog_service.py`
-- `services/detect_changes_service.py`
-- `services/change_report_service.py`
-- `services/api_impact_service.py`
+Current limitation:
 
-### 5. Impact Analysis Integration With New Graph Relations
+- without build context, C/C++ graph quality can only be "good static hints", not full semantic workflow intelligence.
 
-After adding richer graph edges, update impact analysis to use them.
+### C# Current Support
 
-Recommended next work:
+Current support:
 
-- Include `ACCESSES` in field-impact mode.
-- Include `EXTENDS` / `IMPLEMENTS` for inheritance impact.
-- Include method override/implementation impact.
-- Report relation-specific risk explanations.
-- Add compact summaries for high-risk relation types.
+- C# parser module
+- tree-sitter/regex fallback style extraction
+- symbols and graph basics
 
-Likely files to update:
+Current limitation:
 
-- `services/impact_service.py`
-- `services/graph_service.py`
-- `services/detect_changes_service.py`
-- `services/change_report_service.py`
+- ASP.NET route/controller, DTO shape, and DI workflow intelligence are not yet implemented deeply.
 
-### 6. MCP Output and Documentation Hardening
+## C/C++ Workflow Roadmap
 
-Recommended next work:
+### 1. Build Context
 
-- Update README with new tools and fields.
-- Document `route_map`, `api_impact`, `shape_check`, `detect_changes`, `change_impact_report`, `get_symbol_context`, and `unified_context` outputs.
-- Add example MCP responses.
-- Add compatibility notes for output consumers.
+Add build-context discovery before trying to make C/C++ workflow intelligence highly reliable.
 
-Likely files to update:
+Implement:
 
-- `README.md`
-- `scripts/run_mcp.py`
-- docs under `docs/`
+- detect `compile_commands.json`
+- detect common CMake build folders
+- capture include paths
+- capture defines/macros
+- capture compiler flags
+- capture C vs C++ standard
+- map files to build targets where possible
+- expose build-context confidence in `index_status` and `index_health`
 
-### 7. Full-Suite and Real-Repo Testing
+Why:
 
-The focused tests pass, but the next developer should run and stabilize the full suite.
+- Clang can only resolve real C/C++ semantics when it has the same build flags and include paths as the compiler.
 
-Recommended next work:
+### 2. Source/Header Pairing
 
-- Run `python -m pytest`.
-- Add fixture repos for route/API scenarios.
-- Add fixture repos for process tracing.
-- Add fixture repos for inheritance and field access once those graph relations exist.
-- Add MCP smoke tests around registered tool outputs.
+Implement:
 
-### 8. C/C++/C# Workflow Intelligence
+- pair `.h/.hpp` declarations with `.c/.cpp` definitions
+- link declarations to implementations
+- distinguish public headers from private/internal headers
+- classify high fan-in headers
 
-Current status:
+Potential relations:
 
-- C/C++ files are scanned and parsed through the C-family parser.
-- C/C++ parsing prefers `libclang`, falls back to tree-sitter, then regex.
-- C/C++ extensions currently include `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, and `.hxx`.
-- C# has parser support, but does not yet have deep ASP.NET / DTO / dependency-injection workflow intelligence.
-- The recent GitNexus-style workflow improvements were mostly optimized around Python backends and React/TypeScript frontends.
+- `DECLARES`
+- `DEFINES_IMPLEMENTATION`
+- `DECLARES_IN_HEADER`
+- `INCLUDES_HEADER`
+- `PUBLIC_API_HEADER`
 
-Goal:
+### 3. Semantic Call Graph
 
-- Bring C/C++ and C# closer to the Python/React workflow-intelligence depth: symbol context, process/flow tracing, API/handler impact where applicable, risk-aware change reports, and pre-commit guidance.
+Implement:
 
-Recommended C/C++ roadmap:
+- clang USR/canonical-name identity where available
+- namespace/class-aware symbol IDs
+- overload-aware call edges
+- constructor/destructor edges
+- virtual method and override edges
+- lower-confidence function pointer and callback edges
+- macro-expanded or unresolved call confidence metadata
 
-1. Build-context discovery.
-   - Detect `compile_commands.json`.
-   - Parse common CMake build directories.
-   - Capture include paths, defines, language standard, compiler flags, and target ownership.
-   - Surface build-context confidence in index status and change reports.
+### 4. Entrypoints And Terminals
 
-2. Source/header pairing and ownership.
-   - Link `.h/.hpp` declarations to `.c/.cpp` definitions.
-   - Add relations such as `DECLARES`, `DEFINES_IMPLEMENTATION`, `DECLARES_IN_HEADER`, and `INCLUDES_HEADER`.
-   - Prefer implementation definitions in caller/callee flows while retaining header context.
+Implement entrypoint detection for:
 
-3. Semantic call graph hardening.
-   - Use clang USRs/canonical names where available.
-   - Resolve overloads and namespaces for C++.
-   - Track function pointers, callbacks, and virtual dispatch as lower-confidence edges.
-   - Mark macro-expanded or unresolved call edges with confidence metadata.
+- `main`
+- exported/shared-library symbols
+- task/thread entrypoints
+- callback registrations
+- CLI command handlers
+- RPC/HTTP handlers where present
+- firmware loops
 
-4. Entrypoint and terminal detection.
-   - Detect `main`, exported symbols, task/thread entrypoints, callback registrations, CLI handlers, RPC/HTTP handlers, and firmware loops.
-   - Detect terminal dependencies such as file I/O, sockets/network, database/client calls, hardware/register access, and external library boundaries.
+Implement terminal detection for:
 
-5. Flow tracing and change reports.
-   - Trace from entrypoints through C/C++ call chains.
-   - Overlay changed files/symbols onto flows.
-   - Add risk factors for high fan-in headers, exported ABI changes, shared structs/enums, macros, and build target ownership.
-   - Add test recommendations from nearby test files, target names, and build metadata.
+- file I/O
+- sockets/network
+- database/client calls
+- hardware/register access
+- external library boundaries
+- process/thread creation
 
-6. C/C++ API/ABI impact.
-   - Detect changed exported functions, public headers, structs, enums, typedefs, virtual interfaces, and public macros.
-   - Report downstream source files and build targets that include or call changed public surfaces.
-   - Add ABI-risk labels for signature/layout changes.
+### 5. C/C++ Change Reports
 
-Recommended C# roadmap:
+Add C/C++-specific risk and blast radius:
 
-1. ASP.NET route extraction.
-   - Detect controllers, minimal APIs, endpoint maps, route attributes, HTTP method attributes, and middleware.
-   - Extract route path, method, handler symbol, request type, and response type.
+- changed public header
+- changed exported function
+- changed struct/class layout
+- changed enum/typedef
+- changed public macro
+- changed virtual interface
+- high fan-in include
+- build target ownership
+- ABI risk
 
-2. DTO and response-shape extraction.
-   - Parse records/classes used as request/response DTOs.
-   - Track serialized property names, nullable fields, collections, and nested DTOs.
-   - Compare route responses with client/consumer reads when C# clients or frontend consumers are indexed.
+Desired output:
 
-3. Dependency-injection graph.
-   - Parse `AddScoped`, `AddTransient`, `AddSingleton`, factory registrations, and interface-to-implementation mappings.
-   - Use DI edges to improve caller/callee and process tracing.
+- downstream files
+- affected build targets
+- impacted entrypoint flows
+- affected exported API/ABI surfaces
+- suggested tests
+- risk explanation
 
-4. Service/repository/process flows.
-   - Trace controller/minimal API entrypoints into services, repositories, database clients, queues, and external HTTP clients.
-   - Add risk per controller/action/process.
+## C# Workflow Roadmap
 
-5. Test mapping.
-   - Map xUnit/NUnit/MSTest files to controllers, services, DTOs, and repositories.
-   - Recommend tests by project, namespace, class name, route, and changed symbol.
+### 1. ASP.NET Route Extraction
 
-6. Risk model.
-   - Escalate risk for public controller/DTO changes, auth/middleware changes, shared interface changes, migrations, DI rewires, and high fan-in services.
-   - Report risk by route, service, project, and test coverage confidence.
+Implement:
 
-Likely files to update:
+- controller route attributes
+- action method HTTP attributes
+- minimal APIs such as `MapGet`, `MapPost`, `MapGroup`
+- route prefixes
+- middleware and filters where practical
+- request/response type extraction
 
-- `indexing/parsers/c_family.py`
-- `indexing/clang_extractor.py`
-- `indexing/parsers/csharp.py`
-- `indexing/scanner.py`
-- `indexing/graph_builder.py`
-- `storage/kuzu_store.py`
-- `services/process_service.py`
-- `services/detect_changes_service.py`
-- `services/change_report_service.py`
-- `services/impact_service.py`
-- `services/symbol_context_service.py`
-- `services/test_intelligence_service.py`
-- C/C++ and C# fixture tests under `tests/`
+### 2. DTO And Shape Extraction
 
-Success criteria:
+Implement:
 
-- A changed public C/C++ header can report downstream source files, build targets, impacted entrypoint flows, and suggested tests.
-- A changed C/C++ implementation function can report callers, callees, terminal dependencies, flow membership, and risk.
-- A changed ASP.NET route/controller can report route, request/response DTOs, service/repository process flow, consumers, risk, and tests.
-- A C# service/interface/DI change can report affected controllers/processes and likely tests.
+- records/classes used as request DTOs
+- records/classes used as response DTOs
+- nullable fields
+- collection fields
+- nested DTOs
+- serialized property names
+- JSON attributes
 
-## Recommended Next Milestones
+Use this for:
 
-### Milestone A: Add Field Access Graph Edges
+- route response shape
+- consumer compatibility
+- breaking vs additive field changes
 
-Goal:
+### 3. Dependency Injection Graph
 
-- Track where symbols read/write fields or response properties.
+Implement:
 
-Suggested implementation:
+- `AddScoped`
+- `AddTransient`
+- `AddSingleton`
+- interface-to-implementation mappings
+- factory registrations
+- hosted services
 
-1. Extend parser metadata to emit field/property reads and writes.
-2. Extend graph builder to create `ACCESSES` edges.
-3. Extend Kuzu schema to include `ACCESSES`.
-4. Extend `graph_service` categorized context to include `ACCESSES`.
-5. Extend `impact_service` to optionally include field access impact.
-6. Add tests.
+Use DI edges to improve:
 
-### Milestone B: Add Inheritance / Interface Graph Edges
+- caller/callee graph
+- process tracing
+- impact analysis
+- risk scoring
 
-Goal:
+### 4. Controller/Service/Repository Flows
 
-- Understand object-oriented impact for class, interface, and override changes.
+Trace:
 
-Suggested implementation:
+- controller/minimal API entrypoint
+- service method
+- repository/data access
+- database or external HTTP client
+- queue/event publisher
+- response DTO return
 
-1. Extend parser metadata for class inheritance and interface implementation.
-2. Add graph relations: `EXTENDS`, `IMPLEMENTS`, `METHOD_OVERRIDES`, `METHOD_IMPLEMENTS`.
-3. Update graph context and impact analysis.
-4. Add tests with small Python/TypeScript fixtures.
+Desired output:
 
-### Milestone C: Harden API Shape Analysis
+- affected route/action
+- affected service/repository chain
+- affected DTOs
+- affected tests
+- risk by route/process/project
 
-Goal:
+### 5. C# Test Mapping
 
-- Reduce false negatives in route response and consumer shape checking.
+Map tests using:
 
-Suggested implementation:
+- xUnit
+- NUnit
+- MSTest
+- project/namespace conventions
+- class and method names
+- controller/service/repository names
+- route names
 
-1. Improve destructured frontend reads.
-2. Improve aliased API imports.
-3. Improve response variables and helper-return extraction.
-4. Add Pydantic model shape extraction.
-5. Add real-world fixture tests.
+### 6. C# Risk Model
 
-### Milestone D: Process-Aware API Impact
+Escalate risk for:
 
-Goal:
+- public controller route changes
+- DTO shape changes
+- auth/middleware/filter changes
+- DI rewires
+- migrations/schema changes
+- high fan-in interfaces/services
+- shared package/project changes
 
-- Make API impact report include route-to-service execution flow.
+## Practical Next Milestones
 
-Suggested implementation:
+The highest-value next milestones are:
 
-1. Link route handlers to process traces.
-2. Add process summaries to `api_impact`.
-3. Add process risk to route risk.
-4. Add compact summary fields for top affected flows.
+1. Add C/C++ build-context discovery and index-health reporting.
+2. Add ASP.NET route and DTO extraction for C#.
+3. Add AST-native frontend field-read extraction only where current heuristics fail real repo examples.
+4. Add fixture repos and smoke tests for route/API/process/change workflows.
+5. Calibrate risk from real validation results and actual test execution evidence.
 
-## Backward Compatibility Notes
+## Compatibility Notes
 
-Maintain these existing fields because MCP clients may depend on them:
+Keep these fields stable for MCP consumers:
 
-- `callers`
-- `callees`
-- `compact_summary`
-- `risk`
+- `status`
+- `warnings`
 - `confidence`
+- `next_tools`
+- `partial`
+- `compact_summary`
+- `top_files`
+- `top_symbols`
+- `risk`
+- `risk_scope`
 - `changed_files`
 - `changed_symbols`
 - `impacted_files`
@@ -617,44 +618,54 @@ Maintain these existing fields because MCP clients may depend on them:
 - `routes`
 - `handlers`
 - `consumers`
+- `callers`
+- `callees`
 
-Prefer adding new fields over replacing existing ones.
+Prefer adding new fields over replacing existing fields.
 
-## Known Design Constraints
+## Operational Notes
 
-- Much of the current route and consumer parsing is regex-based.
-- Existing graph schema is intentionally simple.
-- Some higher-level services expect plain dictionaries and compact summaries.
-- MCP tools should remain stable and avoid breaking existing clients.
-- Windows path handling matters for this repo.
+- Restart the MCP server after code changes; live MCP behavior reflects the running process.
+- Keep broad-query tools bounded and partial-friendly.
+- Preserve Windows path handling.
+- Avoid adding slow eager startup work to `scripts/run_mcp.py`.
+- `list_repos` should stay lightweight and should not require opening DuckDB, Kuzu, LanceDB, or embedding models.
+- Do not re-enable LLM/reviewer workflows without a deliberate validation pass.
 
-## Suggested Developer Workflow
+## Validation Checklist
 
-1. Start with a small focused milestone.
-2. Add tests before or alongside implementation.
-3. Keep output fields backward-compatible.
-4. Run the focused validation command.
-5. Run the full test suite before finalizing.
-6. Update this document if the roadmap changes.
+Before handoff or PR:
 
-## Current Handoff Summary
+```powershell
+python -m pytest
+```
 
-Completed:
+Recommended live smoke after restart:
 
-- Phase 1 git-aware risk metadata.
-- Phase 2 API/route/consumer impact.
-- Shape checking and `shape_check` MCP tool.
-- Route/process integration in git-aware reports.
-- Route parsing refactor.
-- Categorized graph context.
-- MCP wiring for graph-enriched symbol context.
+```text
+route_map(repo="Stock", route="/products/trends")
+api_impact(repo="Stock", route="/products/trends")
+field_impact(repo="Stock", route="/products/trends", field="chart_data[].intransit_stock")
+shape_check(repo="Stock", route="/products/trends")
+detect_changes(repo="Stock", scope="unstaged")
+change_impact_report(repo="Stock", scope="unstaged")
+```
 
-Still left:
+Expected live behavior:
 
-- Richer graph schema beyond the first-pass relation set.
-- AST-based frontend parsing.
-- Stronger backend response shape extraction from helper-built payloads.
-- More precise process modeling and process catalog quality.
-- Impact analysis over new graph relations.
-- README/MCP output documentation.
-- More MCP smoke tests around live tool latency and partial-output behavior.
+- route/API tools return quickly
+- ProductTrendModal field reads are visible
+- graph-backed fetchers/readers are present where indexed
+- shape status is clear
+- broad change tools return bounded output or explicit partial warnings instead of timing out
+
+## Bottom Line
+
+The original Python/React GitNexus-style roadmap is mostly implemented at useful first-pass depth.
+
+The remaining work is not "finish Phase 1/2"; it is:
+
+- harden real-world edge cases
+- improve process/risk quality from validation
+- add fixture and smoke coverage
+- bring C/C++/C# up toward the same workflow-intelligence depth
