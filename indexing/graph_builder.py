@@ -321,6 +321,39 @@ def _should_log_index(index: int, total: int) -> bool:
     return index == 1 or index == total or index % interval == 0
 
 
+def _property_symbol_name(access_path: str) -> str:
+    return f"property:{str(access_path or '').strip()}"
+
+
+def _route_symbol_name(route: str) -> str:
+    route_text = "/" + str(route or "").strip().strip("/")
+    return f"route:{route_text.rstrip('/') or '/'}"
+
+
+def _field_symbol_name(field_path: str) -> str:
+    return f"field:{str(field_path or '').strip()}"
+
+
+def _parent_symbol_name(symbol: SymbolRecord) -> str:
+    parent = str(symbol.metadata.get("parent", "") or "").strip()
+    if parent and "." in symbol.qualified_name:
+        return symbol.qualified_name.rsplit(".", 1)[0]
+    parent_chain = symbol.metadata.get("parent_chain", [])
+    if isinstance(parent_chain, list) and parent_chain:
+        return ".".join(str(item) for item in parent_chain if str(item))
+    return ""
+
+
+def _method_index(symbols_by_file: dict[str, list[SymbolRecord]]) -> dict[tuple[str, str], list[str]]:
+    methods: dict[tuple[str, str], list[str]] = {}
+    for symbols in symbols_by_file.values():
+        for symbol in symbols:
+            parent = _parent_symbol_name(symbol)
+            if parent:
+                methods.setdefault((parent, symbol.name), []).append(symbol.qualified_name)
+    return methods
+
+
 def build_graph(
     kuzu_store: KuzuStore,
     files: list[FileRecord],
@@ -333,6 +366,8 @@ def build_graph(
     file_associations = _file_association_map(symbols_by_file)
     grouped_symbols = _translation_unit_symbols(symbols_by_file)
     association_groups = _source_association_groups(symbols_by_file)
+    methods_by_parent_and_name = _method_index(symbols_by_file)
+    inheritance_edges: list[tuple[str, str, str]] = []
     for file_path, symbols in symbols_by_file.items():
         for symbol in symbols:
             symbols_by_name.setdefault(symbol.name, []).append((file_path, symbol.qualified_name))
@@ -366,8 +401,55 @@ def build_graph(
                     if target is None or target == symbol.qualified_name:
                         continue
                     kuzu_store.add_edge(symbol.qualified_name, relation, target)
+            for raw_access in symbol.metadata.get("accesses", []):
+                access_path = str(raw_access or "").strip()
+                if not access_path or "." not in access_path:
+                    continue
+                target = _property_symbol_name(access_path)
+                kuzu_store.ensure_symbol(target, file_record.path, "property", symbol.start_line, symbol.end_line)
+                kuzu_store.add_edge(symbol.qualified_name, "ACCESSES", target)
+            for raw_route in symbol.metadata.get("fetches", []):
+                route = str(raw_route or "").strip()
+                if not route:
+                    continue
+                target = _route_symbol_name(route)
+                kuzu_store.ensure_symbol(target, file_record.path, "api_route", symbol.start_line, symbol.end_line)
+                kuzu_store.add_edge(symbol.qualified_name, "FETCHES", target)
+            for raw_field in symbol.metadata.get("field_reads", []):
+                field_path = str(raw_field or "").strip()
+                if not field_path:
+                    continue
+                target = _field_symbol_name(field_path)
+                kuzu_store.ensure_symbol(target, file_record.path, "field", symbol.start_line, symbol.end_line)
+                kuzu_store.add_edge(symbol.qualified_name, "READS_FIELD", target)
+            for relation, metadata_key in (("EXTENDS", "extends"), ("IMPLEMENTS", "implements")):
+                for raw_target in symbol.metadata.get(metadata_key, []):
+                    target = _resolve_symbol_target(
+                        str(raw_target),
+                        current_symbol=symbol,
+                        file_path=file_record.path,
+                        symbols_by_file=symbols_by_file,
+                        symbols_by_name=symbols_by_name,
+                        file_symbol_names=file_symbol_names,
+                        file_name_candidates=file_name_candidates,
+                        project_file_symbols=project_file_symbols,
+                        file_associations=file_associations,
+                        relation=relation,
+                    )
+                    if target is None or target == symbol.qualified_name:
+                        continue
+                    kuzu_store.add_edge(symbol.qualified_name, relation, target)
+                    inheritance_edges.append((symbol.qualified_name, relation, target))
         if progress_callback is not None and _should_log_index(index, len(files)):
             progress_callback(f"graph edge progress: {index}/{len(files)} files ({file_record.path})")
+    for child, relation, parent in inheritance_edges:
+        method_relation = "METHOD_IMPLEMENTS" if relation == "IMPLEMENTS" else "METHOD_OVERRIDES"
+        for (parent_symbol, method_name), parent_methods in methods_by_parent_and_name.items():
+            if parent_symbol != parent:
+                continue
+            for child_method in methods_by_parent_and_name.get((child, method_name), []):
+                for parent_method in parent_methods:
+                    kuzu_store.add_edge(child_method, method_relation, parent_method)
     if progress_callback is not None:
         progress_callback("graph association edges started")
     for declaration, definition in _declaration_definition_pairs(grouped_symbols):

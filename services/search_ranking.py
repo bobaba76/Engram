@@ -134,6 +134,13 @@ def _graph_score(result: dict[str, Any]) -> tuple[float, list[str]]:
         "CALLS": 0.22,
         "REFERENCES": 0.16,
         "IMPORTS": 0.12,
+        "ACCESSES": 0.1,
+        "FETCHES": 0.2,
+        "READS_FIELD": 0.14,
+        "EXTENDS": 0.14,
+        "IMPLEMENTS": 0.13,
+        "METHOD_OVERRIDES": 0.12,
+        "METHOD_IMPLEMENTS": 0.11,
         "DECLARES": 0.1,
         "ASSOCIATED_WITH": 0.08,
     }

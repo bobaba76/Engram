@@ -42,6 +42,42 @@ def test_python_parser_accepts_utf8_bom(tmp_path: Path) -> None:
     assert {symbol.qualified_name for symbol in symbols} >= {"Dashboard", "Dashboard.render", "helper"}
 
 
+def test_python_parser_tracks_base_classes(tmp_path: Path) -> None:
+    source = tmp_path / "inheritance.py"
+    source.write_text(
+        "class BaseService:\n"
+        "    def run(self):\n"
+        "        return 1\n"
+        "\n"
+        "class CustomerService(BaseService):\n"
+        "    def run(self):\n"
+        "        return super().run()\n",
+        encoding="utf-8",
+    )
+
+    symbols, _ = extract_symbols_with_status(source)
+    customer_service = next(symbol for symbol in symbols if symbol.name == "CustomerService")
+
+    assert customer_service.metadata.get("extends") == ["BaseService"]
+
+
+def test_python_parser_tracks_import_aliases(tmp_path: Path) -> None:
+    source = tmp_path / "products.py"
+    source.write_text(
+        "from backend.services.product_trends import get_product_trend_data as svc_get_product_trend_data\n"
+        "\n"
+        "def get_product_trends():\n"
+        "    return svc_get_product_trend_data()\n",
+        encoding="utf-8",
+    )
+
+    symbols, _ = extract_symbols_with_status(source)
+    handler = next(symbol for symbol in symbols if symbol.name == "get_product_trends")
+
+    assert handler.metadata.get("import_aliases", {}).get("svc_get_product_trend_data") == "get_product_trend_data"
+    assert "svc_get_product_trend_data" in handler.metadata.get("calls", [])
+
+
 def test_typescript_parser_module_falls_back_to_regex(tmp_path: Path) -> None:
     source = tmp_path / "sample.ts"
     source.write_text(
@@ -87,6 +123,48 @@ def test_typescript_parser_records_module_qualified_names(tmp_path: Path) -> Non
     assert "useBoundCustomer" in customer_view.metadata.get("imports", [])
     assert "CustomerPanel" in customer_view.metadata.get("imports", [])
     assert customer_view.metadata.get("import_aliases", {}).get("useBoundCustomer") == "useCustomer"
+
+
+def test_typescript_parser_tracks_extends_and_implements(tmp_path: Path) -> None:
+    source = tmp_path / "ui" / "CustomerView.tsx"
+    source.parent.mkdir()
+    source.write_text(
+        "interface Renderable { render(): void }\n"
+        "class BaseView { render() {} }\n"
+        "export class CustomerView extends BaseView implements Renderable {\n"
+        "  render() { return this.props.customer.id }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    symbols, _ = extract_symbols_with_status(source)
+    customer_view = next(symbol for symbol in symbols if symbol.name == "CustomerView")
+
+    assert customer_view.metadata.get("extends") == ["BaseView"]
+    assert customer_view.metadata.get("implements") == ["Renderable"]
+
+
+def test_typescript_parser_tracks_api_fetches_and_field_reads(tmp_path: Path) -> None:
+    source = tmp_path / "ui" / "ProductTrendModal.tsx"
+    source.parent.mkdir()
+    source.write_text(
+        "export const ProductTrendModal = async () => {\n"
+        "  const response = await apiClient.get('/api/products/trends')\n"
+        "  const data = response.data\n"
+        "  const { metrics, chart_data: chartData } = data\n"
+        "  chartData.map(point => point.qty_sold + point.intransit_stock)\n"
+        "  return metrics.effective_stock\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    symbols, _ = extract_symbols_with_status(source)
+    component = next(symbol for symbol in symbols if symbol.name == "ProductTrendModal")
+
+    assert component.metadata.get("fetches") == ["/products/trends"]
+    assert "metrics.effective_stock" in component.metadata.get("field_reads", [])
+    assert "chart_data[].qty_sold" in component.metadata.get("field_reads", [])
+    assert "chart_data[].intransit_stock" in component.metadata.get("field_reads", [])
 
 
 def test_typescript_parser_tracks_reexport_paths_and_barrel_metadata(tmp_path: Path) -> None:

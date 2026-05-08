@@ -224,7 +224,7 @@ def app_context(repo_root: Path, duckdb_store: DuckDBStore, kuzu_store: KuzuStor
         kinds[kind] = kinds.get(kind, 0) + 1
         tables.update(str(table) for table in node.get("db_tables", []) if table)
 
-    api_rows = api_impact(repo_root, duckdb_store, route=route_input) if route_input else {"routes": [], "compact_summary": {"route_count": 0}}
+    api_rows = api_impact(repo_root, duckdb_store, route=route_input, kuzu_store=kuzu_store) if route_input else {"routes": [], "compact_summary": {"route_count": 0}}
     processes = _processes_for_files(duckdb_store, candidate_files, limit=limit)
     graph_limit = 16 if bool(target_shape["is_broad"]) else 40
     graph_edges = _graph_edges_for_files(kuzu_store, duckdb_store, candidate_files, limit=graph_limit)

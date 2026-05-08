@@ -60,15 +60,26 @@ def _derive_status(payload: dict[str, Any], compact_summary: dict[str, Any]) -> 
 
 
 def _derive_partial(payload: dict[str, Any], compact_summary: dict[str, Any], status: str) -> bool:
-    if isinstance(payload.get("partial"), bool):
-        return bool(payload.get("partial"))
-    if isinstance(compact_summary.get("partial"), bool):
-        return bool(compact_summary.get("partial"))
-    if status == "partial":
-        return True
     warnings = _as_list(compact_summary.get("warnings")) + _as_list(payload.get("warnings"))
     warning_text = " ".join(str(item or "").lower() for item in warnings)
-    return "capped" in warning_text or "truncated" in warning_text or "partial" in warning_text
+    warning_partial = any(
+        token in warning_text
+        for token in (
+            "capped",
+            "truncated",
+            "partial",
+            "skipped for broad",
+            "traversal skipped",
+            "narrow the scope",
+        )
+    )
+    if isinstance(payload.get("partial"), bool):
+        return bool(payload.get("partial")) or warning_partial
+    if isinstance(compact_summary.get("partial"), bool):
+        return bool(compact_summary.get("partial")) or warning_partial
+    if status == "partial":
+        return True
+    return warning_partial
 
 
 def _derive_confidence(payload: dict[str, Any], compact_summary: dict[str, Any]) -> str:
@@ -97,6 +108,9 @@ def _derive_top_files(payload: dict[str, Any], compact_summary: dict[str, Any]) 
     candidates: list[Any] = []
     candidates.extend(_as_list(compact_summary.get("top_files")))
     candidates.extend(_as_list(compact_summary.get("app_files")))
+    candidates.extend(_as_list(compact_summary.get("top_changed_files")))
+    candidates.extend(_as_list(compact_summary.get("top_risk_files")))
+    candidates.extend(_as_list(compact_summary.get("top_tests")))
     for item in _as_list(payload.get("compact_results"))[:8]:
         if isinstance(item, dict):
             candidates.append(item.get("file") or item.get("file_path"))
@@ -112,6 +126,8 @@ def _derive_top_files(payload: dict[str, Any], compact_summary: dict[str, Any]) 
 def _derive_top_symbols(payload: dict[str, Any], compact_summary: dict[str, Any]) -> list[str]:
     candidates: list[Any] = []
     candidates.extend(_as_list(compact_summary.get("top_symbols")))
+    candidates.extend(_as_list(compact_summary.get("top_changed_symbols")))
+    candidates.extend(_as_list(compact_summary.get("top_impacted")))
     for item in _as_list(payload.get("matches"))[:8]:
         if isinstance(item, dict):
             candidates.append(item.get("qualified_name") or item.get("name") or item.get("symbol"))
@@ -123,17 +139,97 @@ def _derive_top_symbols(payload: dict[str, Any], compact_summary: dict[str, Any]
     return _dedupe_strings(candidates, limit=8)
 
 
+def _normalized_tool_hints(values: list[Any], limit: int = 6) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        tool = str(item.get("tool") or "").strip()
+        if not tool:
+            continue
+        target = str(item.get("target") or "").strip()
+        key = (tool, target)
+        if key in seen:
+            continue
+        seen.add(key)
+        hint = {
+            "tool": tool,
+            "why": str(item.get("why") or "").strip(),
+        }
+        if target:
+            hint["target"] = target
+        normalized.append(hint)
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
 def _derive_next_tools(payload: dict[str, Any], compact_summary: dict[str, Any]) -> list[dict[str, str]]:
     existing = _as_list(payload.get("next_tools")) or _as_list(compact_summary.get("next_tools"))
-    normalized: list[dict[str, str]] = []
-    for item in existing:
-        if isinstance(item, dict) and str(item.get("tool") or "").strip():
-            normalized.append({
-                "tool": str(item.get("tool") or "").strip(),
-                "why": str(item.get("why") or "").strip(),
-            })
+    normalized = _normalized_tool_hints(existing)
     if normalized:
-        return normalized[:6]
+        return normalized
+    workflow = payload.get("pre_commit_workflow")
+    workflow_tools: list[Any] = []
+    if isinstance(workflow, dict):
+        for item in _as_list(workflow.get("field_blast_radius")):
+            if not isinstance(item, dict):
+                continue
+            follow_up = item.get("follow_up")
+            if isinstance(follow_up, dict):
+                workflow_tools.append(follow_up)
+            elif item.get("route") and item.get("field"):
+                workflow_tools.append(
+                    {
+                        "tool": "field_impact",
+                        "target": f"{item.get('route')} {item.get('field')}",
+                        "why": "Show exact field readers and missing-response risk for this route field.",
+                    }
+                )
+        for item in _as_list(workflow.get("process_blast_radius")):
+            if not isinstance(item, dict):
+                continue
+            target = item.get("changed_symbol") or item.get("entry_symbol") or item.get("name")
+            if target:
+                workflow_tools.append(
+                    {
+                        "tool": "trace_processes",
+                        "target": str(target),
+                        "why": "Trace the execution flow that includes the changed symbol.",
+                    }
+                )
+        workflow_tools.extend(_as_list(workflow.get("follow_up_tools")))
+    for item in _as_list(compact_summary.get("field_blast_radius")):
+        if not isinstance(item, dict):
+            continue
+        follow_up = item.get("follow_up")
+        if isinstance(follow_up, dict):
+            workflow_tools.append(follow_up)
+        elif item.get("route") and item.get("field"):
+            workflow_tools.append(
+                {
+                    "tool": "field_impact",
+                    "target": f"{item.get('route')} {item.get('field')}",
+                    "why": "Show exact field readers and missing-response risk for this route field.",
+                }
+            )
+    for item in _as_list(compact_summary.get("process_blast_radius")):
+        if not isinstance(item, dict):
+            continue
+        target = item.get("changed_symbol") or item.get("entry_symbol") or item.get("name")
+        if target:
+            workflow_tools.append(
+                {
+                    "tool": "trace_processes",
+                    "target": str(target),
+                    "why": "Trace the execution flow that includes the changed symbol.",
+                }
+            )
+    workflow_tools.extend(_as_list(compact_summary.get("follow_up_tools")))
+    workflow_guidance = _normalized_tool_hints(workflow_tools)
+    if workflow_guidance:
+        return workflow_guidance
     target = _render_target(payload.get("target") or compact_summary.get("target") or "")
     task = str(payload.get("task") or "").strip()
     suggested: list[dict[str, str]] = []

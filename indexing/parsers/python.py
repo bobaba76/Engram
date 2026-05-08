@@ -19,6 +19,25 @@ def _python_name(node: ast.AST) -> str | None:
     return None
 
 
+def _python_attribute_accesses(node: ast.AST) -> list[str]:
+    accesses: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Attribute):
+            name = _python_name(child)
+            if name and "." in name:
+                accesses.add(name)
+    return sorted(accesses)
+
+
+def _python_base_names(node: ast.ClassDef) -> list[str]:
+    bases: list[str] = []
+    for base in node.bases:
+        name = _python_name(base)
+        if name and name not in bases:
+            bases.append(name)
+    return bases
+
+
 def _python_symbol_kind(node: ast.AST, parents: list[str]) -> str:
     if isinstance(node, ast.ClassDef):
         return "class"
@@ -32,10 +51,12 @@ def extract_symbols(file_path: Path) -> list[SymbolRecord]:
     tree = ast.parse(source)
     symbols: list[SymbolRecord] = []
     file_imports: set[str] = set()
+    import_aliases: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 file_imports.add(alias.name)
+                import_aliases[alias.asname or alias.name] = alias.name
         elif isinstance(node, ast.ImportFrom):
             module_name = node.module or ""
             if module_name:
@@ -45,6 +66,7 @@ def extract_symbols(file_path: Path) -> list[SymbolRecord]:
                     file_imports.add(f"{module_name}.{alias.name}")
                 else:
                     file_imports.add(alias.name)
+                import_aliases[alias.asname or alias.name] = alias.name
 
     def visit(node: ast.AST, parents: list[str]) -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -68,6 +90,7 @@ def extract_symbols(file_path: Path) -> list[SymbolRecord]:
                     if is_useful_reference(name, node.name)
                 }
             )
+            extends = _python_base_names(node) if isinstance(node, ast.ClassDef) else []
             symbols.append(
                 SymbolRecord(
                     name=node.name,
@@ -81,7 +104,11 @@ def extract_symbols(file_path: Path) -> list[SymbolRecord]:
                         "imports": sorted(file_imports),
                         "calls": calls,
                         "references": references,
+                        "accesses": _python_attribute_accesses(node),
+                        "extends": extends,
+                        "implements": [],
                         "parent_chain": parents,
+                        "import_aliases": import_aliases,
                     },
                 )
             )

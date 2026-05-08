@@ -62,6 +62,129 @@ def test_build_graph_resolves_typescript_import_and_call_edges() -> None:
     assert ("src.ui.CustomerView.CustomerView", "REFERENCES", "src.hooks.useCustomer.useCustomer") in kuzu.edges
 
 
+def test_build_graph_resolves_python_import_alias_call_edges() -> None:
+    files = [
+        FileRecord(path="backend/services/product_trends.py", language="python", size_bytes=1, sha256="a", modified_time=0.0),
+        FileRecord(path="backend/routers/products.py", language="python", size_bytes=1, sha256="b", modified_time=0.0),
+    ]
+    symbols_by_file = {
+        "backend/services/product_trends.py": [
+            SymbolRecord(
+                name="get_product_trend_data",
+                qualified_name="backend.services.product_trends.get_product_trend_data",
+                kind="function",
+                start_line=1,
+                end_line=3,
+                signature="get_product_trend_data",
+                metadata={"imports": [], "calls": [], "references": []},
+            )
+        ],
+        "backend/routers/products.py": [
+            SymbolRecord(
+                name="get_product_trends",
+                qualified_name="backend.routers.products.get_product_trends",
+                kind="function",
+                start_line=1,
+                end_line=6,
+                signature="get_product_trends",
+                metadata={
+                    "imports": ["backend.services.product_trends.get_product_trend_data"],
+                    "calls": ["svc_get_product_trend_data"],
+                    "references": ["svc_get_product_trend_data"],
+                    "import_aliases": {"svc_get_product_trend_data": "get_product_trend_data"},
+                },
+            )
+        ],
+    }
+    kuzu = _Kuzu()
+
+    build_graph(kuzu, files, symbols_by_file)
+
+    assert (
+        "backend.routers.products.get_product_trends",
+        "CALLS",
+        "backend.services.product_trends.get_product_trend_data",
+    ) in kuzu.edges
+
+
+def test_build_graph_adds_access_edges_for_property_reads() -> None:
+    files = [
+        FileRecord(path="src/ui/CustomerView.tsx", language="typescript", size_bytes=1, sha256="a", modified_time=0.0),
+    ]
+    symbols_by_file = {
+        "src/ui/CustomerView.tsx": [
+            SymbolRecord(
+                name="CustomerView",
+                qualified_name="src.ui.CustomerView.CustomerView",
+                kind="component",
+                start_line=1,
+                end_line=4,
+                signature="CustomerView",
+                metadata={"imports": [], "calls": [], "references": [], "accesses": ["data.metrics.intransit_stock"]},
+            )
+        ],
+    }
+    kuzu = _Kuzu()
+
+    build_graph(kuzu, files, symbols_by_file)
+
+    assert ("property:data.metrics.intransit_stock", "src/ui/CustomerView.tsx", "property", 1, 4) in kuzu.symbols
+    assert ("src.ui.CustomerView.CustomerView", "ACCESSES", "property:data.metrics.intransit_stock") in kuzu.edges
+
+
+def test_build_graph_adds_frontend_api_contract_edges() -> None:
+    files = [
+        FileRecord(path="src/ui/ProductTrendModal.tsx", language="typescript", size_bytes=1, sha256="a", modified_time=0.0),
+    ]
+    symbols_by_file = {
+        "src/ui/ProductTrendModal.tsx": [
+            SymbolRecord(
+                name="ProductTrendModal",
+                qualified_name="src.ui.ProductTrendModal.ProductTrendModal",
+                kind="component",
+                start_line=1,
+                end_line=8,
+                signature="ProductTrendModal",
+                metadata={
+                    "imports": [],
+                    "calls": [],
+                    "references": [],
+                    "fetches": ["/products/trends"],
+                    "field_reads": ["metrics.effective_stock", "chart_data[].qty_sold"],
+                },
+            )
+        ],
+    }
+    kuzu = _Kuzu()
+
+    build_graph(kuzu, files, symbols_by_file)
+
+    assert ("route:/products/trends", "src/ui/ProductTrendModal.tsx", "api_route", 1, 8) in kuzu.symbols
+    assert ("field:metrics.effective_stock", "src/ui/ProductTrendModal.tsx", "field", 1, 8) in kuzu.symbols
+    assert ("src.ui.ProductTrendModal.ProductTrendModal", "FETCHES", "route:/products/trends") in kuzu.edges
+    assert ("src.ui.ProductTrendModal.ProductTrendModal", "READS_FIELD", "field:chart_data[].qty_sold") in kuzu.edges
+
+
+def test_build_graph_adds_inheritance_and_method_override_edges() -> None:
+    files = [
+        FileRecord(path="src/services.py", language="python", size_bytes=1, sha256="a", modified_time=0.0),
+    ]
+    symbols_by_file = {
+        "src/services.py": [
+            SymbolRecord(name="BaseService", qualified_name="BaseService", kind="class", start_line=1, end_line=3, signature="BaseService", metadata={"imports": [], "calls": [], "references": []}),
+            SymbolRecord(name="run", qualified_name="BaseService.run", kind="method", start_line=2, end_line=3, signature="BaseService.run", metadata={"imports": [], "calls": [], "references": [], "parent_chain": ["BaseService"]}),
+            SymbolRecord(name="CustomerService", qualified_name="CustomerService", kind="class", start_line=5, end_line=7, signature="CustomerService", metadata={"imports": [], "calls": [], "references": [], "extends": ["BaseService"]}),
+            SymbolRecord(name="run", qualified_name="CustomerService.run", kind="method", start_line=6, end_line=7, signature="CustomerService.run", metadata={"imports": [], "calls": [], "references": [], "parent_chain": ["CustomerService"]}),
+        ],
+    }
+    kuzu = _Kuzu()
+
+    build_graph(kuzu, files, symbols_by_file)
+
+    assert ("CustomerService", "EXTENDS", "BaseService") in kuzu.edges
+    assert ("CustomerService.run", "METHOD_OVERRIDES", "BaseService.run") in kuzu.edges
+
+
 def test_build_graph_prefers_associated_file_for_duplicate_import_names() -> None:
     files = [
         FileRecord(path="src/hooks/useCustomer.ts", language="typescript", size_bytes=1, sha256="a", modified_time=0.0),

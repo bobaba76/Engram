@@ -8,8 +8,19 @@ from storage.kuzu_store import KuzuStore
 from services.symbol_resolution_service import ambiguity_status, resolve_candidates, symbol_uid_from_target
 
 
-DEFAULT_RELATIONS = ("CALLS", "IMPORTS", "REFERENCES")
-RELATION_WEIGHTS = {"CALLS": 1.0, "IMPORTS": 0.85, "REFERENCES": 0.45}
+DEFAULT_RELATIONS = ("CALLS", "IMPORTS", "REFERENCES", "ACCESSES", "FETCHES", "READS_FIELD", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS")
+RELATION_WEIGHTS = {
+    "CALLS": 1.0,
+    "IMPORTS": 0.85,
+    "REFERENCES": 0.45,
+    "ACCESSES": 0.35,
+    "FETCHES": 0.9,
+    "READS_FIELD": 0.55,
+    "EXTENDS": 0.8,
+    "IMPLEMENTS": 0.75,
+    "METHOD_OVERRIDES": 0.7,
+    "METHOD_IMPLEMENTS": 0.65,
+}
 DEFAULT_EDGE_LIMIT_PER_RELATION = 80
 BROAD_EDGE_LIMIT_PER_RELATION = 18
 DEFAULT_NODE_BUDGET = 240
@@ -263,7 +274,7 @@ def analyze_impact(
             "top_relations": [item.get("relation", "") for item in all_impacted[:8]],
             "semantic_weight": semantic_weight,
             "participating_processes": [item.get("name", "") for item in process_participation[:5]],
-            "reason": "Impact is estimated from weighted CALLS, IMPORTS, and REFERENCES traversals.",
+            "reason": "Impact is estimated from weighted graph traversals across calls, imports, references, field access, and inheritance relations.",
         },
         "summary": {
             "direct": direct_count,

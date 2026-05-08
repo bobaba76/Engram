@@ -7,6 +7,7 @@ from indexing.parser_registry import ParserRegistry
 from indexing.parsers.common import is_useful_reference, node_text, tree_sitter_parser
 from indexing.tree_cache import parse_with_cache
 from models.entity_models import SymbolRecord
+from services.route_parsing import consumer_keys, frontend_route_usages, normalize_route
 
 
 TS_FUNCTION_PATTERN = re.compile(
@@ -58,6 +59,56 @@ GENERIC_REFERENCE_TOKENS = {
     "var",
     "window",
 }
+
+
+def _property_accesses(source: str, current_name: str = "") -> list[str]:
+    accesses: set[str] = set()
+    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)((?:\.[A-Za-z_][A-Za-z0-9_]*)+)", source):
+        base = match.group(1)
+        if not is_useful_reference(base, current_name, GENERIC_REFERENCE_TOKENS):
+            continue
+        parts = [base, *[part for part in match.group(2).split(".") if part]]
+        for index in range(2, len(parts) + 1):
+            accesses.add(".".join(parts[:index]))
+    return sorted(accesses)
+
+
+def _inheritance_metadata(source: str, name: str, kind: str) -> dict[str, list[str]]:
+    prefix = "interface" if kind == "interface" else "class"
+    pattern = re.compile(
+        rf"\b{prefix}\s+{re.escape(name)}(?:\s+extends\s+(?P<extends>[^{{]+?))?(?:\s+implements\s+(?P<implements>[^{{]+?))?\s*{{",
+        re.MULTILINE,
+    )
+    match = pattern.search(source)
+    if match is None:
+        return {"extends": [], "implements": []}
+
+    def split_names(value: str | None) -> list[str]:
+        names: list[str] = []
+        for item in str(value or "").split(","):
+            token = item.strip().split("<", 1)[0].strip()
+            if token and is_useful_reference(token, name, GENERIC_REFERENCE_TOKENS):
+                names.append(token)
+        return names
+
+    extends = split_names(match.group("extends"))
+    implements = split_names(match.group("implements")) if kind == "class" else []
+    return {"extends": extends, "implements": implements}
+
+
+def _api_contract_metadata(source: str) -> dict[str, object]:
+    routes: list[str] = []
+    for usage in frontend_route_usages(source, language="tsx"):
+        route = normalize_route(str(usage.get("route", "") or ""))
+        if route and route not in routes:
+            routes.append(route)
+    flat_reads, nested_reads = consumer_keys(source)
+    field_reads = []
+    for value in [*flat_reads, *nested_reads]:
+        text = str(value or "").strip()
+        if text and text not in field_reads:
+            field_reads.append(text)
+    return {"fetches": routes, "field_reads": field_reads}
 
 
 def _typescript_symbol_kind(name: str, node_type: str) -> str:
@@ -294,6 +345,9 @@ def _append_reexport_module_symbol(
                 "imports": imports,
                 "calls": [],
                 "references": [],
+                "accesses": [],
+                "fetches": [],
+                "field_reads": [],
                 "module": module_name,
                 "parent": "",
                 "import_aliases": import_aliases,
@@ -348,6 +402,9 @@ def _record_symbol(
         "imports": imports,
         "calls": calls,
         "references": references,
+        "accesses": _property_accesses(body_text, name),
+        **_api_contract_metadata(body_text),
+        **_inheritance_metadata(body_text, name, kind),
         "module": module_name,
         "parent": parent_name,
         **_node_export_flags(node, source_bytes),
@@ -438,6 +495,9 @@ def _extract_symbols_tree_sitter(file_path: Path) -> list[SymbolRecord]:
                         "imports": imports,
                         "calls": [],
                         "references": [],
+                        "accesses": [],
+                        "fetches": [],
+                        "field_reads": [],
                         "module": module_name,
                         "parent": "",
                         "import_aliases": import_aliases,
@@ -481,7 +541,7 @@ def _extract_symbols_regex(file_path: Path) -> list[SymbolRecord]:
                     start_line=line_number,
                     end_line=line_number,
                     signature=name,
-                    metadata={"parser": "regex_fallback", "language": "typescript", "imports": imports, "calls": [], "references": [], "module": module_name, "parent": "", "import_aliases": import_aliases, "source_associations": source_associations, "re_exports": reexport_statements, "exported": "export" in line, "default_export": "export default" in line},
+                    metadata={"parser": "regex_fallback", "language": "typescript", "imports": imports, "calls": [], "references": [], "accesses": _property_accesses(line, name), **_api_contract_metadata(line), **_inheritance_metadata(line, name, "interface"), "module": module_name, "parent": "", "import_aliases": import_aliases, "source_associations": source_associations, "re_exports": reexport_statements, "exported": "export" in line, "default_export": "export default" in line},
                 )
             )
             continue
@@ -496,7 +556,7 @@ def _extract_symbols_regex(file_path: Path) -> list[SymbolRecord]:
                     start_line=line_number,
                     end_line=line_number,
                     signature=name,
-                    metadata={"parser": "regex_fallback", "language": "typescript", "imports": imports, "calls": [], "references": [], "module": module_name, "parent": "", "import_aliases": import_aliases, "exported": "export" in line, "default_export": "export default" in line},
+                    metadata={"parser": "regex_fallback", "language": "typescript", "imports": imports, "calls": [], "references": [], "accesses": _property_accesses(line, name), **_api_contract_metadata(line), "extends": [], "implements": [], "module": module_name, "parent": "", "import_aliases": import_aliases, "exported": "export" in line, "default_export": "export default" in line},
                 )
             )
             continue
@@ -512,7 +572,7 @@ def _extract_symbols_regex(file_path: Path) -> list[SymbolRecord]:
                 start_line=line_number,
                 end_line=line_number,
                 signature=name,
-                metadata={"parser": "regex_fallback", "language": "typescript", "imports": imports, "calls": [], "references": [], "module": module_name, "parent": "", "import_aliases": import_aliases, "source_associations": source_associations, "re_exports": reexport_statements, "exported": "export" in line, "default_export": "export default" in line},
+                metadata={"parser": "regex_fallback", "language": "typescript", "imports": imports, "calls": [], "references": [], "accesses": _property_accesses(line, name), **_api_contract_metadata(line), "extends": [], "implements": [], "module": module_name, "parent": "", "import_aliases": import_aliases, "source_associations": source_associations, "re_exports": reexport_statements, "exported": "export" in line, "default_export": "export default" in line},
             )
         )
     _append_reexport_module_symbol(

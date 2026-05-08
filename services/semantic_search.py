@@ -247,7 +247,20 @@ def _graph_candidates(duckdb_store: DuckDBStore | None, kuzu_store: KuzuStore | 
             continue
         seen_targets.add(target)
         edges = []
-        for relation, edge_limit in (("CALLS", 8), ("REFERENCES", 6), ("IMPORTS", 4), ("DECLARES", 4), ("ASSOCIATED_WITH", 4)):
+        for relation, edge_limit in (
+            ("CALLS", 8),
+            ("REFERENCES", 6),
+            ("IMPORTS", 4),
+            ("ACCESSES", 4),
+            ("FETCHES", 6),
+            ("READS_FIELD", 6),
+            ("EXTENDS", 4),
+            ("IMPLEMENTS", 4),
+            ("METHOD_OVERRIDES", 4),
+            ("METHOD_IMPLEMENTS", 4),
+            ("DECLARES", 4),
+            ("ASSOCIATED_WITH", 4),
+        ):
             edges.extend(kuzu_store.edges_for_target(target, relation=relation)[:edge_limit])
             edges.extend(kuzu_store.edges_for_source(target, relation=relation)[:edge_limit])
         neighbors: dict[str, dict[str, object]] = {}

@@ -73,6 +73,170 @@ def test_enrich_payload_adds_agent_reliability_contract_fields() -> None:
     assert enriched["compact_summary"]["next_tools"][0]["tool"] == "get_source_context"
 
 
+def test_enrich_payload_promotes_pre_commit_follow_up_tools() -> None:
+    payload = {
+        "compact_summary": {
+            "target": "unstaged changes",
+            "changed_file_count": 12,
+            "follow_up_tools": [
+                {
+                    "tool": "change_impact_report",
+                    "target": "services/api_impact_service.py",
+                    "why": "Run a narrower follow-up if whole-tree traversal was capped.",
+                },
+                {
+                    "tool": "find_tests_for_target",
+                    "target": "services/api_impact_service.py",
+                    "why": "Find focused tests for this slice.",
+                },
+            ],
+        },
+        "pre_commit_workflow": {
+            "readiness": {"status": "not_ready", "ready_to_commit": False},
+            "follow_up_tools": [
+                {
+                    "tool": "get_source_context",
+                    "target": "services/api_impact_service.py",
+                    "why": "Inspect the highest-risk changed file in this slice.",
+                },
+                {
+                    "tool": "change_impact_report",
+                    "target": "services/api_impact_service.py",
+                    "why": "Run a narrower follow-up if whole-tree traversal was capped.",
+                },
+            ],
+        },
+    }
+
+    enriched = enrich_payload(payload)
+
+    assert enriched["next_tools"] == [
+        {
+            "tool": "get_source_context",
+            "target": "services/api_impact_service.py",
+            "why": "Inspect the highest-risk changed file in this slice.",
+        },
+        {
+            "tool": "change_impact_report",
+            "target": "services/api_impact_service.py",
+            "why": "Run a narrower follow-up if whole-tree traversal was capped.",
+        },
+        {
+            "tool": "find_tests_for_target",
+            "target": "services/api_impact_service.py",
+            "why": "Find focused tests for this slice.",
+        },
+    ]
+    assert enriched["compact_summary"]["next_tools"] == enriched["next_tools"]
+
+
+def test_enrich_payload_prioritizes_field_and_process_blast_radius_tools() -> None:
+    payload = {
+        "compact_summary": {
+            "target": "unstaged changes",
+            "changed_file_count": 3,
+            "field_blast_radius": [
+                {
+                    "route": "/products/trends",
+                    "field": "metrics.intransit_stock",
+                    "follow_up": {
+                        "tool": "field_impact",
+                        "target": "/products/trends metrics.intransit_stock",
+                        "why": "Show exact field readers and missing-response risk for this route field.",
+                    },
+                }
+            ],
+            "process_blast_radius": [
+                {
+                    "name": "backend: get_product_trends -> get_db_path",
+                    "changed_symbol": "get_product_trend_data",
+                }
+            ],
+            "follow_up_tools": [
+                {
+                    "tool": "get_source_context",
+                    "target": "backend/routers/products.py",
+                    "why": "Inspect the highest-risk changed file in this slice.",
+                }
+            ],
+        },
+        "pre_commit_workflow": {
+            "field_blast_radius": [
+                {
+                    "route": "/products/trends",
+                    "field": "metrics.intransit_stock",
+                }
+            ],
+            "process_blast_radius": [
+                {
+                    "changed_symbol": "get_product_trend_data",
+                    "entry_symbol": "get_product_trends",
+                }
+            ],
+        },
+    }
+
+    enriched = enrich_payload(payload)
+
+    assert enriched["next_tools"][:3] == [
+        {
+            "tool": "field_impact",
+            "target": "/products/trends metrics.intransit_stock",
+            "why": "Show exact field readers and missing-response risk for this route field.",
+        },
+        {
+            "tool": "trace_processes",
+            "target": "get_product_trend_data",
+            "why": "Trace the execution flow that includes the changed symbol.",
+        },
+        {
+            "tool": "get_source_context",
+            "target": "backend/routers/products.py",
+            "why": "Inspect the highest-risk changed file in this slice.",
+        },
+    ]
+    assert enriched["compact_summary"]["next_tools"] == enriched["next_tools"]
+
+
+def test_enrich_payload_promotes_change_report_top_files_and_symbols() -> None:
+    payload = {
+        "compact_summary": {
+            "target": "indexing/parsers/python.py",
+            "top_changed_files": ["indexing/parsers/python.py"],
+            "top_risk_files": ["scripts/run_mcp.py"],
+            "top_changed_symbols": ["extract_symbols", "extract_symbols.visit"],
+            "top_impacted": ["parse"],
+        },
+    }
+
+    enriched = enrich_payload(payload)
+
+    assert enriched["top_files"] == ["indexing/parsers/python.py", "scripts/run_mcp.py"]
+    assert enriched["top_symbols"] == ["extract_symbols", "extract_symbols.visit", "parse"]
+    assert enriched["compact_summary"]["top_files"] == enriched["top_files"]
+    assert enriched["compact_summary"]["top_symbols"] == enriched["top_symbols"]
+
+
+def test_enrich_payload_marks_capped_reports_partial_even_when_payload_says_false() -> None:
+    payload = {
+        "target": "unstaged changes",
+        "partial": False,
+        "warnings": [
+            "Graph blast-radius traversal skipped for 25 changed files; narrow the scope or target a file/symbol for full graph impact.",
+            "Process tracing skipped for broad diff; use trace_processes on a focused target for full flows.",
+        ],
+        "compact_summary": {
+            "changed_file_count": 25,
+            "changed_symbol_count": 164,
+        },
+    }
+
+    enriched = enrich_payload(payload)
+
+    assert enriched["partial"] is True
+    assert enriched["compact_summary"]["partial"] is True
+
+
 def test_enrich_payload_strips_large_embedding_vectors() -> None:
     payload = {
         "target": "app.main",
