@@ -1,418 +1,297 @@
-# Engram
+# Engram / Coder
 
-Engram is a local-first code intelligence engine for IDE agents.
+Engram is a local-first code intelligence engine for IDE agents. It indexes a repository, builds structural and graph context, and exposes that context through MCP so coding assistants can answer grounded questions about where code lives, what changes affect, which routes and consumers are involved, and what should be tested before commit.
 
-Its job is simple: give tools like Windsurf Cascade or other MCP-capable assistants deep, durable access to a real codebase instead of forcing them to rely on shallow file search and short chat memory.
+The project is currently used as the Coder MCP backend.
 
-Engram indexes a repository into local stores, builds structural and process context, and exposes that through MCP so an assistant can answer questions like:
+## Current Status
 
-- where is this handled?
-- what will this affect?
-- what tests should I run?
-- what files are most related to this target?
+Engram is strongest today for Python backends and TypeScript/React frontends. Recent work added GitNexus-style intelligence for:
 
-## What Engram is for
+- git-aware change detection and risk scope
+- route/API/consumer impact
+- response-shape checking
+- frontend field-read blast radius
+- symbol callers/callees and graph context
+- process/flow tracing from route handlers and changed symbols
+- pre-commit workflow slicing with tests, routes, fields, processes, and risk
+- safe broad-diff behavior so MCP tools return bounded results instead of hanging
 
-Engram is aimed at day-to-day coding help, especially for someone working inside an IDE with an agent doing the querying.
+C/C++ and C# are supported at the indexing/parser level, but they do not yet have the same workflow-intelligence depth as Python/React.
 
-That means the most important qualities are:
+## Important Note: LLM Review Is Disabled
 
-- local context
-- durable indexing
-- predictable tool outputs
-- safe handling of broad questions
-- useful next-step guidance for coding tasks
+The older README described LLM-backed review and summary workflows as a normal part of indexing. That section is currently disabled/not part of the active workflow. The useful path right now is deterministic local indexing plus MCP tools. Treat the LLM/reviewer layer as legacy or future work until it is explicitly re-enabled and validated.
 
-The goal is not to be a chat bot with a few search tricks. The goal is to be a reliable context backend for real software work.
+## What It Can Answer
 
-## What it does today
+Typical MCP questions:
 
-- indexes Python and TypeScript/JavaScript repositories into local stores
-- extracts files, symbols, chunks, and graph relationships
-- stores semantic vectors for chunk retrieval when enabled
-- builds dependency and call-style graph context
-- builds inferred process and execution-flow records
-- runs grouped review and persists findings
-- exposes repo intelligence through an MCP server
-- supports investigation-style queries that combine:
-  - search
-  - symbol resolution
-  - source snippets
-  - graph context
-  - app context
-  - change/test guidance
+- where is `Coordinator.run` implemented?
+- who calls this symbol, and what does it call?
+- what files are affected by these unstaged changes?
+- which route handlers changed?
+- if `/products/trends` changes, which frontend components and fields are affected?
+- does the backend response still satisfy frontend field reads?
+- what commit slices make sense for this working tree?
+- what tests should be run for this change?
 
-## Core capabilities
+## Main MCP Tools
 
-### Indexing
+Core navigation:
 
-Engram supports incremental indexing by default.
-
-An index run can:
-
-- scan the repo
-- detect changed vs unchanged files
-- parse changed files
-- rebuild graph state where needed
-- rebuild process records
-- chunk code for retrieval
-- embed chunks
-- run review workflows
-- persist reports and run metadata
-
-### MCP tools
-
-Engram exposes a fairly broad MCP surface for IDE agents. The most important tools include:
-
+- `list_repos`
+- `select_repo`
 - `resolve_target`
 - `semantic_code_search`
 - `investigate_codebase`
 - `get_source_context`
 - `unified_context`
+- `get_symbol_context`
+
+Graph and impact:
+
 - `impact_analysis`
 - `app_context`
-- `change_impact_report`
-- `find_tests_for_target`
-- `suggest_tests_for_change`
-- `test_impact`
-- `feature_context`
-- `index_status`
-- `index_health`
-- `detect_changes`
 - `get_dependencies`
 - `find_symbols`
 - `get_callers_and_callees`
 - `get_graph_neighborhood`
 - `get_file_summary`
-- `get_review_history`
-- `get_symbol_context`
 
-### Investigation workflow
+Git-aware workflows:
 
-`investigate_codebase` is the main orchestration-style tool.
+- `detect_changes`
+- `change_impact_report`
+- `suggest_tests_for_change`
+- `find_tests_for_target`
+- `test_impact`
 
-It is designed to answer natural questions safely and predictably, especially when an IDE agent is the caller.
+API and contract intelligence:
 
-Recent work in this area has focused on:
+- `route_map`
+- `api_impact`
+- `shape_check`
+- `field_impact`
+- `trace_processes`
 
-- broad-query safety
-- target resolution quality
-- consistent MCP response shape
-- change-help style answers
-- lightweight ambiguity handling for weak UI-ish terms
+Health and diagnostics:
 
-It now returns structured agent-friendly fields such as:
+- `index_status`
+- `index_health`
 
-- `status`
-- `warnings`
-- `confidence`
-- `next_tools`
-- `top_files`
-- `top_symbols`
-- `partial`
+## What The Newer Intelligence Includes
 
-and investigation payloads also include useful extras like:
+### Git-Aware Change Reports
 
-- `change_guidance.related_files`
-- `change_guidance.recommended_tests`
-- `change_guidance.likely_impact_targets`
+`detect_changes` and `change_impact_report` include:
+
+- changed files and changed symbols
+- risk scope, such as whole unstaged working tree vs focused target
+- git metadata and diff source
+- risk by file
+- changed routes
+- affected frontend/API consumers
+- changed response shapes
+- affected processes
+- suggested tests
+- pre-commit slices
+- validation/readiness status
+
+The tools are designed to return bounded partial output for broad diffs instead of exhaustively traversing the graph until the MCP client times out.
+
+### Route, API, And Field Impact
+
+`route_map`, `api_impact`, `shape_check`, and `field_impact` can connect:
+
+- backend route handlers
+- response keys and nested response keys
+- frontend API wrapper calls
+- frontend component consumers
+- field reads such as `metrics.intransit_stock`
+- array item reads such as `chart_data[].qty_sold`
+- chart `dataKey="..."` reads
+- graph-backed `FETCHES` and `READS_FIELD` edges
+
+Supported route/consumer extraction currently includes:
+
+- FastAPI-style Python decorators
+- Flask-style Python route decorators
+- Django `path` / `re_path` mappings
+- Express-style JS/TS routes
+- frontend `apiClient`, `axios`, and `fetch`
+- direct string routes and simple route constants
+- wrapper-to-component propagation for common React Query patterns
+
+### Process And Flow Impact
+
+`trace_processes`, `api_impact`, and change reports can surface execution flows such as:
+
+```text
+GET /products/trends -> get_product_trends -> get_product_trend_data -> repository/helper calls
+```
+
+Change reports can overlay changed symbols onto these flows and use process participation as a risk factor.
+
+### Pre-Commit Workflow Intelligence
+
+`change_impact_report` now groups changes into recommended commit slices. Each slice can include:
+
+- files
+- routes
+- consumers
+- field reads
+- affected processes
+- what can break
+- what to test
+- follow-up MCP tools
+- validation status
+- residual risk after validation
+
+This is meant to answer: "what can break, what should I test, and how should I split this commit?"
+
+## Language Support
+
+### Strongest Today
+
+- Python
+- TypeScript
+- TSX/React
+- JavaScript/JSX for route/API/frontend consumer patterns
+
+### Supported But Less Workflow-Deep
+
+- C
+- C++
+- C#
+
+C/C++ support includes scanner coverage for `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, and `.hxx`. The parser prefers `libclang`, falls back to tree-sitter, then regex extraction. C# has parser support via tree-sitter/regex fallback. These languages are useful for symbols, chunks, references, and graph basics, but need additional work before they reach Python/React-level route/process/risk intelligence.
+
+See `docs/code-intelligence-handoff.md` for the C/C++/C# workflow-intelligence roadmap.
 
 ## Architecture
 
-Engram uses a hybrid local storage model.
+Engram uses local storage:
 
-### DuckDB
+- DuckDB for indexed files, symbols, chunks, process metadata, and run metadata
+- Kuzu for graph nodes and relationships
+- LanceDB for vector embeddings when semantic retrieval is enabled
 
-DuckDB stores durable structured index data such as:
+Main directories:
 
-- files
-- symbols
-- chunks
-- review data
-- run metadata
-- process metadata
-
-### Kuzu
-
-Kuzu stores graph relationships, including things like:
-
-- file and symbol nodes
-- `DEFINES`
-- `IMPORTS`
-- `CALLS`
-- `REFERENCES`
-
-### LanceDB
-
-LanceDB stores vector embeddings for chunk retrieval.
-
-### Review and summary layer
-
-Engram can run grouped review, persist findings, and generate technical / layperson summaries for index runs.
-
-### MCP server
-
-The MCP server is the interface an IDE agent actually talks to.
-
-## Repository structure
-
-- `app/`
-  - orchestration, coordinator, run modes
-- `config/`
-  - runtime settings
-- `indexing/`
-  - scanner, parser, chunker, embeddings, graph and process builders
-- `mcp_server/`
-  - MCP server wiring, formatters, resolvers
-- `models/`
-  - config, entity, run, review, stage models
-- `reviewers/`
-  - review pipeline and aggregation logic
-- `scripts/`
-  - CLI and MCP entry points
-- `services/`
-  - search, investigation, graph, app context, change/test intelligence, summaries
-- `storage/`
-  - DuckDB, Kuzu, LanceDB, manifests
-- `tests/`
-  - focused unit and behavior tests
+- `app/`: coordinator, lifecycle, run modes
+- `config/`: settings and defaults
+- `indexing/`: scanner, parser registry, parsers, graph builder, chunks, embeddings
+- `mcp_server/`: MCP server wiring, schemas, resolvers, formatters
+- `models/`: structured runtime and entity models
+- `scripts/`: index, MCP, smoke, and helper entry points
+- `services/`: route/API/field/process/change/search/context intelligence
+- `storage/`: DuckDB, Kuzu, LanceDB, manifests
+- `tests/`: focused behavior tests
+- `docs/`: roadmap and handoff notes
 
 ## Requirements
 
 - Python 3.11+
-- Windows is the main tested environment right now
-- local filesystem access to the repo you want to index
+- Windows is the main tested environment
+- local filesystem access to the repo being indexed
 
 Optional:
 
-- OpenRouter API key for LLM-backed review/summaries
-- CUDA-enabled PyTorch environment if you want GPU embeddings
+- `libclang` for stronger C/C++ parsing
+- tree-sitter language package for parser fallbacks
+- embedding provider dependencies if semantic vector retrieval is enabled
 
 ## Installation
-
-Create and activate a virtual environment, then install dependencies:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-```
-
-Copy the environment template:
-
-```powershell
 Copy-Item .env.example .env
 ```
 
-Then fill in any values you care about.
+Then adjust `.env` if needed.
 
-## Important configuration
+## Quick Start
 
-Engram is mostly configured through environment variables.
-
-Some important ones from `.env.example`:
-
-- `OPENROUTER_API_KEY`
-- `OPENROUTER_BASE_URL`
-- `Engram_PROJECT_ROOT`
-- `Engram_SCAN_EXCLUDED_DIRS`
-- `Engram_SCAN_INCLUDE_PATTERNS`
-- `Engram_SCAN_EXCLUDE_PATTERNS`
-- `Engram_REVIEW_ENABLED`
-- `Engram_REVIEW_ANALYSIS_MODEL`
-- `Engram_REVIEW_GROUP_SIZE`
-- `Engram_MAX_CONCURRENT_LLM_REVIEWS`
-- `Engram_EMBED_PROVIDER`
-- `Engram_EMBED_MODEL`
-- `Engram_EMBED_DEVICE`
-- `Engram_EMBED_BATCH_SIZE`
-- `Engram_PROCESS_EXTRACTION_ENABLED`
-- `Engram_PROCESS_MAX_DEPTH`
-- `Engram_PROCESS_MAX_ENTRYPOINTS`
-- `Engram_PROCESS_MAX_RECORDS`
-
-## Quick start
-
-### 1. Index a repo
-
-Incremental index:
+Index a repo:
 
 ```powershell
 python scripts/run_index.py C:\path\to\repo incremental
 ```
 
-Default index run:
-
-```powershell
-python scripts/run_index.py C:\path\to\repo
-```
-
-Optional full rebuild:
-
-```powershell
-python scripts/run_index.py C:\path\to\repo full
-```
-
-### 2. Start the MCP server
+Start the MCP server:
 
 ```powershell
 python scripts/run_mcp.py C:\path\to\repo
 ```
 
-If no repo is passed, Engram can fall back to:
-
-- command-line args
-- `Engram_PROJECT_ROOT`
-- current working directory
-- the most recently indexed sibling repo
-
-### 3. Point your IDE agent at Engram
-
-The main workflow is:
-
-1. index the repo
-2. run the MCP server
-3. let your IDE assistant query Engram instead of relying only on native search
-
-## Typical Windsurf / Cascade usage
-
-This is the intended shape of use:
-
-- your dad is coding in the IDE
-- Cascade calls Engram tools when it needs deeper repo context
-- Engram resolves symbols, retrieves snippets, maps related files, and suggests tests or impact follow-ups
-
-The strongest question styles right now are:
-
-- exact symbol or method lookups
-- implementation-location questions
-- impact-style questions
-- test-guidance questions
-
-Examples:
-
-- `where is Coordinator.run handled`
-- `what will Coordinator.run affect`
-- `what tests should I run for Coordinator.run`
-- `where is ProcessRepository.insert_relationships handled`
-
-## Useful scripts
-
-### Run indexing
-
-```powershell
-python scripts/run_index.py C:\path\to\repo
-```
-
-### Run incremental indexing explicitly
-
-```powershell
-python scripts/run_index.py C:\path\to\repo incremental
-```
-
-### Run MCP only
-
-```powershell
-python scripts/run_mcp.py C:\path\to\repo
-```
-
-### Run realtime indexing
-
-```powershell
-python scripts/run_realtime_index.py C:\path\to\repo --debounce 2 --poll-interval 2
-```
-
-### Run indexing and then serve MCP
-
-```powershell
-python scripts/run_all.py
-```
-
-### Run smoke checks
+Run smoke checks:
 
 ```powershell
 python scripts/smoke_mcp.py
 ```
 
-### Run the investigation evaluation set
+Run tests:
+
+```powershell
+python -m pytest
+```
+
+## Useful Commands
+
+Full rebuild:
+
+```powershell
+python scripts/run_index.py C:\path\to\repo full
+```
+
+Realtime indexing:
+
+```powershell
+python scripts/run_realtime_index.py C:\path\to\repo --debounce 2 --poll-interval 2
+```
+
+Index then serve MCP:
+
+```powershell
+python scripts/run_all.py
+```
+
+Investigation evaluation:
 
 ```powershell
 python scripts/evaluate_investigate.py
 ```
 
-This evaluates a small set of realistic investigation questions and scores them for:
+## Current Limitations
 
-- latency
-- target correctness
-- top-file quality
-- next-tool quality
-- expected partial behavior
+- Python/React workflow intelligence is ahead of C/C++/C# workflow intelligence.
+- C/C++ needs build-context awareness for highly reliable call graphs.
+- Some frontend field-read extraction is still heuristic, though it now covers many real-world patterns.
+- Dynamic routes and highly abstracted API clients can still require fallback source inspection.
+- MCP live behavior reflects the running server process; restart the server after code changes.
+- LLM-backed review/summaries are currently disabled.
 
-## Output and local data
+## Contributor Priorities
 
-Engram writes local index state under the repo's `data/` directory.
+When improving Engram, prioritize:
 
-That local data can include:
+- predictable MCP output shape
+- bounded behavior for broad queries
+- useful compact summaries
+- low-latency tool paths
+- graph and contract evidence over vague search results
+- real repo validation, not only unit tests
 
-- manifests
-- reports
-- DuckDB data
-- Kuzu graph data
-- LanceDB vector data
+Good next areas:
 
-Example artifacts:
-
-```text
-data/
-  manifests/current_manifest.json
-  reports/<run_id>/technical_summary.md
-  reports/<run_id>/layperson_summary.md
-```
-
-`data/` is intentionally gitignored.
-
-## Current strengths
-
-- local-first indexing and retrieval
-- good symbol resolution for grounded code questions
-- safe handling of broad investigation prompts
-- useful MCP surface for IDE agents
-- change/test guidance built into investigation results
-- repeatable evaluation harness for investigation quality
-
-## Current limitations
-
-- weak UI-ish concepts can still be harder than grounded symbols
-- test recommendation quality is useful but still somewhat lexical
-- frontend concept mapping is improving but not perfect
-- retrieval quality still depends heavily on the indexed code and symbol structure
-- live MCP behavior can briefly lag behind repo changes until the server reloads
-
-## Good prompts to try
-
-If you want to sanity-check Engram in an IDE, these are good prompts:
-
-- `Use investigate_codebase for: where is Coordinator.run handled`
-- `Use investigate_codebase for: what will Coordinator.run affect`
-- `Use investigate_codebase for: what tests should I run for Coordinator.run`
-- `Use resolve_target for Coordinator.run`
-- `Use app_context for Coordinator.run`
-- `Use impact_analysis for ProcessRepository.insert_relationships`
-
-## Notes for contributors
-
-If you are improving Engram, prioritize:
-
-- agent reliability over cleverness
-- predictable output shape
-- safe broad-query behavior
-- better ranking and ambiguity handling
-- improvements proven by real eval cases
-
-The best place to extend quality checks right now is the investigation evaluation set in:
-
-- `scripts/investigate_eval_cases.json`
-- `scripts/evaluate_investigate.py`
+- C/C++ build-context-aware call graph
+- C# ASP.NET controller/DTO/DI impact
+- AST-native frontend field reads
+- richer process catalog quality
+- more live MCP smoke tests
 
 ## License
 
