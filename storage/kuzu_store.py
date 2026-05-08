@@ -22,6 +22,22 @@ def _safe_get_all(result) -> list[tuple[Any, ...]]:
         return []
 
 
+SYMBOL_RELATIONS = (
+    "IMPORTS",
+    "CALLS",
+    "REFERENCES",
+    "DECLARES",
+    "ASSOCIATED_WITH",
+    "ACCESSES",
+    "FETCHES",
+    "READS_FIELD",
+    "EXTENDS",
+    "IMPLEMENTS",
+    "METHOD_OVERRIDES",
+    "METHOD_IMPLEMENTS",
+)
+
+
 def _result_columns(result) -> list[str]:
     try:
         return [str(name) for name in result.get_column_names()]
@@ -86,6 +102,17 @@ class KuzuStore:
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
+        try:
+            self.connection.execute("CREATE REL TABLE ACCESSES(FROM Symbol TO Symbol)")
+        except RuntimeError as exc:
+            if not _is_already_exists_error(exc):
+                raise
+        for relation in ("FETCHES", "READS_FIELD", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS"):
+            try:
+                self.connection.execute(f"CREATE REL TABLE {relation}(FROM Symbol TO Symbol)")
+            except RuntimeError as exc:
+                if not _is_already_exists_error(exc):
+                    raise
  
     def reset(self) -> None:
         for query in (
@@ -181,11 +208,7 @@ class KuzuStore:
         total = 0
         for query in (
             "MATCH (f:File)-[:DEFINES]->(s:Symbol) RETURN COUNT(*)",
-            "MATCH (s1:Symbol)-[:IMPORTS]->(s2:Symbol) RETURN COUNT(*)",
-            "MATCH (s1:Symbol)-[:CALLS]->(s2:Symbol) RETURN COUNT(*)",
-            "MATCH (s1:Symbol)-[:REFERENCES]->(s2:Symbol) RETURN COUNT(*)",
-            "MATCH (s1:Symbol)-[:DECLARES]->(s2:Symbol) RETURN COUNT(*)",
-            "MATCH (s1:Symbol)-[:ASSOCIATED_WITH]->(s2:Symbol) RETURN COUNT(*)",
+            *[f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) RETURN COUNT(*)" for relation in SYMBOL_RELATIONS],
         ):
             try:
                 rows = _safe_get_all(self.connection.execute(query))
@@ -208,11 +231,8 @@ class KuzuStore:
                 "relation_totals": {},
             }
         relation_queries = {
-            "IMPORTS": "MATCH (s1:Symbol)-[:IMPORTS]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
-            "CALLS": "MATCH (s1:Symbol)-[:CALLS]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
-            "REFERENCES": "MATCH (s1:Symbol)-[:REFERENCES]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
-            "DECLARES": "MATCH (s1:Symbol)-[:DECLARES]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
-            "ASSOCIATED_WITH": "MATCH (s1:Symbol)-[:ASSOCIATED_WITH]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path",
+            relation: f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path"
+            for relation in SYMBOL_RELATIONS
         }
         by_touched_file: dict[str, dict[str, list[str]]] = {}
         relation_totals: dict[str, set[str]] = {name: set() for name in relation_queries}
@@ -238,11 +258,7 @@ class KuzuStore:
         edges: list[dict[str, Any]] = []
         for relation, query in {
             "DEFINES": "MATCH (f:File)-[:DEFINES]->(s:Symbol) RETURN f.path, s.qualified_name",
-            "IMPORTS": "MATCH (s1:Symbol)-[:IMPORTS]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
-            "CALLS": "MATCH (s1:Symbol)-[:CALLS]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
-            "REFERENCES": "MATCH (s1:Symbol)-[:REFERENCES]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
-            "DECLARES": "MATCH (s1:Symbol)-[:DECLARES]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
-            "ASSOCIATED_WITH": "MATCH (s1:Symbol)-[:ASSOCIATED_WITH]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
+            **{relation: f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name" for relation in SYMBOL_RELATIONS},
         }.items():
             try:
                 rows = self.connection.execute(query).get_all()
@@ -257,11 +273,7 @@ class KuzuStore:
     def edges_for_relation(self, relation: str) -> list[dict[str, Any]]:
         queries = {
             "DEFINES": "MATCH (f:File)-[:DEFINES]->(s:Symbol) RETURN f.path, s.qualified_name",
-            "IMPORTS": "MATCH (s1:Symbol)-[:IMPORTS]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
-            "CALLS": "MATCH (s1:Symbol)-[:CALLS]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
-            "REFERENCES": "MATCH (s1:Symbol)-[:REFERENCES]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
-            "DECLARES": "MATCH (s1:Symbol)-[:DECLARES]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
-            "ASSOCIATED_WITH": "MATCH (s1:Symbol)-[:ASSOCIATED_WITH]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name",
+            **{relation: f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name" for relation in SYMBOL_RELATIONS},
         }
         relation_name = relation.upper()
         query = queries.get(relation_name)
@@ -277,7 +289,7 @@ class KuzuStore:
         ]
  
     def edges_for_target(self, target: str, relation: str | None = None) -> list[dict[str, Any]]:
-        relations = [relation] if relation is not None else ["DEFINES", "IMPORTS", "CALLS", "REFERENCES", "DECLARES", "ASSOCIATED_WITH"]
+        relations = [relation] if relation is not None else ["DEFINES", *SYMBOL_RELATIONS]
         edges: list[dict[str, Any]] = []
         for relation_name in relations:
             _, target_query = self._relation_queries(relation_name)
@@ -289,7 +301,7 @@ class KuzuStore:
         return edges
  
     def edges_for_source(self, source: str, relation: str | None = None) -> list[dict[str, Any]]:
-        relations = [relation] if relation is not None else ["DEFINES", "IMPORTS", "CALLS", "REFERENCES", "DECLARES", "ASSOCIATED_WITH"]
+        relations = [relation] if relation is not None else ["DEFINES", *SYMBOL_RELATIONS]
         edges: list[dict[str, Any]] = []
         for relation_name in relations:
             source_query, _ = self._relation_queries(relation_name)

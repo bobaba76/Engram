@@ -182,21 +182,93 @@ def _expansion_warnings(target: str, depth: int, node_count: int, edge_count: in
     return warnings
 
 
+SYMBOL_CONTEXT_RELATIONS = (
+    "CALLS",
+    "IMPORTS",
+    "REFERENCES",
+    "DECLARES",
+    "ASSOCIATED_WITH",
+    "ACCESSES",
+    "FETCHES",
+    "READS_FIELD",
+    "EXTENDS",
+    "IMPLEMENTS",
+    "METHOD_OVERRIDES",
+    "METHOD_IMPLEMENTS",
+)
+
+
+def _directional_edges(kuzu_store: KuzuStore, target: str, relation: str) -> dict[str, list[dict[str, object]]]:
+    incoming = kuzu_store.edges_for_target(target, relation=relation)
+    outgoing = kuzu_store.edges_for_source(target, relation=relation)
+    return {"incoming": incoming, "outgoing": outgoing}
+
+
+def _categorized_references(kuzu_store: KuzuStore, target: str) -> dict[str, dict[str, object]]:
+    categories: dict[str, dict[str, object]] = {}
+    for relation in SYMBOL_CONTEXT_RELATIONS:
+        directional = _directional_edges(kuzu_store, target, relation)
+        incoming = directional["incoming"]
+        outgoing = directional["outgoing"]
+        categories[relation] = {
+            "incoming": incoming,
+            "outgoing": outgoing,
+            "incoming_count": len(incoming),
+            "outgoing_count": len(outgoing),
+            "top_incoming": incoming[:5],
+            "top_outgoing": outgoing[:5],
+        }
+    return categories
+
+
+def _related_symbols_by_relation(categories: dict[str, dict[str, object]], target: str) -> dict[str, list[str]]:
+    related: dict[str, list[str]] = {}
+    for relation, payload in categories.items():
+        nodes = set()
+        for edge in payload.get("incoming", []) if isinstance(payload, dict) else []:
+            if isinstance(edge, dict):
+                source = str(edge.get("source", ""))
+                if source and source != target:
+                    nodes.add(source)
+        for edge in payload.get("outgoing", []) if isinstance(payload, dict) else []:
+            if isinstance(edge, dict):
+                target_value = str(edge.get("target", ""))
+                if target_value and target_value != target:
+                    nodes.add(target_value)
+        related[relation] = sorted(nodes)
+    return related
+
+
 def get_callers_and_callees(kuzu_store: KuzuStore, target: str) -> dict[str, object]:
     resolved_target = _normalize_graph_target(target)
-    callers = kuzu_store.edges_for_target(resolved_target, relation="CALLS")
-    callees = kuzu_store.edges_for_source(resolved_target, relation="CALLS")
+    categorized = _categorized_references(kuzu_store, resolved_target)
+    callers = categorized["CALLS"]["incoming"]
+    callees = categorized["CALLS"]["outgoing"]
+    related_by_relation = _related_symbols_by_relation(categorized, resolved_target)
+    relation_counts = {
+        relation: {
+            "incoming": int(payload.get("incoming_count", 0) or 0),
+            "outgoing": int(payload.get("outgoing_count", 0) or 0),
+        }
+        for relation, payload in categorized.items()
+    }
     return {
         "target": resolved_target,
         "callers": callers,
         "callees": callees,
+        "categorized_references": categorized,
+        "related_symbols_by_relation": related_by_relation,
+        "relation_counts": relation_counts,
         "compact_summary": {
             "target": resolved_target,
             "caller_count": len(callers),
             "callee_count": len(callees),
             "top_callers": callers[:5],
             "top_callees": callees[:5],
-            "all_related_symbol_count": len({str(edge.get("source", "")) for edge in callers} | {str(edge.get("target", "")) for edge in callees}),
+            "relation_counts": relation_counts,
+            "top_importers": categorized["IMPORTS"]["top_incoming"],
+            "top_references": categorized["REFERENCES"]["top_incoming"],
+            "all_related_symbol_count": len({symbol for symbols in related_by_relation.values() for symbol in symbols}),
         },
     }
 

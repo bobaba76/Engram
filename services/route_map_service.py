@@ -6,24 +6,10 @@ from typing import TYPE_CHECKING
 
 from config.settings import DEFAULT_SCAN_EXCLUDED_DIRS
 from indexing.scanner import scan_repo
+from services.route_parsing import BACKEND_HANDLER_PATTERN, JSON_RESPONSE_PATTERN, consumer_keys, enclosing_function_name, frontend_route_usages, function_call_pattern, iter_backend_route_decorators, iter_backend_route_mappings, iter_express_route_handlers, nested_response_keys, normalize_route, pydantic_model_shapes, response_keys, response_model_name, returned_payload_source, route_matches
 
 if TYPE_CHECKING:
     from storage.duckdb_store import DuckDBStore
-
-
-BACKEND_ROUTE_DECORATOR_PATTERN = re.compile(
-    r"@(?P<router>[A-Za-z_][A-Za-z0-9_]*)\.(?P<method>get|post|put|delete|patch)\(\s*['\"](?P<route>[^'\"]+)['\"]",
-    re.IGNORECASE,
-)
-BACKEND_HANDLER_PATTERN = re.compile(r"def\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
-BACKEND_RESPONSE_KEY_PATTERN = re.compile(r"['\"](?P<key>[A-Za-z_][A-Za-z0-9_]*)['\"]\s*:")
-FRONTEND_ROUTE_USAGE_PATTERN = re.compile(
-    r"(?:apiClient\.(?:get|post|put|delete|patch)|fetch)\(\s*[`'\"](?P<route>/[^`'\"]+)[`'\"]",
-    re.IGNORECASE,
-)
-FRONTEND_ACCESS_KEY_PATTERN = re.compile(r"\.data\.(?P<key>[A-Za-z_][A-Za-z0-9_]*)|\.response\.(?P<response_key>[A-Za-z_][A-Za-z0-9_]*)")
-NESTED_ACCESS_PATTERN = re.compile(r"\.data\.(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)")
-JSON_RESPONSE_PATTERN = re.compile(r"json\((?P<body>\{[\s\S]{0,2000}?\})\)", re.IGNORECASE)
 
 
 def _read_text(path: Path) -> str:
@@ -63,76 +49,213 @@ def _iter_indexed_candidate_files(repo_root: Path, duckdb_store: DuckDBStore) ->
     return candidates or _iter_candidate_files(repo_root)
 
 
-def _response_keys(snippet: str) -> list[str]:
-    keys = {match.group("key") for match in BACKEND_RESPONSE_KEY_PATTERN.finditer(snippet) if match.group("key")}
-    return sorted(keys)[:30]
+def _symbol_names(duckdb_store: DuckDBStore, relative_path: str) -> list[str]:
+    return [
+        name
+        for name in [symbol.get("qualified_name", "") for symbol in duckdb_store.fetch_symbols_for_file(relative_path)[:6]]
+        if name
+    ]
 
 
-def _consumer_keys(snippet: str) -> tuple[list[str], list[str]]:
-    flat = {
-        access.group("key") or access.group("response_key")
-        for access in FRONTEND_ACCESS_KEY_PATTERN.finditer(snippet)
-        if access.group("key") or access.group("response_key")
-    }
-    nested = {access.group("path") for access in NESTED_ACCESS_PATTERN.finditer(snippet) if access.group("path")}
-    return sorted(flat)[:30], sorted(nested)[:20]
+def _unique(values: list[object], limit: int = 8) -> list[str]:
+    seen: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.append(text)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def _is_test_path(relative_path: str) -> bool:
+    normalized = relative_path.replace("\\", "/").lower()
+    name = normalized.rsplit("/", 1)[-1]
+    return normalized.startswith("tests/") or "/tests/" in normalized or name.startswith("test_") or name.endswith(".test.tsx") or name.endswith(".test.ts")
+
+
+def _is_backend_script_path(relative_path: str) -> bool:
+    normalized = relative_path.replace("\\", "/").lower()
+    name = normalized.rsplit("/", 1)[-1]
+    return (
+        normalized.startswith(("backend/", "server/", "api/"))
+        or "/backend/" in normalized
+        or "/server/" in normalized
+        or "/api/" in normalized
+        or name in {"server.js", "server.ts", "app.js", "app.ts", "routes.js", "routes.ts"}
+    )
+
+
+def _backend_handlers(source: str, relative_path: str, requested_route: str) -> list[dict[str, object]]:
+    handlers: list[dict[str, object]] = []
+    model_shapes = pydantic_model_shapes(source)
+    route_entries = [*iter_backend_route_decorators(source), *iter_backend_route_mappings(source)]
+    for decorator in route_entries:
+        found_route = str(decorator.get("route", "") or "")
+        if not route_matches(found_route, requested_route):
+            continue
+        handler_name = str(decorator.get("handler", "") or "")
+        if handler_name:
+            handler_match = re.search(rf"(?:async\s+)?def\s+{re.escape(handler_name)}\s*\(", source)
+            after = source[handler_match.start():] if handler_match is not None else source[int(decorator.get("end", 0) or 0):]
+        else:
+            after = source[int(decorator.get("end", 0) or 0):]
+            handler_match = BACKEND_HANDLER_PATTERN.search(after)
+            handler_name = handler_match.group("name") if handler_match is not None else ""
+        json_match = JSON_RESPONSE_PATTERN.search(after[:2400])
+        response_source = json_match.group("body") if json_match is not None else returned_payload_source(after[:2400])
+        nested = nested_response_keys(response_source)
+        model_name = response_model_name(str(decorator.get("args", "") or ""))
+        detected_response_keys = response_keys(response_source)[:20]
+        if model_name and model_name in model_shapes:
+            model_shape = model_shapes[model_name]
+            detected_response_keys = sorted(set(detected_response_keys) | set(model_shape.get("fields", [])))[:20]
+            model_nested = model_shape.get("nested", {})
+            if isinstance(model_nested, dict):
+                for key, values in model_nested.items():
+                    nested.setdefault(str(key), [])
+                    nested[str(key)].extend(str(value) for value in values if value)
+        handlers.append(
+            {
+                "route": found_route,
+                "normalized_route": normalize_route(found_route),
+                "method": str(decorator.get("method", "") or "").upper(),
+                "router": decorator.get("router", ""),
+                "handler": handler_name,
+                "file_path": relative_path,
+                "response_model": model_name,
+                "response_keys": detected_response_keys,
+                "nested_response_keys": {key: values[:20] for key, values in nested.items()},
+            }
+        )
+    return handlers
+
+
+def _express_handlers(source: str, relative_path: str, requested_route: str) -> list[dict[str, object]]:
+    handlers: list[dict[str, object]] = []
+    for entry in iter_express_route_handlers(source):
+        found_route = str(entry.get("route", "") or "")
+        if not route_matches(found_route, requested_route):
+            continue
+        handler_name = str(entry.get("handler", "") or "")
+        if handler_name:
+            handler_match = re.search(
+                rf"(?:async\s+)?function\s+{re.escape(handler_name)}\s*\(|(?:const|let|var)\s+{re.escape(handler_name)}\s*=",
+                source,
+            )
+            after = source[handler_match.start():] if handler_match is not None else source[int(entry.get("end", 0) or 0):]
+        else:
+            after = source[int(entry.get("end", 0) or 0):]
+        json_match = JSON_RESPONSE_PATTERN.search(after[:2400])
+        response_source = json_match.group("body") if json_match is not None else after[:2400]
+        handlers.append(
+            {
+                "route": found_route,
+                "normalized_route": normalize_route(found_route),
+                "method": str(entry.get("method", "") or "").upper(),
+                "router": entry.get("router", ""),
+                "handler": handler_name,
+                "file_path": relative_path,
+                "response_model": "",
+                "response_keys": response_keys(response_source)[:20],
+                "nested_response_keys": nested_response_keys(response_source),
+            }
+        )
+    return handlers
+
+
+def _direct_frontend_consumers(source: str, relative_path: str, requested_route: str, duckdb_store: DuckDBStore) -> tuple[list[dict[str, object]], dict[str, str]]:
+    consumers: list[dict[str, object]] = []
+    wrapper_routes: dict[str, str] = {}
+    language = "tsx" if Path(relative_path).suffix.lower() in {".tsx", ".jsx"} else "typescript"
+    for usage in frontend_route_usages(source, language=language):
+        found_route = str(usage.get("route", "") or "")
+        if not route_matches(found_route, requested_route):
+            continue
+        start = int(usage.get("start", 0) or 0)
+        snippet = source[max(0, start - 500):start + 1800]
+        accessed_keys, nested_accesses = consumer_keys(snippet)
+        function_name = enclosing_function_name(source, start)
+        normalized_found_route = normalize_route(found_route)
+        if function_name:
+            wrapper_routes[function_name] = normalized_found_route
+        consumers.append(
+            {
+                "route": found_route,
+                "normalized_route": normalized_found_route,
+                "method": str(usage.get("method") or "fetch").upper(),
+                "file_path": relative_path,
+                "function": function_name,
+                "consumer_type": "direct_fetch",
+                "parser": usage.get("parser", ""),
+                "symbols": _symbol_names(duckdb_store, relative_path),
+                "accessed_keys": accessed_keys[:20],
+                "nested_accesses": nested_accesses,
+            }
+        )
+    return consumers, wrapper_routes
+
+
+def _wrapper_call_consumers(frontend_sources: list[tuple[str, str]], wrapper_routes: dict[str, str], duckdb_store: DuckDBStore) -> list[dict[str, object]]:
+    consumers: list[dict[str, object]] = []
+    for wrapper_name, wrapper_route in wrapper_routes.items():
+        for relative_path, source in frontend_sources:
+            for match in function_call_pattern(wrapper_name).finditer(source):
+                caller_function = enclosing_function_name(source, match.start())
+                if caller_function == wrapper_name:
+                    continue
+                snippet = source[max(0, match.start() - 800):]
+                accessed_keys, nested_accesses = consumer_keys(snippet)
+                if not accessed_keys and not nested_accesses:
+                    continue
+                consumers.append(
+                    {
+                        "route": wrapper_route,
+                        "normalized_route": wrapper_route,
+                        "method": "WRAPPER",
+                        "file_path": relative_path,
+                        "function": caller_function,
+                        "calls_wrapper": wrapper_name,
+                        "consumer_type": "wrapper_call",
+                        "symbols": _symbol_names(duckdb_store, relative_path),
+                        "accessed_keys": accessed_keys[:20],
+                        "nested_accesses": nested_accesses,
+                    }
+                )
+    return consumers
 
 
 def route_map(repo_root: Path, duckdb_store: DuckDBStore, route: str = "") -> dict[str, object]:
     normalized_route = str(route or "").strip()
     handlers: list[dict[str, object]] = []
     consumers: list[dict[str, object]] = []
+    frontend_sources: list[tuple[str, str]] = []
+    wrapper_routes: dict[str, str] = {}
     for path in _iter_indexed_candidate_files(repo_root, duckdb_store):
         relative_path = str(path.relative_to(repo_root)).replace("\\", "/")
+        if _is_test_path(relative_path):
+            continue
         source = _read_text(path)
         if not source:
             continue
         if path.suffix.lower() == ".py":
-            for match in BACKEND_ROUTE_DECORATOR_PATTERN.finditer(source):
-                found_route = match.group("route")
-                if normalized_route and found_route != normalized_route:
-                    continue
-                after = source[match.end():]
-                handler_match = BACKEND_HANDLER_PATTERN.search(after)
-                handler_name = handler_match.group("name") if handler_match is not None else ""
-                json_match = JSON_RESPONSE_PATTERN.search(after[:2400])
-                response_source = json_match.group("body") if json_match is not None else after[:1600]
-                response_keys = _response_keys(response_source)
-                handlers.append(
-                    {
-                        "route": found_route,
-                        "method": match.group("method").upper(),
-                        "router": match.group("router"),
-                        "handler": handler_name,
-                        "file_path": relative_path,
-                        "response_keys": response_keys[:20],
-                    }
-                )
+            handlers.extend(_backend_handlers(source, relative_path, normalized_route))
+        elif _is_backend_script_path(relative_path):
+            handlers.extend(_express_handlers(source, relative_path, normalized_route))
         else:
-            for match in FRONTEND_ROUTE_USAGE_PATTERN.finditer(source):
-                found_route = match.group("route")
-                if normalized_route and found_route != normalized_route:
-                    continue
-                symbol_names = [symbol.get("qualified_name", "") for symbol in duckdb_store.fetch_symbols_for_file(relative_path)[:6]]
-                snippet = source[max(0, match.start() - 300):match.start() + 600]
-                accessed_keys, nested_accesses = _consumer_keys(snippet)
-                consumers.append(
-                    {
-                        "route": found_route,
-                        "file_path": relative_path,
-                        "symbols": [name for name in symbol_names if name],
-                        "accessed_keys": accessed_keys[:20],
-                        "nested_accesses": nested_accesses,
-                    }
-                )
+            frontend_sources.append((relative_path, source))
+            direct_consumers, direct_wrapper_routes = _direct_frontend_consumers(source, relative_path, normalized_route, duckdb_store)
+            consumers.extend(direct_consumers)
+            wrapper_routes.update(direct_wrapper_routes)
+    consumers.extend(_wrapper_call_consumers(frontend_sources, wrapper_routes, duckdb_store))
     route_rows: list[dict[str, object]] = []
-    all_routes = sorted({item["route"] for item in handlers} | {item["route"] for item in consumers})
+    all_routes = sorted({item["normalized_route"] for item in handlers} | {item["normalized_route"] for item in consumers})
     for found_route in all_routes:
         route_rows.append(
             {
                 "route": found_route,
-                "handlers": [item for item in handlers if item["route"] == found_route],
-                "consumers": [item for item in consumers if item["route"] == found_route],
+                "handlers": [item for item in handlers if item["normalized_route"] == found_route],
+                "consumers": [item for item in consumers if item["normalized_route"] == found_route],
             }
         )
     return {
@@ -144,5 +267,27 @@ def route_map(repo_root: Path, duckdb_store: DuckDBStore, route: str = "") -> di
             "target": normalized_route or str(repo_root.resolve()),
             "total": len(route_rows),
             "top_routes": [item["route"] for item in route_rows[:8]],
+            "top_files": _unique([
+                handler.get("file_path", "")
+                for row in route_rows
+                for handler in row.get("handlers", [])
+                if isinstance(handler, dict)
+            ] + [
+                consumer.get("file_path", "")
+                for row in route_rows
+                for consumer in row.get("consumers", [])
+                if isinstance(consumer, dict)
+            ]),
+            "top_symbols": _unique([
+                handler.get("handler", "")
+                for row in route_rows
+                for handler in row.get("handlers", [])
+                if isinstance(handler, dict)
+            ] + [
+                consumer.get("symbol", "") or consumer.get("function", "")
+                for row in route_rows
+                for consumer in row.get("consumers", [])
+                if isinstance(consumer, dict)
+            ]),
         },
     }
