@@ -383,11 +383,13 @@ Current support:
 - `libclang` preferred when available
 - tree-sitter fallback
 - regex fallback
+- first-pass native build-context discovery from `compile_commands.json`, CMake, Make, Visual Studio solution/project markers
+- parser and index-health visibility for build context confidence, include dirs, defines, standards, compilers, and targets
 - symbols, includes/import-like metadata, references, calls, and chunks depending on parser confidence
 
 Current limitation:
 
-- without build context, C/C++ graph quality can only be "good static hints", not full semantic workflow intelligence.
+- build-context discovery exists, but C/C++ graph quality still needs deeper target ownership, source/header pairing, callback handling, and ABI-aware impact before it reaches Python/React workflow depth.
 
 ### C# Current Support
 
@@ -405,18 +407,24 @@ Current limitation:
 
 ### 1. Build Context
 
-Add build-context discovery before trying to make C/C++ workflow intelligence highly reliable.
+First-pass build-context discovery is implemented. The remaining work is to make it richer and use it more deeply in graph/risk workflows.
 
-Implement:
+Implemented:
 
 - detect `compile_commands.json`
-- detect common CMake build folders
+- detect common CMake, Make, solution, and Visual Studio project markers
 - capture include paths
 - capture defines/macros
 - capture compiler flags
 - capture C vs C++ standard
-- map files to build targets where possible
 - expose build-context confidence in `index_status` and `index_health`
+
+Still worth doing:
+
+- map files to build targets more precisely
+- parse CMake targets when `compile_commands.json` lacks output metadata
+- expose build-target ownership in change reports
+- use build context to improve C/C++ risk scoring
 
 Why:
 

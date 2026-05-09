@@ -102,6 +102,42 @@ def _parse_compile_flags(command_tokens: list[str], base_dir: Path) -> dict[str,
     }
 
 
+def _unique(values: list[object], limit: int = 50) -> list[str]:
+    seen: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.append(text)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def _build_systems_for_root(root: Path) -> list[str]:
+    build_systems: list[str] = []
+    if (root / "compile_commands.json").exists():
+        build_systems.append("compile_commands")
+    if (root / "CMakeLists.txt").exists():
+        build_systems.append("cmake")
+    if (root / "Makefile").exists():
+        build_systems.append("make")
+    if any(root.glob("*.sln")):
+        build_systems.append("sln")
+    if any(root.glob("*.vcxproj")):
+        build_systems.append("vcxproj")
+    return build_systems
+
+
+def _compile_entry_target(compile_entry: dict[str, object], build_root: Path) -> str:
+    output = str(compile_entry.get("output", "") or "").strip()
+    if output:
+        return Path(output).stem
+    directory = Path(str(compile_entry.get("directory", build_root) or build_root))
+    if directory.name.lower() not in {"", ".", "build", "debug", "release"}:
+        return directory.name
+    return build_root.name
+
+
 @lru_cache(maxsize=128)
 def load_native_build_context(file_path_str: str) -> dict[str, object]:
     file_path = Path(file_path_str).resolve()
@@ -114,26 +150,23 @@ def load_native_build_context(file_path_str: str) -> dict[str, object]:
         "standards": [],
         "project_files": [],
         "has_compile_commands": False,
+        "compile_command_file": "",
+        "target": "",
+        "confidence": "low",
     }
     for root in _candidate_roots(file_path):
-        build_systems: list[str] = []
-        if (root / "compile_commands.json").exists():
-            build_systems.append("compile_commands")
-        if (root / "CMakeLists.txt").exists():
-            build_systems.append("cmake")
-        if (root / "Makefile").exists():
-            build_systems.append("make")
-        if any(root.glob("*.sln")):
-            build_systems.append("sln")
-        if any(root.glob("*.vcxproj")):
-            build_systems.append("vcxproj")
+        build_systems = _build_systems_for_root(root)
         if build_systems:
             context["build_root"] = str(root).replace("\\", "/")
             context["build_systems"] = build_systems
             context["project_files"] = [str(path.name) for path in list(root.glob("*.sln"))[:4] + list(root.glob("*.vcxproj"))[:8]]
+            context["confidence"] = "medium"
         compile_entry = _compile_commands_map(str(root)).get(str(file_path))
         if compile_entry:
             context["has_compile_commands"] = True
+            context["compile_command_file"] = str((root / "compile_commands.json").resolve()).replace("\\", "/")
+            context["target"] = _compile_entry_target(compile_entry, root)
+            context["confidence"] = "high"
             command_tokens = _tokenize_command(compile_entry.get("arguments") or compile_entry.get("command") or "")
             parsed = _parse_compile_flags(command_tokens, Path(str(compile_entry.get("directory", root))))
             context["compiler"] = parsed["compiler"]
@@ -142,6 +175,72 @@ def load_native_build_context(file_path_str: str) -> dict[str, object]:
             context["standards"] = parsed["standards"]
             break
     return context
+
+
+def summarize_native_build_context(repo_root: str | Path, sample_limit: int = 200) -> dict[str, object]:
+    root = Path(repo_root).resolve()
+    build_roots: list[str] = []
+    build_systems: list[str] = []
+    project_files: list[str] = []
+    compilers: list[str] = []
+    include_dirs: list[str] = []
+    defines: list[str] = []
+    standards: list[str] = []
+    targets: list[str] = []
+    compile_command_files: list[str] = []
+    compile_entry_count = 0
+
+    candidate_roots = [root]
+    candidate_roots.extend(path.parent for path in root.rglob("compile_commands.json"))
+    candidate_roots.extend(path.parent for path in root.rglob("CMakeLists.txt"))
+    candidate_roots.extend(path.parent for path in root.rglob("Makefile"))
+    candidate_roots.extend(path.parent for path in root.rglob("*.sln"))
+    candidate_roots.extend(path.parent for path in root.rglob("*.vcxproj"))
+
+    for candidate in _unique([str(path) for path in candidate_roots], limit=100):
+        candidate_root = Path(candidate)
+        systems = _build_systems_for_root(candidate_root)
+        if not systems:
+            continue
+        build_roots.append(str(candidate_root).replace("\\", "/"))
+        build_systems.extend(systems)
+        project_files.extend(str(path.relative_to(root)).replace("\\", "/") for path in list(candidate_root.glob("*.sln"))[:4] + list(candidate_root.glob("*.vcxproj"))[:8])
+        compile_commands = candidate_root / "compile_commands.json"
+        if not compile_commands.exists():
+            continue
+        compile_command_files.append(str(compile_commands.resolve()).replace("\\", "/"))
+        for compile_entry in list(_compile_commands_map(str(candidate_root)).values())[:sample_limit]:
+            compile_entry_count += 1
+            command_tokens = _tokenize_command(compile_entry.get("arguments") or compile_entry.get("command") or "")
+            parsed = _parse_compile_flags(command_tokens, Path(str(compile_entry.get("directory", candidate_root))))
+            compilers.append(str(parsed.get("compiler", "") or ""))
+            include_dirs.extend(str(item) for item in parsed.get("include_dirs", []) if item)
+            defines.extend(str(item) for item in parsed.get("defines", []) if item)
+            standards.extend(str(item) for item in parsed.get("standards", []) if item)
+            targets.append(_compile_entry_target(compile_entry, candidate_root))
+
+    systems = _unique(build_systems, limit=12)
+    confidence = "high" if compile_command_files else "medium" if systems else "low"
+    warnings: list[str] = []
+    if systems and not compile_command_files:
+        warnings.append("Native build markers found, but no compile_commands.json was discovered; C/C++ semantic confidence is limited.")
+    if not systems:
+        warnings.append("No native build context discovered for C/C++ files.")
+    return {
+        "repo_root": str(root).replace("\\", "/"),
+        "confidence": confidence,
+        "build_systems": systems,
+        "build_roots": _unique(build_roots, limit=12),
+        "compile_command_files": _unique(compile_command_files, limit=8),
+        "compile_entry_count": compile_entry_count,
+        "compilers": _unique(compilers, limit=8),
+        "include_dirs": _unique(include_dirs, limit=20),
+        "defines": _unique(defines, limit=20),
+        "standards": _unique(standards, limit=8),
+        "targets": _unique(targets, limit=20),
+        "project_files": _unique(project_files, limit=12),
+        "warnings": warnings,
+    }
 
 
 def extract_macro_definitions(source: str, build_context: dict[str, object]) -> dict[str, str]:

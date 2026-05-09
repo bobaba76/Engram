@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from indexing.native_build_context import summarize_native_build_context
+
 if TYPE_CHECKING:
     from storage.duckdb_store import DuckDBStore
     from storage.kuzu_store import KuzuStore
@@ -34,6 +36,7 @@ def index_health(repo_root: Path, duckdb_store: DuckDBStore, kuzu_store: KuzuSto
     finding_count = _count(duckdb_store, "findings")
     parser_counts = _group_counts(duckdb_store, "chunks", "parser_name")
     chunk_kind_counts = _group_counts(duckdb_store, "chunks", "chunk_kind")
+    native_build_context = summarize_native_build_context(repo_root)
     largest_chunks = []
     try:
         rows = duckdb_store.execute(
@@ -89,6 +92,9 @@ def index_health(repo_root: Path, duckdb_store: DuckDBStore, kuzu_store: KuzuSto
         warnings.append("Some chunks have missing parser metadata.")
     if not recent_runs:
         warnings.append("No persisted index runs found.")
+    for warning in native_build_context.get("warnings", []) if isinstance(native_build_context.get("warnings", []), list) else []:
+        if str(warning) and str(warning) not in warnings:
+            warnings.append(str(warning))
     return {
         "target": str(repo_root.resolve()),
         "counts": {
@@ -99,6 +105,7 @@ def index_health(repo_root: Path, duckdb_store: DuckDBStore, kuzu_store: KuzuSto
         },
         "parser_counts": parser_counts,
         "chunk_kind_counts": chunk_kind_counts,
+        "native_build_context": native_build_context,
         "largest_chunks": largest_chunks,
         "recent_runs": recent_runs,
         "warnings": warnings,
@@ -109,6 +116,12 @@ def index_health(repo_root: Path, duckdb_store: DuckDBStore, kuzu_store: KuzuSto
             "chunk_count": chunk_count,
             "finding_count": finding_count,
             "parser_counts": parser_counts,
+            "native_build_context": {
+                "confidence": native_build_context.get("confidence", "low"),
+                "build_systems": native_build_context.get("build_systems", []),
+                "compile_entry_count": native_build_context.get("compile_entry_count", 0),
+                "targets": native_build_context.get("targets", [])[:8] if isinstance(native_build_context.get("targets", []), list) else [],
+            },
             "top_files": [item.get("file_path", "") for item in largest_chunks[:5]],
             "warnings": warnings,
         },
