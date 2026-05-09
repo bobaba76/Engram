@@ -203,6 +203,67 @@ def test_route_map_extracts_express_routes_from_backend_scripts(tmp_path: Path) 
     assert "metrics" in payload["routes"][0]["handlers"][0]["response_keys"]
 
 
+def test_route_map_extracts_aspnet_controller_routes(tmp_path: Path) -> None:
+    controller = tmp_path / "backend" / "Controllers" / "ProductsController.cs"
+    controller.parent.mkdir(parents=True)
+    controller.write_text(
+        "using Microsoft.AspNetCore.Mvc;\n"
+        "[ApiController]\n"
+        "[Route(\"api/[controller]\")]\n"
+        "public class ProductsController : ControllerBase {\n"
+        "  [HttpGet(\"trends/{id:int}\")]\n"
+        "  public IActionResult GetTrend(int id) {\n"
+        "    return Ok(new { product_code = id, metrics = new { intransit_stock = 1 } });\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    class _FilesRepoWithAspNetController:
+        def fetch_all(self):
+            return [{"path": "backend/Controllers/ProductsController.cs"}]
+
+    class _StoreWithAspNetController(_Store):
+        files = _FilesRepoWithAspNetController()
+
+    payload = route_map(tmp_path, _StoreWithAspNetController(), route="/api/products/trends/{id}")
+
+    handler = payload["routes"][0]["handlers"][0]
+    assert payload["routes"][0]["route"] == "/products/trends/{id}"
+    assert handler["method"] == "GET"
+    assert handler["handler"] == "GetTrend"
+    assert handler["router"] == "ProductsController"
+    assert handler["framework"] == "aspnet_controller"
+    assert "metrics" in handler["response_keys"]
+
+
+def test_route_map_extracts_aspnet_minimal_api_routes(tmp_path: Path) -> None:
+    program = tmp_path / "backend" / "Program.cs"
+    program.parent.mkdir(parents=True)
+    program.write_text(
+        "var app = WebApplication.CreateBuilder(args).Build();\n"
+        "app.MapPost(\"/api/orders/reprice\", RepriceOrder);\n"
+        "IResult RepriceOrder(OrderRequest request) => Results.Json(new { status = \"ok\", total = 10 });\n",
+        encoding="utf-8",
+    )
+
+    class _FilesRepoWithMinimalApi:
+        def fetch_all(self):
+            return [{"path": "backend/Program.cs"}]
+
+    class _StoreWithMinimalApi(_Store):
+        files = _FilesRepoWithMinimalApi()
+
+    payload = route_map(tmp_path, _StoreWithMinimalApi(), route="/orders/reprice")
+
+    handler = payload["routes"][0]["handlers"][0]
+    assert payload["routes"][0]["route"] == "/orders/reprice"
+    assert handler["method"] == "POST"
+    assert handler["handler"] == "RepriceOrder"
+    assert handler["framework"] == "aspnet_minimal_api"
+    assert "status" in handler["response_keys"]
+
+
 def test_route_map_extracts_rich_frontend_field_reads(tmp_path: Path) -> None:
     backend = tmp_path / "backend" / "routers" / "products.py"
     backend.parent.mkdir(parents=True)

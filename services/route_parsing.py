@@ -16,6 +16,7 @@ BACKEND_ROUTE_DECORATOR_START_PATTERN = re.compile(
 BACKEND_HANDLER_PATTERN = re.compile(r"(?:async\s+)?def\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
 BACKEND_RESPONSE_KEY_PATTERN = re.compile(r"['\"](?P<key>[A-Za-z_][A-Za-z0-9_]*)['\"]\s*:")
 JS_RESPONSE_KEY_PATTERN = re.compile(r"(?<![A-Za-z0-9_$])(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*:")
+CSHARP_ANONYMOUS_OBJECT_KEY_PATTERN = re.compile(r"(?<![A-Za-z0-9_$])(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=")
 DJANGO_URL_PATTERN = re.compile(
     r"\b(?P<kind>path|re_path)\(\s*(?:r)?['\"](?P<route>[^'\"]+)['\"]\s*,\s*(?P<handler>[A-Za-z_][A-Za-z0-9_\.]*)",
     re.IGNORECASE,
@@ -24,6 +25,13 @@ EXPRESS_ROUTE_PATTERN = re.compile(
     r"\b(?P<router>app|router|[A-Za-z_][A-Za-z0-9_]*)\.(?P<method>get|post|put|delete|patch|all)\(\s*[`'\"](?P<route>/[^`'\"]+)[`'\"]\s*,\s*(?P<handler>[A-Za-z_][A-Za-z0-9_]*)?",
     re.IGNORECASE,
 )
+CSHARP_MINIMAL_API_PATTERN = re.compile(
+    r"\b(?P<router>app|endpoints|group|[A-Za-z_][A-Za-z0-9_]*)\.Map(?P<method>Get|Post|Put|Delete|Patch)\(\s*\"(?P<route>/[^\"]*)\"\s*,\s*(?P<handler>[A-Za-z_][A-Za-z0-9_]*)?",
+    re.IGNORECASE,
+)
+CSHARP_ROUTE_ATTR_PATTERN = re.compile(r"\[(?P<name>Route|HttpGet|HttpPost|HttpPut|HttpDelete|HttpPatch)(?:\s*\(\s*\"(?P<route>[^\"]*)\"[^\)]*\))?\]", re.IGNORECASE)
+CSHARP_CLASS_PATTERN = re.compile(r"(?:public\s+|internal\s+|sealed\s+|partial\s+|abstract\s+)*class\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+CSHARP_METHOD_PATTERN = re.compile(r"\s*(?:public|internal|private|protected)\s+(?:async\s+)?(?:Task<[^>]+>|Task|ActionResult<[^>]+>|IActionResult|Results<[^>]+>|[A-Za-z_][A-Za-z0-9_<>,\[\]\?]*)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(", re.IGNORECASE)
 PYDANTIC_CLASS_PATTERN = re.compile(r"class\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\([^)]*(?:BaseModel|Schema|Model)[^)]*\):(?P<body>[\s\S]*?)(?=\nclass\s|\ndef\s|\n@|\Z)")
 PYDANTIC_FIELD_PATTERN = re.compile(r"^\s+(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?P<type>[^=\n]+)", re.MULTILINE)
 RESPONSE_MODEL_PATTERN = re.compile(r"response_model\s*=\s*(?:list\s*\[\s*)?(?P<model>[A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
@@ -138,6 +146,72 @@ def iter_express_route_handlers(source: str) -> list[dict[str, object]]:
     return handlers
 
 
+def _normalize_csharp_route(route: str, class_name: str = "") -> str:
+    value = str(route or "").strip()
+    if class_name:
+        controller = class_name[:-10] if class_name.endswith("Controller") else class_name
+        value = re.sub(r"\[controller\]", controller, value, flags=re.IGNORECASE)
+    value = value.replace("{id:int}", "{id}")
+    return ("/" + value.strip().strip("/")).lower()
+
+
+def _combine_routes(prefix: str, route: str, class_name: str = "") -> str:
+    parts = [part for part in [prefix, route] if str(part or "").strip()]
+    if not parts:
+        return "/"
+    return _normalize_csharp_route("/".join(part.strip("/") for part in parts), class_name=class_name)
+
+
+def iter_csharp_route_handlers(source: str) -> list[dict[str, object]]:
+    """Return ASP.NET controller/minimal API routes from C# source."""
+    handlers: list[dict[str, object]] = []
+    for match in CSHARP_MINIMAL_API_PATTERN.finditer(source):
+        handlers.append(
+            {
+                "router": match.group("router"),
+                "method": match.group("method").upper(),
+                "args": match.group(0),
+                "route": _normalize_csharp_route(match.group("route") or ""),
+                "handler": match.group("handler") or "",
+                "end": match.end(),
+                "framework": "aspnet_minimal_api",
+            }
+        )
+    class_matches = list(CSHARP_CLASS_PATTERN.finditer(source))
+    for index, class_match in enumerate(class_matches):
+        class_name = class_match.group("name") or ""
+        class_start = class_match.start()
+        class_end = class_matches[index + 1].start() if index + 1 < len(class_matches) else len(source)
+        class_prefix = source[max(0, class_start - 1200):class_start]
+        class_route = ""
+        for attr in CSHARP_ROUTE_ATTR_PATTERN.finditer(class_prefix):
+            if attr.group("name").lower() == "route":
+                class_route = attr.group("route") or ""
+        class_body = source[class_match.end():class_end]
+        for method_match in CSHARP_METHOD_PATTERN.finditer(class_body):
+            method_name = method_match.group("name") or ""
+            method_offset = class_match.end() + method_match.start()
+            attr_prefix = source[max(class_match.end(), method_offset - 900):method_offset]
+            for attr in CSHARP_ROUTE_ATTR_PATTERN.finditer(attr_prefix):
+                attr_name = attr.group("name")
+                if attr_name.lower() == "route":
+                    continue
+                method = attr_name[4:].upper()
+                route = _combine_routes(class_route, attr.group("route") or "", class_name=class_name)
+                handlers.append(
+                    {
+                        "router": class_name,
+                        "method": method,
+                        "args": attr.group(0),
+                        "route": route,
+                        "handler": method_name,
+                        "end": method_offset + method_match.end() - method_match.start(),
+                        "framework": "aspnet_controller",
+                    }
+                )
+    return handlers
+
+
 def _walk_nodes(node):
     yield node
     for child in node.children:
@@ -242,6 +316,8 @@ def frontend_route_usages(source: str, language: str = "tsx") -> list[dict[str, 
 def response_keys(snippet: str) -> list[str]:
     keys = {match.group("key") for match in BACKEND_RESPONSE_KEY_PATTERN.finditer(snippet) if match.group("key")}
     keys.update(match.group("key") for match in JS_RESPONSE_KEY_PATTERN.finditer(snippet) if match.group("key"))
+    if "new {" in snippet:
+        keys.update(match.group("key") for match in CSHARP_ANONYMOUS_OBJECT_KEY_PATTERN.finditer(snippet) if match.group("key"))
     return sorted(keys)[:30]
 
 

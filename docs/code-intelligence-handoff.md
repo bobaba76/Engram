@@ -400,10 +400,12 @@ Current support:
 - C# parser module
 - tree-sitter/regex fallback style extraction
 - symbols and graph basics
+- first-pass ASP.NET route extraction for controller attributes and minimal APIs
+- route map/API impact compatibility for C# handlers
 
 Current limitation:
 
-- ASP.NET route/controller, DTO shape, and DI workflow intelligence are not yet implemented deeply.
+- DTO shape, dependency-injection graph, and full controller/service/repository flow intelligence are not yet implemented deeply.
 
 ## C/C++ Workflow Roadmap
 
@@ -518,12 +520,19 @@ Desired output:
 
 ### 1. ASP.NET Route Extraction
 
-Implement:
+First-pass route extraction is implemented.
+
+Implemented:
 
 - controller route attributes
 - action method HTTP attributes
 - minimal APIs such as `MapGet`, `MapPost`, `MapGroup`
 - route prefixes
+- `[controller]` token normalization
+- route map integration
+
+Still worth doing:
+
 - middleware and filters where practical
 - request/response type extraction
 
