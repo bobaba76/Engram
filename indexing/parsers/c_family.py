@@ -217,17 +217,18 @@ def _append_c_typedef_and_enum_symbols(source: str, imports: list[str], symbols:
 def extract_symbols_with_status(file_path: Path) -> tuple[list[SymbolRecord], dict[str, object]]:
     language_name = "cpp" if file_path.suffix.lower() in {".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"} else "c"
     clang_status = clang_runtime_status()
+    build_context = load_native_build_context(str(file_path))
     if clang_available():
         parsed = extract_clang_symbols(file_path)
         if parsed:
-            return parsed, {"parser": "clang", "symbol_count": len(parsed), "language": language_name, "clang": clang_status}
+            return parsed, {"parser": "clang", "symbol_count": len(parsed), "language": language_name, "clang": clang_status, "build_context": build_context}
     parser = tree_sitter_parser(language_name)
     if parser is not None:
         parsed = _extract_symbols_tree_sitter(file_path, parser, language_name)
         if parsed:
-            return parsed, {"parser": "tree_sitter", "symbol_count": len(parsed), "language": language_name, "clang": clang_status}
+            return parsed, {"parser": "tree_sitter", "symbol_count": len(parsed), "language": language_name, "clang": clang_status, "build_context": build_context}
     parsed = _extract_symbols_regex(file_path, language_name)
-    return parsed, {"parser": "regex", "symbol_count": len(parsed), "language": language_name, "clang": clang_status}
+    return parsed, {"parser": "regex", "symbol_count": len(parsed), "language": language_name, "clang": clang_status, "build_context": build_context}
 
 
 def extract_symbols(file_path: Path) -> list[SymbolRecord]:
