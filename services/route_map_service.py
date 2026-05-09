@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from config.settings import DEFAULT_SCAN_EXCLUDED_DIRS
 from indexing.scanner import scan_repo
-from services.route_parsing import BACKEND_HANDLER_PATTERN, JSON_RESPONSE_PATTERN, consumer_keys, enclosing_function_name, frontend_route_usages, function_call_pattern, iter_backend_route_decorators, iter_backend_route_mappings, iter_express_route_handlers, nested_response_keys, normalize_route, pydantic_model_shapes, response_keys, response_model_name, returned_payload_source, route_matches
+from services.route_parsing import BACKEND_HANDLER_PATTERN, JSON_RESPONSE_PATTERN, consumer_keys, enclosing_function_name, frontend_route_usages, function_call_pattern, iter_backend_route_decorators, iter_backend_route_mappings, iter_csharp_route_handlers, iter_express_route_handlers, nested_response_keys, normalize_route, pydantic_model_shapes, response_keys, response_model_name, returned_payload_source, route_matches
 
 if TYPE_CHECKING:
     from storage.duckdb_store import DuckDBStore
@@ -23,7 +23,7 @@ def _iter_candidate_files(repo_root: Path) -> list[Path]:
     return [
         repo_root / record.path
         for record in scan_repo(repo_root, excluded_dirs=DEFAULT_SCAN_EXCLUDED_DIRS)
-        if Path(record.path).suffix.lower() in {".py", ".ts", ".tsx", ".js", ".jsx"}
+        if Path(record.path).suffix.lower() in {".py", ".ts", ".tsx", ".js", ".jsx", ".cs"}
     ]
 
 
@@ -42,7 +42,7 @@ def _iter_indexed_candidate_files(repo_root: Path, duckdb_store: DuckDBStore) ->
             candidate.relative_to(repo_root.resolve())
         except ValueError:
             continue
-        if candidate.suffix.lower() not in {".py", ".ts", ".tsx", ".js", ".jsx"}:
+        if candidate.suffix.lower() not in {".py", ".ts", ".tsx", ".js", ".jsx", ".cs"}:
             continue
         if candidate.exists() and candidate.is_file():
             candidates.append(candidate)
@@ -164,6 +164,34 @@ def _express_handlers(source: str, relative_path: str, requested_route: str) -> 
     return handlers
 
 
+def _csharp_handlers(source: str, relative_path: str, requested_route: str) -> list[dict[str, object]]:
+    handlers: list[dict[str, object]] = []
+    for entry in iter_csharp_route_handlers(source):
+        found_route = str(entry.get("route", "") or "")
+        if not route_matches(found_route, requested_route):
+            continue
+        handler_name = str(entry.get("handler", "") or "")
+        handler_match = re.search(rf"\b{re.escape(handler_name)}\s*\(", source) if handler_name else None
+        after = source[handler_match.start():] if handler_match is not None else source[int(entry.get("end", 0) or 0):]
+        json_match = JSON_RESPONSE_PATTERN.search(after[:2400])
+        response_source = json_match.group("body") if json_match is not None else after[:2400]
+        handlers.append(
+            {
+                "route": found_route,
+                "normalized_route": normalize_route(found_route),
+                "method": str(entry.get("method", "") or "").upper(),
+                "router": entry.get("router", ""),
+                "handler": handler_name,
+                "file_path": relative_path,
+                "response_model": "",
+                "response_keys": response_keys(response_source)[:20],
+                "nested_response_keys": nested_response_keys(response_source),
+                "framework": entry.get("framework", "aspnet"),
+            }
+        )
+    return handlers
+
+
 def _direct_frontend_consumers(source: str, relative_path: str, requested_route: str, duckdb_store: DuckDBStore) -> tuple[list[dict[str, object]], dict[str, str]]:
     consumers: list[dict[str, object]] = []
     wrapper_routes: dict[str, str] = {}
@@ -240,6 +268,8 @@ def route_map(repo_root: Path, duckdb_store: DuckDBStore, route: str = "") -> di
             continue
         if path.suffix.lower() == ".py":
             handlers.extend(_backend_handlers(source, relative_path, normalized_route))
+        elif path.suffix.lower() == ".cs":
+            handlers.extend(_csharp_handlers(source, relative_path, normalized_route))
         elif _is_backend_script_path(relative_path):
             handlers.extend(_express_handlers(source, relative_path, normalized_route))
         else:
