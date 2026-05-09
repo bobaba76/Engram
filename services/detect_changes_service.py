@@ -135,6 +135,14 @@ def _path_risk_hints(file_path: str) -> list[str]:
         hints.append("public/native header surface")
     if normalized.endswith((".c", ".cc", ".cpp", ".cxx")):
         hints.append("native implementation file")
+    if normalized.endswith(".cs") and any(part in normalized for part in ("/controllers/", "/endpoints/", "/minimalapi", "program.cs")):
+        hints.append("C# public route/API path")
+    if normalized.endswith(".cs") and any(token in normalized for token in ("dto", "contract", "request", "response")):
+        hints.append("C# DTO/API contract path")
+    if normalized.endswith(".cs") and any(token in normalized for token in ("startup.cs", "program.cs", "servicecollection", "dependencyinjection")):
+        hints.append("C# dependency-injection/config path")
+    if normalized.endswith(".cs") and any(part in normalized for part in ("/migrations/", "migration", "dbcontext")):
+        hints.append("C# database/schema path")
     if any(part in normalized for part in ("/auth", "/security", "/middleware")):
         hints.append("auth/security/middleware path")
     if any(part in normalized for part in ("/routers/", "/routes/", "/api/")):
@@ -148,7 +156,16 @@ def _path_risk_hints(file_path: str) -> list[str]:
 
 def _file_risk(file_path: str, changed_symbol_count: int, impacted: bool) -> str:
     hints = _path_risk_hints(file_path)
-    if changed_symbol_count >= 8 or any("auth/security" in hint or "database" in hint or "public/native header" in hint for hint in hints):
+    if changed_symbol_count >= 8 or any(
+        "auth/security" in hint
+        or "database" in hint
+        or "public/native header" in hint
+        or "C# public route/API" in hint
+        or "C# DTO/API contract" in hint
+        or "C# dependency-injection/config" in hint
+        or "C# database/schema" in hint
+        for hint in hints
+    ):
         return "HIGH"
     if changed_symbol_count >= 3 or impacted or hints:
         return "MEDIUM"

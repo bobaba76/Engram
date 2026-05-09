@@ -407,10 +407,12 @@ Current support:
 - graph `INJECTS` edges from registered service/interface to implementation
 - constructor-injected service dependencies as `USES_SERVICE` edges
 - process tracing can follow controller/method -> interface -> implementation service paths
+- C# public route/API, DTO/contract, DI/config, and migration/schema files are risk-sensitive in git-aware reports
+- C# test suggestions understand common `.Tests` project and `ThingTests.cs` naming conventions
 
 Current limitation:
 
-- full repository/data-access classification and C#-specific risk calibration are not yet implemented deeply.
+- full repository/data-access classification and deeper C# risk calibration from real repo validation are not yet implemented.
 
 ## C/C++ Workflow Roadmap
 
@@ -616,27 +618,39 @@ Desired output:
 
 ### 5. C# Test Mapping
 
-Map tests using:
+First-pass C# test naming support is implemented.
 
-- xUnit
-- NUnit
-- MSTest
+Implemented:
+
 - project/namespace conventions
 - class and method names
 - controller/service/repository names
-- route names
+- `.Tests` project/folder markers
+- `ThingTests.cs`, `ThingTest.cs`, and `ThingSpecs.cs` naming
+
+Still worth doing:
+
+- xUnit/NUnit/MSTest attribute-aware test mapping
+- route name to test mapping
+- symbol-level test method ranking
 
 ### 6. C# Risk Model
 
-Escalate risk for:
+First-pass path-sensitive C# risk is implemented.
+
+Currently escalates for:
 
 - public controller route changes
 - DTO shape changes
-- auth/middleware/filter changes
 - DI rewires
 - migrations/schema changes
+
+Still worth doing:
+
+- auth/middleware/filter changes
 - high fan-in interfaces/services
 - shared package/project changes
+- calibration from real C# repo validation
 
 ## Practical Next Milestones
 

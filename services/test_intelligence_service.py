@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 __test__ = False
 
-TEST_PATH_MARKERS = ("/test", "/tests/", "test_", "_test.", ".test.", ".spec.")
+TEST_PATH_MARKERS = ("/test", "/tests/", ".test/", ".tests/", "test_", "_test.", ".test.", ".tests.", ".spec.")
 
 SUBSYSTEM_TEST_MAP = (
     (("indexing/parsers/",), ("tests/test_parser_registry.py", "tests/test_graph_builder.py")),
@@ -40,6 +40,28 @@ def _tokens(value: str) -> set[str]:
     return {token for token in normalized.split() if len(token) >= 3}
 
 
+def _csharp_test_name_variants(file_path: str, qualified: str = "") -> set[str]:
+    normalized = str(file_path or "").replace("\\", "/")
+    stem = Path(normalized).stem
+    names = {stem}
+    for suffix in ("Controller", "Service", "Repository", "Dto", "Request", "Response"):
+        if stem.endswith(suffix):
+            names.add(stem[: -len(suffix)])
+    if qualified:
+        tail = str(qualified).replace("::", ".").rsplit(".", 1)[-1]
+        if tail:
+            names.add(tail)
+    variants: set[str] = set()
+    for name in names:
+        if not name:
+            continue
+        variants.add(name)
+        variants.add(f"{name}Tests")
+        variants.add(f"{name}Test")
+        variants.add(f"{name}Specs")
+    return {variant.lower() for variant in variants if variant}
+
+
 def _rank_tests(target_tokens: set[str], rows: list[dict[str, object]], limit: int) -> list[dict[str, object]]:
     ranked = []
     for row in rows:
@@ -50,6 +72,34 @@ def _rank_tests(target_tokens: set[str], rows: list[dict[str, object]], limit: i
         ranked.append({**row, "score": score, "token_overlap": overlap})
     ranked.sort(key=lambda item: (int(item.get("score", 0)), str(item.get("file_path") or item.get("path") or "")), reverse=True)
     return ranked[:limit]
+
+
+def _csharp_convention_tests(duckdb_store: DuckDBStore, target_files: list[str], target_symbols: list[str]) -> list[dict[str, object]]:
+    indexed_paths = _indexed_test_paths(duckdb_store)
+    if not indexed_paths:
+        return []
+    variants: set[str] = set()
+    for index, file_path in enumerate(target_files):
+        variants.update(_csharp_test_name_variants(file_path, target_symbols[index] if index < len(target_symbols) else ""))
+    mapped: list[dict[str, object]] = []
+    for path in indexed_paths:
+        if not path.lower().endswith(".cs"):
+            continue
+        stem = Path(path).stem.lower()
+        if stem not in variants:
+            continue
+        mapped.append(
+            {
+                "file_path": path,
+                "name": Path(path).stem,
+                "qualified_name": Path(path).stem,
+                "kind": "test_file",
+                "score": 9,
+                "token_overlap": 2,
+                "why_relevant": "C# test naming convention match",
+            }
+        )
+    return sorted(mapped, key=lambda item: str(item["file_path"]))
 
 
 def _keep_relevant_tests(rows: list[dict[str, object]], fallback_limit: int) -> list[dict[str, object]]:
@@ -124,9 +174,10 @@ def find_tests_for_target(duckdb_store: DuckDBStore, target: str, limit: int = 1
         if _is_test_path(path):
             test_symbols.append({"file_path": path, "name": Path(path).name, "qualified_name": Path(path).stem, "kind": "test_file"})
     mapped_tests = _mapped_tests_for_seed(duckdb_store, [target, *target_files, *target_symbols])
+    csharp_tests = _csharp_convention_tests(duckdb_store, target_files, target_symbols)
     ranked_tests = _keep_relevant_tests(_rank_tests(seed_tokens, test_symbols, limit=limit), fallback_limit=0)
     tests_by_file: dict[str, dict[str, object]] = {}
-    for item in [*mapped_tests, *ranked_tests]:
+    for item in [*mapped_tests, *csharp_tests, *ranked_tests]:
         file_path = str(item.get("file_path", "") or item.get("file", "") or "")
         if file_path and file_path not in tests_by_file:
             tests_by_file[file_path] = item
