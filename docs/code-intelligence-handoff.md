@@ -405,10 +405,12 @@ Current support:
 - first-pass C# DTO response-shape extraction from records/classes and `ActionResult<T>`
 - first-pass dependency-injection registrations from `AddScoped`, `AddTransient`, and `AddSingleton`
 - graph `INJECTS` edges from registered service/interface to implementation
+- constructor-injected service dependencies as `USES_SERVICE` edges
+- process tracing can follow controller/method -> interface -> implementation service paths
 
 Current limitation:
 
-- full controller/service/repository flow intelligence is not yet implemented deeply.
+- full repository/data-access classification and C#-specific risk calibration are not yet implemented deeply.
 
 ## C/C++ Workflow Roadmap
 
@@ -576,21 +578,29 @@ Implemented:
 - `AddSingleton`
 - interface-to-implementation mappings
 - `INJECTS` graph relation
+- constructor parameter dependencies
+- `USES_SERVICE` graph relation
+- process tracing over `CALLS`, `USES_SERVICE`, and `INJECTS`
 
 Still worth doing:
 
 - factory registrations
 - open generic registrations
 - hosted services
-- constructor parameter to DI implementation resolution
-- use DI edges in process tracing, impact analysis, and risk scoring more deeply
+- constructor parameter to concrete implementation resolution in compact summaries
+- use DI edges in risk scoring more deeply
 
 ### 4. Controller/Service/Repository Flows
 
-Trace:
+First-pass controller-to-service tracing is implemented through constructor dependencies and DI registrations.
+
+Currently traceable:
 
 - controller/minimal API entrypoint
 - service method
+
+Still worth doing:
+
 - repository/data access
 - database or external HTTP client
 - queue/event publisher

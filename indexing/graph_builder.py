@@ -387,6 +387,16 @@ def _method_index(symbols_by_file: dict[str, list[SymbolRecord]]) -> dict[tuple[
     return methods
 
 
+def _parent_symbol(symbols: list[SymbolRecord], symbol: SymbolRecord) -> SymbolRecord | None:
+    parent = _parent_symbol_name(symbol)
+    if not parent:
+        return None
+    for candidate in symbols:
+        if candidate.qualified_name == parent or candidate.name == parent.rsplit(".", 1)[-1]:
+            return candidate
+    return None
+
+
 def build_graph(
     kuzu_store: KuzuStore,
     files: list[FileRecord],
@@ -504,6 +514,26 @@ def build_graph(
                 )
                 if service_target and implementation_target and service_target != implementation_target:
                     kuzu_store.add_edge(service_target, "INJECTS", implementation_target)
+            dependency_sources = list(symbol.metadata.get("constructor_dependencies", []) if isinstance(symbol.metadata.get("constructor_dependencies", []), list) else [])
+            if not dependency_sources:
+                parent_symbol = _parent_symbol(symbols_by_file.get(file_record.path, []), symbol)
+                if parent_symbol is not None:
+                    dependency_sources = list(parent_symbol.metadata.get("constructor_dependencies", []) if isinstance(parent_symbol.metadata.get("constructor_dependencies", []), list) else [])
+            for dependency in dependency_sources:
+                service_target = _resolve_symbol_target(
+                    str(dependency),
+                    current_symbol=symbol,
+                    file_path=file_record.path,
+                    symbols_by_file=symbols_by_file,
+                    symbols_by_name=symbols_by_name,
+                    file_symbol_names=file_symbol_names,
+                    file_name_candidates=file_name_candidates,
+                    project_file_symbols=project_file_symbols,
+                    file_associations=file_associations,
+                    relation="REFERENCES",
+                )
+                if service_target and service_target != symbol.qualified_name:
+                    kuzu_store.add_edge(symbol.qualified_name, "USES_SERVICE", service_target)
         if progress_callback is not None and _should_log_index(index, len(files)):
             progress_callback(f"graph edge progress: {index}/{len(files)} files ({file_record.path})")
     for child, relation, parent in inheritance_edges:

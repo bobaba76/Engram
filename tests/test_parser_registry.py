@@ -247,3 +247,20 @@ def test_csharp_parser_tracks_dependency_injection_registrations(tmp_path: Path)
         ("IProductService", "ProductService", "scoped"),
         ("IClock", "SystemClock", "singleton"),
     }
+
+
+def test_csharp_parser_tracks_constructor_dependencies(tmp_path: Path) -> None:
+    source = tmp_path / "ProductsController.cs"
+    source.write_text(
+        "public class ProductsController {\n"
+        "  private readonly IProductService _products;\n"
+        "  public ProductsController(IProductService products, IClock clock) {}\n"
+        "  public ProductDto GetTrend() => _products.GetTrend();\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    symbols, _ = extract_symbols_with_status(source)
+    controller = next(symbol for symbol in symbols if symbol.name == "ProductsController")
+
+    assert controller.metadata.get("constructor_dependencies") == ["IProductService", "IClock"]
