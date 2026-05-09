@@ -185,6 +185,59 @@ def test_build_graph_adds_inheritance_and_method_override_edges() -> None:
     assert ("CustomerService.run", "METHOD_OVERRIDES", "BaseService.run") in kuzu.edges
 
 
+def test_build_graph_adds_explicit_native_header_implementation_edges() -> None:
+    files = [
+        FileRecord(path="src/engine.h", language="c", size_bytes=1, sha256="a", modified_time=0.0),
+        FileRecord(path="src/engine.c", language="c", size_bytes=1, sha256="b", modified_time=0.0),
+    ]
+    symbols_by_file = {
+        "src/engine.h": [
+            SymbolRecord(
+                name="run_engine",
+                qualified_name="engine.header.run_engine",
+                kind="function",
+                start_line=1,
+                end_line=1,
+                signature="engine::run_engine(void)",
+                metadata={
+                    "imports": [],
+                    "calls": [],
+                    "references": [],
+                    "translation_unit": "engine",
+                    "file_role": "header",
+                    "is_declaration": True,
+                    "source_associations": ["src/engine.c"],
+                },
+            )
+        ],
+        "src/engine.c": [
+            SymbolRecord(
+                name="run_engine",
+                qualified_name="engine.source.run_engine",
+                kind="function",
+                start_line=3,
+                end_line=5,
+                signature="engine::run_engine(void)",
+                metadata={
+                    "imports": [],
+                    "calls": [],
+                    "references": [],
+                    "translation_unit": "engine",
+                    "file_role": "source",
+                    "is_definition": True,
+                    "source_associations": ["src/engine.h"],
+                },
+            )
+        ],
+    }
+    kuzu = _Kuzu()
+
+    build_graph(kuzu, files, symbols_by_file)
+
+    assert ("engine.header.run_engine", "DECLARES_IN_HEADER", "engine.source.run_engine") in kuzu.edges
+    assert ("engine.source.run_engine", "DEFINES_IMPLEMENTATION", "engine.header.run_engine") in kuzu.edges
+
+
 def test_build_graph_prefers_associated_file_for_duplicate_import_names() -> None:
     files = [
         FileRecord(path="src/hooks/useCustomer.ts", language="typescript", size_bytes=1, sha256="a", modified_time=0.0),

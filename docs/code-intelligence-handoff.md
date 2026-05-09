@@ -385,6 +385,8 @@ Current support:
 - regex fallback
 - first-pass native build-context discovery from `compile_commands.json`, CMake, Make, Visual Studio solution/project markers
 - parser and index-health visibility for build context confidence, include dirs, defines, standards, compilers, and targets
+- explicit native source/header graph relations: `DECLARES_IN_HEADER` and `DEFINES_IMPLEMENTATION`
+- native header changes are treated as high-risk public/native surface changes in git-aware reports
 - symbols, includes/import-like metadata, references, calls, and chunks depending on parser confidence
 
 Current limitation:
@@ -432,12 +434,21 @@ Why:
 
 ### 2. Source/Header Pairing
 
-Implement:
+First-pass graph pairing is implemented for matching native header and implementation symbols.
+
+Implemented:
 
 - pair `.h/.hpp` declarations with `.c/.cpp` definitions
 - link declarations to implementations
+- add `DECLARES_IN_HEADER`
+- add `DEFINES_IMPLEMENTATION`
+- surface those relations through graph/symbol context
+
+Still worth doing:
+
 - distinguish public headers from private/internal headers
 - classify high fan-in headers
+- make parser qualified names robust enough to avoid declaration/definition symbol collisions in every C/C++ style
 
 Potential relations:
 

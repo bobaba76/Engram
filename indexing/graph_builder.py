@@ -220,6 +220,39 @@ def _associated_symbol_pairs(grouped_symbols: dict[str, list[tuple[str, SymbolRe
     return pairs
 
 
+def _header_implementation_pairs(grouped_symbols: dict[str, list[tuple[str, SymbolRecord]]]) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for _, items in grouped_symbols.items():
+        headers = [
+            symbol
+            for _, symbol in items
+            if str(symbol.metadata.get("file_role", "")) == "header"
+            and symbol.kind in {"function", "method", "typedef", "type", "class", "macro"}
+        ]
+        implementations = [
+            symbol
+            for _, symbol in items
+            if str(symbol.metadata.get("file_role", "")) == "source"
+            and bool(symbol.metadata.get("is_definition"))
+        ]
+        for header in headers:
+            header_key = _symbol_match_key(header)
+            matches = [
+                implementation
+                for implementation in implementations
+                if _symbol_match_key(implementation) == header_key or implementation.name == header.name
+            ]
+            if len(matches) != 1:
+                continue
+            pair = (header.qualified_name, matches[0].qualified_name)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            pairs.append(pair)
+    return pairs
+
+
 def _transitive_translation_unit_pairs(grouped_symbols: dict[str, list[tuple[str, SymbolRecord]]]) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -454,6 +487,9 @@ def build_graph(
         progress_callback("graph association edges started")
     for declaration, definition in _declaration_definition_pairs(grouped_symbols):
         kuzu_store.add_edge(declaration, "DECLARES", definition)
+    for header_symbol, implementation_symbol in _header_implementation_pairs(association_groups):
+        kuzu_store.add_edge(header_symbol, "DECLARES_IN_HEADER", implementation_symbol)
+        kuzu_store.add_edge(implementation_symbol, "DEFINES_IMPLEMENTATION", header_symbol)
     for source_symbol, target_symbol in _associated_symbol_pairs(association_groups):
         kuzu_store.add_edge(source_symbol, "ASSOCIATED_WITH", target_symbol)
     for source_symbol, target_symbol in _transitive_translation_unit_pairs(grouped_symbols):
