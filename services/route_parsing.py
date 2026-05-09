@@ -31,7 +31,11 @@ CSHARP_MINIMAL_API_PATTERN = re.compile(
 )
 CSHARP_ROUTE_ATTR_PATTERN = re.compile(r"\[(?P<name>Route|HttpGet|HttpPost|HttpPut|HttpDelete|HttpPatch)(?:\s*\(\s*\"(?P<route>[^\"]*)\"[^\)]*\))?\]", re.IGNORECASE)
 CSHARP_CLASS_PATTERN = re.compile(r"(?:public\s+|internal\s+|sealed\s+|partial\s+|abstract\s+)*class\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
-CSHARP_METHOD_PATTERN = re.compile(r"\s*(?:public|internal|private|protected)\s+(?:async\s+)?(?:Task<[^>]+>|Task|ActionResult<[^>]+>|IActionResult|Results<[^>]+>|[A-Za-z_][A-Za-z0-9_<>,\[\]\?]*)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(", re.IGNORECASE)
+CSHARP_METHOD_PATTERN = re.compile(r"\s*(?:public|internal|private|protected)\s+(?:async\s+)?(?P<return_type>Task<[^>]+>|Task|ActionResult<[^>]+>|IActionResult|Results<[^>]+>|[A-Za-z_][A-Za-z0-9_<>,\[\]\?]*)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(", re.IGNORECASE)
+CSHARP_RECORD_PATTERN = re.compile(r"(?:public\s+|internal\s+)?record\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\((?P<params>[^;{]*)\)|\{(?P<body>[\s\S]*?)\})", re.IGNORECASE)
+CSHARP_DTO_CLASS_PATTERN = re.compile(r"(?:public\s+|internal\s+)?(?:class|record)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)[^{;]*\{(?P<body>[\s\S]*?)(?=\n\s*(?:public\s+|internal\s+)?(?:class|record|interface|struct)\s+[A-Za-z_]|\Z)", re.IGNORECASE)
+CSHARP_PROPERTY_PATTERN = re.compile(r"(?:public|internal)\s+(?P<type>[A-Za-z_][A-Za-z0-9_<>,\[\]\?]*)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\{", re.IGNORECASE)
+CSHARP_RECORD_PARAM_PATTERN = re.compile(r"(?P<type>[A-Za-z_][A-Za-z0-9_<>,\[\]\?]*)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
 PYDANTIC_CLASS_PATTERN = re.compile(r"class\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\([^)]*(?:BaseModel|Schema|Model)[^)]*\):(?P<body>[\s\S]*?)(?=\nclass\s|\ndef\s|\n@|\Z)")
 PYDANTIC_FIELD_PATTERN = re.compile(r"^\s+(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?P<type>[^=\n]+)", re.MULTILINE)
 RESPONSE_MODEL_PATTERN = re.compile(r"response_model\s*=\s*(?:list\s*\[\s*)?(?P<model>[A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
@@ -155,6 +159,93 @@ def _normalize_csharp_route(route: str, class_name: str = "") -> str:
     return ("/" + value.strip().strip("/")).lower()
 
 
+def _json_field_name(name: str) -> str:
+    token = str(name or "").strip()
+    if not token:
+        return ""
+    return token[:1].lower() + token[1:]
+
+
+def _csharp_model_name_from_type(type_hint: str) -> tuple[str, bool]:
+    hint = str(type_hint or "").strip().strip("?")
+    wrappers = ("Task", "ActionResult", "Ok", "Created", "JsonHttpResult")
+    changed = True
+    while changed:
+        changed = False
+        for wrapper in wrappers:
+            match = re.fullmatch(rf"{wrapper}<(?P<inner>.+)>", hint)
+            if match:
+                hint = match.group("inner").strip()
+                changed = True
+    results_match = re.fullmatch(r"Results<(?P<inner>.+)>", hint)
+    if results_match:
+        for part in results_match.group("inner").split(","):
+            model, is_array = _csharp_model_name_from_type(part.strip())
+            if model:
+                return model, is_array
+    collection_match = re.fullmatch(r"(?:IEnumerable|List|IReadOnlyList|Collection)<(?P<inner>[A-Za-z_][A-Za-z0-9_]*)>", hint)
+    if collection_match:
+        return collection_match.group("inner"), True
+    array_match = re.fullmatch(r"(?P<inner>[A-Za-z_][A-Za-z0-9_]*)\[\]", hint)
+    if array_match:
+        return array_match.group("inner"), True
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", hint) and hint not in {"IActionResult", "IResult", "Task", "string", "int", "long", "bool", "double", "decimal"}:
+        return hint, False
+    return "", False
+
+
+def csharp_model_shapes(source: str) -> dict[str, dict[str, object]]:
+    shapes: dict[str, dict[str, object]] = {}
+    field_types: dict[str, dict[str, tuple[str, bool]]] = {}
+    for record in CSHARP_RECORD_PATTERN.finditer(source):
+        model_name = record.group("name")
+        params = record.group("params") or ""
+        body = record.group("body") or ""
+        fields: list[str] = []
+        nested_types: dict[str, tuple[str, bool]] = {}
+        for prop in CSHARP_RECORD_PARAM_PATTERN.finditer(params):
+            field_name = _json_field_name(prop.group("name"))
+            if field_name:
+                fields.append(field_name)
+                nested_model, is_array = _csharp_model_name_from_type(prop.group("type"))
+                if nested_model:
+                    nested_types[field_name] = (nested_model, is_array)
+        for prop in CSHARP_PROPERTY_PATTERN.finditer(body):
+            field_name = _json_field_name(prop.group("name"))
+            if field_name:
+                fields.append(field_name)
+                nested_model, is_array = _csharp_model_name_from_type(prop.group("type"))
+                if nested_model:
+                    nested_types[field_name] = (nested_model, is_array)
+        if fields:
+            shapes[model_name] = {"fields": sorted(set(fields)), "nested": {}}
+            field_types[model_name] = nested_types
+    for klass in CSHARP_DTO_CLASS_PATTERN.finditer(source):
+        model_name = klass.group("name")
+        body = klass.group("body") or ""
+        fields = []
+        nested_types = {}
+        for prop in CSHARP_PROPERTY_PATTERN.finditer(body):
+            field_name = _json_field_name(prop.group("name"))
+            if field_name:
+                fields.append(field_name)
+                nested_model, is_array = _csharp_model_name_from_type(prop.group("type"))
+                if nested_model:
+                    nested_types[field_name] = (nested_model, is_array)
+        if fields:
+            shapes[model_name] = {"fields": sorted(set(fields)), "nested": {}}
+            field_types[model_name] = nested_types
+    for model_name, nested_types in field_types.items():
+        nested_shapes: dict[str, list[str]] = {}
+        for field_name, (nested_model, is_array) in nested_types.items():
+            nested = shapes.get(nested_model, {})
+            nested_fields = nested.get("fields", []) if isinstance(nested, dict) else []
+            if nested_fields:
+                nested_shapes[f"{field_name}[]" if is_array else field_name] = list(nested_fields)
+        shapes[model_name]["nested"] = nested_shapes
+    return shapes
+
+
 def _combine_routes(prefix: str, route: str, class_name: str = "") -> str:
     parts = [part for part in [prefix, route] if str(part or "").strip()]
     if not parts:
@@ -205,6 +296,7 @@ def iter_csharp_route_handlers(source: str) -> list[dict[str, object]]:
                         "args": attr.group(0),
                         "route": route,
                         "handler": method_name,
+                        "response_model": _csharp_model_name_from_type(method_match.group("return_type") or "")[0],
                         "end": method_offset + method_match.end() - method_match.start(),
                         "framework": "aspnet_controller",
                     }

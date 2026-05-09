@@ -264,6 +264,39 @@ def test_route_map_extracts_aspnet_minimal_api_routes(tmp_path: Path) -> None:
     assert "status" in handler["response_keys"]
 
 
+def test_route_map_extracts_aspnet_dto_response_shape(tmp_path: Path) -> None:
+    controller = tmp_path / "backend" / "Controllers" / "ProductsController.cs"
+    controller.parent.mkdir(parents=True)
+    controller.write_text(
+        "using Microsoft.AspNetCore.Mvc;\n"
+        "public record TrendMetricsDto(int IntransitStock, int EffectiveStock);\n"
+        "public record ProductTrendDto(string ProductCode, TrendMetricsDto Metrics);\n"
+        "[ApiController]\n"
+        "[Route(\"api/[controller]\")]\n"
+        "public class ProductsController : ControllerBase {\n"
+        "  [HttpGet(\"trends\")]\n"
+        "  public ActionResult<ProductTrendDto> GetTrend() {\n"
+        "    return Ok(new ProductTrendDto(\"A\", new TrendMetricsDto(1, 2)));\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    class _FilesRepoWithAspNetDto:
+        def fetch_all(self):
+            return [{"path": "backend/Controllers/ProductsController.cs"}]
+
+    class _StoreWithAspNetDto(_Store):
+        files = _FilesRepoWithAspNetDto()
+
+    payload = route_map(tmp_path, _StoreWithAspNetDto(), route="/products/trends")
+    handler = payload["routes"][0]["handlers"][0]
+
+    assert handler["response_model"] == "ProductTrendDto"
+    assert handler["response_keys"] == ["metrics", "productCode"]
+    assert handler["nested_response_keys"] == {"metrics": ["effectiveStock", "intransitStock"]}
+
+
 def test_route_map_extracts_rich_frontend_field_reads(tmp_path: Path) -> None:
     backend = tmp_path / "backend" / "routers" / "products.py"
     backend.parent.mkdir(parents=True)

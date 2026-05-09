@@ -402,10 +402,11 @@ Current support:
 - symbols and graph basics
 - first-pass ASP.NET route extraction for controller attributes and minimal APIs
 - route map/API impact compatibility for C# handlers
+- first-pass C# DTO response-shape extraction from records/classes and `ActionResult<T>`
 
 Current limitation:
 
-- DTO shape, dependency-injection graph, and full controller/service/repository flow intelligence are not yet implemented deeply.
+- dependency-injection graph and full controller/service/repository flow intelligence are not yet implemented deeply.
 
 ## C/C++ Workflow Roadmap
 
@@ -538,15 +539,23 @@ Still worth doing:
 
 ### 2. DTO And Shape Extraction
 
-Implement:
+First-pass DTO shape extraction is implemented.
+
+Implemented:
 
 - records/classes used as request DTOs
 - records/classes used as response DTOs
-- nullable fields
 - collection fields
 - nested DTOs
-- serialized property names
-- JSON attributes
+- controller return types such as `ActionResult<ProductDto>`
+- camel-case JSON field projection for C# properties/record parameters
+
+Still worth doing:
+
+- nullable field semantics
+- serialized property names from JSON attributes
+- minimal API typed result wrappers beyond the first simple cases
+- request DTO extraction and request-shape impact
 
 Use this for:
 
