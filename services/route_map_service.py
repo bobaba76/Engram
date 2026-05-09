@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from config.settings import DEFAULT_SCAN_EXCLUDED_DIRS
 from indexing.scanner import scan_repo
-from services.route_parsing import BACKEND_HANDLER_PATTERN, JSON_RESPONSE_PATTERN, consumer_keys, enclosing_function_name, frontend_route_usages, function_call_pattern, iter_backend_route_decorators, iter_backend_route_mappings, iter_csharp_route_handlers, iter_express_route_handlers, nested_response_keys, normalize_route, pydantic_model_shapes, response_keys, response_model_name, returned_payload_source, route_matches
+from services.route_parsing import BACKEND_HANDLER_PATTERN, JSON_RESPONSE_PATTERN, consumer_keys, csharp_model_shapes, enclosing_function_name, frontend_route_usages, function_call_pattern, iter_backend_route_decorators, iter_backend_route_mappings, iter_csharp_route_handlers, iter_express_route_handlers, nested_response_keys, normalize_route, pydantic_model_shapes, response_keys, response_model_name, returned_payload_source, route_matches
 
 if TYPE_CHECKING:
     from storage.duckdb_store import DuckDBStore
@@ -166,6 +166,7 @@ def _express_handlers(source: str, relative_path: str, requested_route: str) -> 
 
 def _csharp_handlers(source: str, relative_path: str, requested_route: str) -> list[dict[str, object]]:
     handlers: list[dict[str, object]] = []
+    model_shapes = csharp_model_shapes(source)
     for entry in iter_csharp_route_handlers(source):
         found_route = str(entry.get("route", "") or "")
         if not route_matches(found_route, requested_route):
@@ -175,6 +176,17 @@ def _csharp_handlers(source: str, relative_path: str, requested_route: str) -> l
         after = source[handler_match.start():] if handler_match is not None else source[int(entry.get("end", 0) or 0):]
         json_match = JSON_RESPONSE_PATTERN.search(after[:2400])
         response_source = json_match.group("body") if json_match is not None else after[:2400]
+        model_name = str(entry.get("response_model", "") or "")
+        detected_response_keys = response_keys(response_source)[:20]
+        nested = nested_response_keys(response_source)
+        if model_name and model_name in model_shapes:
+            model_shape = model_shapes[model_name]
+            detected_response_keys = sorted(set(detected_response_keys) | set(model_shape.get("fields", [])))[:20]
+            model_nested = model_shape.get("nested", {})
+            if isinstance(model_nested, dict):
+                for key, values in model_nested.items():
+                    nested.setdefault(str(key), [])
+                    nested[str(key)].extend(str(value) for value in values if value)
         handlers.append(
             {
                 "route": found_route,
@@ -183,9 +195,9 @@ def _csharp_handlers(source: str, relative_path: str, requested_route: str) -> l
                 "router": entry.get("router", ""),
                 "handler": handler_name,
                 "file_path": relative_path,
-                "response_model": "",
-                "response_keys": response_keys(response_source)[:20],
-                "nested_response_keys": nested_response_keys(response_source),
+                "response_model": model_name,
+                "response_keys": detected_response_keys,
+                "nested_response_keys": {key: values[:20] for key, values in nested.items()},
                 "framework": entry.get("framework", "aspnet"),
             }
         )
