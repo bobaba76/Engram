@@ -819,6 +819,41 @@ def test_detect_changes_marks_native_header_as_high_risk(monkeypatch, tmp_path: 
     assert "public/native header surface" in row["risk_factors"]
 
 
+def test_detect_changes_marks_csharp_controller_as_high_risk(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "backend" / "Controllers" / "ProductsController.cs"
+    source.parent.mkdir(parents=True)
+    source.write_text("public class ProductsController { public IActionResult GetTrend() => Ok(); }\n", encoding="utf-8")
+    diff_text = "\n".join(
+        [
+            "diff --git a/backend/Controllers/ProductsController.cs b/backend/Controllers/ProductsController.cs",
+            "+++ b/backend/Controllers/ProductsController.cs",
+            "@@ -1 +1 @@",
+            "+public class ProductsController { public IActionResult GetTrend() => Ok(); }",
+        ]
+    )
+    monkeypatch.setattr("services.detect_changes_service._diff_output", lambda repo_root, scope="unstaged", base_ref=None: diff_text)
+    monkeypatch.setattr("services.detect_changes_service._run_git", lambda repo_root, args: ".git")
+    monkeypatch.setattr("services.detect_changes_service._route_change_summary", lambda *args, **kwargs: {})
+    monkeypatch.setattr("services.detect_changes_service._process_change_summary", lambda *args, **kwargs: {})
+
+    class _Duck:
+        def fetch_symbols_for_file(self, file_path):
+            return [{"name": "ProductsController", "qualified_name": "ProductsController", "kind": "class", "file_path": file_path, "start_line": 1, "end_line": 1}]
+
+    class _Kuzu:
+        def get_impacted_files(self, touched_files):
+            return set(touched_files)
+
+        def get_impacted_file_details(self, touched_files):
+            return {"impacted_files": touched_files, "relation_totals": {}, "by_touched_file": {}}
+
+    payload = detect_changes(tmp_path, _Duck(), _Kuzu())
+    row = payload["risk_by_file"][0]
+
+    assert row["risk"] == "HIGH"
+    assert "C# public route/API path" in row["risk_factors"]
+
+
 def test_detect_changes_reports_affected_processes(monkeypatch, tmp_path: Path) -> None:
     source = tmp_path / "backend" / "routers" / "products.py"
     source.parent.mkdir(parents=True)

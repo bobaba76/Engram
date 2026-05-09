@@ -39,6 +39,36 @@ class _Kuzu:
     pass
 
 
+def test_find_tests_for_target_uses_csharp_test_naming_conventions(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "services.test_intelligence_service.resolve_candidates",
+        lambda duckdb_store, target="", limit=5: [
+            {
+                "symbol": {
+                    "qualified_name": "MyApp.Controllers.ProductsController",
+                    "name": "ProductsController",
+                    "file_path": "backend/Controllers/ProductsController.cs",
+                }
+            }
+        ],
+    )
+
+    class _FilesWithCSharpTests(_Files):
+        def fetch_all(self):
+            return [
+                {"path": "backend.Tests/ProductsControllerTests.cs"},
+                {"path": "backend.Tests/UnrelatedTests.cs"},
+            ]
+
+    class _DuckWithCSharpTests(_Duck):
+        files = _FilesWithCSharpTests()
+
+    payload = find_tests_for_target(_DuckWithCSharpTests(), "ProductsController", limit=8)
+
+    assert payload["compact_summary"]["top_files"] == ["backend.Tests/ProductsControllerTests.cs"]
+    assert payload["compact_results"][0]["why_relevant"] == "C# test naming convention match"
+
+
 def test_suggest_tests_filters_zero_overlap_fallback_noise(monkeypatch) -> None:
     monkeypatch.setattr(
         "services.test_intelligence_service.resolve_candidates",
