@@ -250,10 +250,13 @@ def _graph_candidates(duckdb_store: DuckDBStore | None, kuzu_store: KuzuStore | 
         for relation, edge_limit in (
             ("CALLS", 8),
             ("REFERENCES", 6),
+            ("INCLUDES", 6),
             ("IMPORTS", 4),
             ("ACCESSES", 4),
             ("FETCHES", 6),
             ("READS_FIELD", 6),
+            ("HAS_METHOD", 4),
+            ("HAS_PROPERTY", 4),
             ("EXTENDS", 4),
             ("IMPLEMENTS", 4),
             ("METHOD_OVERRIDES", 4),

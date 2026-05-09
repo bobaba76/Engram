@@ -135,6 +135,10 @@ def _path_risk_hints(file_path: str) -> list[str]:
         hints.append("public/native header surface")
     if normalized.endswith((".c", ".cc", ".cpp", ".cxx")):
         hints.append("native implementation file")
+    if normalized.endswith((".cmake", "cmakelists.txt", "makefile")) or normalized.endswith((".vcxproj", ".vcxproj.filters")):
+        hints.append("native build target/config path")
+    if normalized.endswith((".def", ".map")) or "/exports/" in normalized:
+        hints.append("native exported API/ABI surface")
     if normalized.endswith(".cs") and any(part in normalized for part in ("/controllers/", "/endpoints/", "/minimalapi", "program.cs")):
         hints.append("C# public route/API path")
     if normalized.endswith(".cs") and any(token in normalized for token in ("dto", "contract", "request", "response")):
@@ -160,6 +164,8 @@ def _file_risk(file_path: str, changed_symbol_count: int, impacted: bool) -> str
         "auth/security" in hint
         or "database" in hint
         or "public/native header" in hint
+        or "native build target/config" in hint
+        or "native exported API/ABI" in hint
         or "C# public route/API" in hint
         or "C# DTO/API contract" in hint
         or "C# dependency-injection/config" in hint

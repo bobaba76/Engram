@@ -8,14 +8,17 @@ from storage.kuzu_store import KuzuStore
 from services.symbol_resolution_service import ambiguity_status, resolve_candidates, symbol_uid_from_target
 
 
-DEFAULT_RELATIONS = ("CALLS", "IMPORTS", "REFERENCES", "ACCESSES", "FETCHES", "READS_FIELD", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS", "INJECTS", "USES_SERVICE")
+DEFAULT_RELATIONS = ("CALLS", "IMPORTS", "INCLUDES", "REFERENCES", "ACCESSES", "FETCHES", "READS_FIELD", "HAS_METHOD", "HAS_PROPERTY", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS", "INJECTS", "USES_SERVICE")
 RELATION_WEIGHTS = {
     "CALLS": 1.0,
     "IMPORTS": 0.85,
+    "INCLUDES": 0.8,
     "REFERENCES": 0.45,
     "ACCESSES": 0.35,
     "FETCHES": 0.9,
     "READS_FIELD": 0.55,
+    "HAS_METHOD": 0.4,
+    "HAS_PROPERTY": 0.45,
     "EXTENDS": 0.8,
     "IMPLEMENTS": 0.75,
     "METHOD_OVERRIDES": 0.7,

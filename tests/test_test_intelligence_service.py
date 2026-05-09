@@ -69,6 +69,36 @@ def test_find_tests_for_target_uses_csharp_test_naming_conventions(monkeypatch) 
     assert payload["compact_results"][0]["why_relevant"] == "C# test naming convention match"
 
 
+def test_find_tests_for_target_uses_native_test_naming_conventions(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "services.test_intelligence_service.resolve_candidates",
+        lambda duckdb_store, target="", limit=5: [
+            {
+                "symbol": {
+                    "qualified_name": "run_engine",
+                    "name": "run_engine",
+                    "file_path": "src/engine.c",
+                }
+            }
+        ],
+    )
+
+    class _FilesWithNativeTests(_Files):
+        def fetch_all(self):
+            return [
+                {"path": "tests/test_engine.cpp"},
+                {"path": "tests/test_unrelated.cpp"},
+            ]
+
+    class _DuckWithNativeTests(_Duck):
+        files = _FilesWithNativeTests()
+
+    payload = find_tests_for_target(_DuckWithNativeTests(), "run_engine", limit=8)
+
+    assert payload["compact_summary"]["top_files"] == ["tests/test_engine.cpp"]
+    assert payload["compact_results"][0]["why_relevant"] == "C/C++ test naming convention match"
+
+
 def test_suggest_tests_filters_zero_overlap_fallback_noise(monkeypatch) -> None:
     monkeypatch.setattr(
         "services.test_intelligence_service.resolve_candidates",

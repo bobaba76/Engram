@@ -133,10 +133,13 @@ def _graph_score(result: dict[str, Any]) -> tuple[float, list[str]]:
     relation_boosts = {
         "CALLS": 0.22,
         "REFERENCES": 0.16,
+        "INCLUDES": 0.16,
         "IMPORTS": 0.12,
         "ACCESSES": 0.1,
         "FETCHES": 0.2,
         "READS_FIELD": 0.14,
+        "HAS_METHOD": 0.09,
+        "HAS_PROPERTY": 0.09,
         "EXTENDS": 0.14,
         "IMPLEMENTS": 0.13,
         "METHOD_OVERRIDES": 0.12,

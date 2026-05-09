@@ -24,6 +24,7 @@ def _safe_get_all(result) -> list[tuple[Any, ...]]:
 
 SYMBOL_RELATIONS = (
     "IMPORTS",
+    "INCLUDES",
     "CALLS",
     "REFERENCES",
     "DECLARES",
@@ -33,6 +34,8 @@ SYMBOL_RELATIONS = (
     "USES_SERVICE",
     "ASSOCIATED_WITH",
     "ACCESSES",
+    "HAS_METHOD",
+    "HAS_PROPERTY",
     "FETCHES",
     "READS_FIELD",
     "EXTENDS",
@@ -111,7 +114,7 @@ class KuzuStore:
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
-        for relation in ("DECLARES_IN_HEADER", "DEFINES_IMPLEMENTATION", "INJECTS", "USES_SERVICE", "FETCHES", "READS_FIELD", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS"):
+        for relation in ("INCLUDES", "DECLARES_IN_HEADER", "DEFINES_IMPLEMENTATION", "INJECTS", "USES_SERVICE", "FETCHES", "READS_FIELD", "HAS_METHOD", "HAS_PROPERTY", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS"):
             try:
                 self.connection.execute(f"CREATE REL TABLE {relation}(FROM Symbol TO Symbol)")
             except RuntimeError as exc:
