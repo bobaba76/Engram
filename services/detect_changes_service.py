@@ -131,6 +131,10 @@ def _symbols_for_changed_lines(duckdb_store: DuckDBStore, file_path: str, change
 def _path_risk_hints(file_path: str) -> list[str]:
     normalized = str(file_path or "").replace("\\", "/").lower()
     hints = []
+    if normalized.endswith((".h", ".hh", ".hpp", ".hxx")):
+        hints.append("public/native header surface")
+    if normalized.endswith((".c", ".cc", ".cpp", ".cxx")):
+        hints.append("native implementation file")
     if any(part in normalized for part in ("/auth", "/security", "/middleware")):
         hints.append("auth/security/middleware path")
     if any(part in normalized for part in ("/routers/", "/routes/", "/api/")):
@@ -144,7 +148,7 @@ def _path_risk_hints(file_path: str) -> list[str]:
 
 def _file_risk(file_path: str, changed_symbol_count: int, impacted: bool) -> str:
     hints = _path_risk_hints(file_path)
-    if changed_symbol_count >= 8 or any("auth/security" in hint or "database" in hint for hint in hints):
+    if changed_symbol_count >= 8 or any("auth/security" in hint or "database" in hint or "public/native header" in hint for hint in hints):
         return "HIGH"
     if changed_symbol_count >= 3 or impacted or hints:
         return "MEDIUM"

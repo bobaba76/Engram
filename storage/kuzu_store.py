@@ -27,6 +27,8 @@ SYMBOL_RELATIONS = (
     "CALLS",
     "REFERENCES",
     "DECLARES",
+    "DECLARES_IN_HEADER",
+    "DEFINES_IMPLEMENTATION",
     "ASSOCIATED_WITH",
     "ACCESSES",
     "FETCHES",
@@ -107,7 +109,7 @@ class KuzuStore:
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
-        for relation in ("FETCHES", "READS_FIELD", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS"):
+        for relation in ("DECLARES_IN_HEADER", "DEFINES_IMPLEMENTATION", "FETCHES", "READS_FIELD", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS"):
             try:
                 self.connection.execute(f"CREATE REL TABLE {relation}(FROM Symbol TO Symbol)")
             except RuntimeError as exc:
