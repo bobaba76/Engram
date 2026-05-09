@@ -13,6 +13,10 @@ CS_IMPORT_PATTERN = re.compile(r"^\s*using\s+(?P<module>[A-Za-z_][A-Za-z0-9_\.]*
 CS_NAMESPACE_PATTERN = re.compile(r"^\s*namespace\s+(?P<name>[A-Za-z_][A-Za-z0-9_\.]*)", re.MULTILINE)
 CS_REFERENCE_PATTERN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 CS_MEMBER_PATTERN = re.compile(r"^\s*(?:public|private|protected|internal)?\s*(?:static\s+|virtual\s+|override\s+|async\s+|partial\s+|sealed\s+|abstract\s+)*(?:class|interface|record|struct|enum|delegate|[A-Za-z_][A-Za-z0-9_<>,\[\]\?\s]*\s+)(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\(|:|\{|where|$)", re.MULTILINE)
+CS_DI_REGISTRATION_PATTERN = re.compile(
+    r"\.Add(?P<lifetime>Scoped|Transient|Singleton)\s*<\s*(?P<service>[A-Za-z_][A-Za-z0-9_\.]*)\s*,\s*(?P<implementation>[A-Za-z_][A-Za-z0-9_\.]*)\s*>\s*\(",
+    re.IGNORECASE,
+)
 
 GENERIC_REFERENCE_TOKENS = {
     "bool",
@@ -64,6 +68,19 @@ def _csharp_calls_and_references(body_text: str, current_name: str) -> tuple[lis
     return calls, references
 
 
+def _csharp_di_registrations(source: str) -> list[dict[str, str]]:
+    registrations: list[dict[str, str]] = []
+    for match in CS_DI_REGISTRATION_PATTERN.finditer(source):
+        registrations.append(
+            {
+                "service": match.group("service"),
+                "implementation": match.group("implementation"),
+                "lifetime": match.group("lifetime").lower(),
+            }
+        )
+    return registrations
+
+
 def extract_symbols(file_path: Path) -> list[SymbolRecord]:
     parser = tree_sitter_parser("c_sharp")
     if parser is not None:
@@ -79,6 +96,7 @@ def _extract_symbols_tree_sitter(file_path: Path, parser) -> list[SymbolRecord]:
     tree = parse_with_cache(file_path, "csharp", parser, source_bytes)
     root = tree.root_node
     imports = sorted({match.group("module") for match in CS_IMPORT_PATTERN.finditer(source)})
+    di_registrations = _csharp_di_registrations(source)
     symbols: list[SymbolRecord] = []
 
     def walk(node, parents: list[str]) -> None:
@@ -119,6 +137,7 @@ def _extract_symbols_tree_sitter(file_path: Path, parser) -> list[SymbolRecord]:
                             "imports": imports,
                             "calls": calls,
                             "references": references,
+                            "di_registrations": di_registrations if node.type in {"namespace_declaration", "file_scoped_namespace_declaration"} else [],
                             "parent_chain": parents,
                             "namespace": ".".join(parents[:1]) if parents else "",
                         },
@@ -130,12 +149,35 @@ def _extract_symbols_tree_sitter(file_path: Path, parser) -> list[SymbolRecord]:
             walk(child, next_parents)
 
     walk(root, [])
+    if di_registrations:
+        symbols.append(
+            SymbolRecord(
+                name="dependency_injection",
+                qualified_name="dependency_injection",
+                kind="module",
+                start_line=1,
+                end_line=max(1, len(source.splitlines())),
+                signature="dependency_injection",
+                metadata={
+                    "parser": "tree_sitter",
+                    "language": "csharp",
+                    "node_type": "dependency_injection",
+                    "imports": imports,
+                    "calls": [],
+                    "references": [],
+                    "di_registrations": di_registrations,
+                    "parent_chain": [],
+                    "namespace": "",
+                },
+            )
+        )
     return dedupe_symbols(symbols)
 
 
 def _extract_symbols_regex(file_path: Path) -> list[SymbolRecord]:
     source = file_path.read_text(encoding="utf-8", errors="ignore")
     imports = sorted({match.group("module") for match in CS_IMPORT_PATTERN.finditer(source)})
+    di_registrations = _csharp_di_registrations(source)
     namespace_match = CS_NAMESPACE_PATTERN.search(source)
     namespace_name = namespace_match.group("name") if namespace_match else ""
     symbols: list[SymbolRecord] = []
@@ -164,6 +206,27 @@ def _extract_symbols_regex(file_path: Path) -> list[SymbolRecord]:
                     "imports": imports,
                     "calls": [],
                     "references": [],
+                    "di_registrations": di_registrations if line_number == 1 or kind in {"class", "method"} else [],
+                    "namespace": namespace_name,
+                },
+            )
+        )
+    if di_registrations and not symbols:
+        symbols.append(
+            SymbolRecord(
+                name="dependency_injection",
+                qualified_name=f"{namespace_name}.dependency_injection" if namespace_name else "dependency_injection",
+                kind="module",
+                start_line=1,
+                end_line=max(1, len(source.splitlines())),
+                signature="dependency_injection",
+                metadata={
+                    "parser": "regex_fallback",
+                    "language": "csharp",
+                    "imports": imports,
+                    "calls": [],
+                    "references": [],
+                    "di_registrations": di_registrations,
                     "namespace": namespace_name,
                 },
             )
