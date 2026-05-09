@@ -97,6 +97,13 @@ def _select_flows(duckdb_store: DuckDBStore, flows: list[list[str]], max_flows: 
     return (focused or ranked)[:max_flows]
 
 
+def _flow_edges(kuzu_store: KuzuStore, current: str) -> list[dict[str, object]]:
+    edges: list[dict[str, object]] = []
+    for relation in ("CALLS", "USES_SERVICE", "INJECTS"):
+        edges.extend(kuzu_store.edges_for_source(current, relation=relation))
+    return edges
+
+
 def _walk_call_paths(duckdb_store: DuckDBStore, kuzu_store: KuzuStore, start: str, max_depth: int, max_flows: int) -> list[list[str]]:
     flows: list[list[str]] = []
     stack: list[tuple[str, list[str]]] = [(start, [start])]
@@ -106,7 +113,7 @@ def _walk_call_paths(duckdb_store: DuckDBStore, kuzu_store: KuzuStore, start: st
         if len(path) - 1 >= max_depth:
             flows.append(path)
             continue
-        callees = kuzu_store.edges_for_source(current, relation="CALLS")
+        callees = _flow_edges(kuzu_store, current)
         next_nodes = [str(edge.get("target", "")) for edge in callees if str(edge.get("target", "")) and str(edge.get("target", "")) not in path]
         if not next_nodes:
             flows.append(path)

@@ -274,6 +274,45 @@ def test_build_graph_adds_csharp_dependency_injection_edges() -> None:
     assert ("MyApp.IProductService", "INJECTS", "MyApp.ProductService") in kuzu.edges
 
 
+def test_build_graph_adds_csharp_constructor_service_edges_for_class_and_methods() -> None:
+    files = [
+        FileRecord(path="Controllers/ProductsController.cs", language="csharp", size_bytes=1, sha256="a", modified_time=0.0),
+        FileRecord(path="Services.cs", language="csharp", size_bytes=1, sha256="b", modified_time=0.0),
+    ]
+    symbols_by_file = {
+        "Controllers/ProductsController.cs": [
+            SymbolRecord(
+                name="ProductsController",
+                qualified_name="MyApp.ProductsController",
+                kind="class",
+                start_line=1,
+                end_line=8,
+                signature="MyApp.ProductsController",
+                metadata={"imports": [], "calls": [], "references": [], "constructor_dependencies": ["IProductService"]},
+            ),
+            SymbolRecord(
+                name="GetTrend",
+                qualified_name="MyApp.ProductsController.GetTrend",
+                kind="method",
+                start_line=5,
+                end_line=6,
+                signature="MyApp.ProductsController.GetTrend",
+                metadata={"imports": [], "calls": [], "references": [], "parent_chain": ["MyApp.ProductsController"]},
+            ),
+        ],
+        "Services.cs": [
+            SymbolRecord(name="IProductService", qualified_name="MyApp.IProductService", kind="interface", start_line=1, end_line=2, signature="MyApp.IProductService", metadata={"imports": [], "calls": [], "references": []}),
+            SymbolRecord(name="ProductService", qualified_name="MyApp.ProductService", kind="class", start_line=4, end_line=8, signature="MyApp.ProductService", metadata={"imports": [], "calls": [], "references": []}),
+        ],
+    }
+    kuzu = _Kuzu()
+
+    build_graph(kuzu, files, symbols_by_file)
+
+    assert ("MyApp.ProductsController", "USES_SERVICE", "MyApp.IProductService") in kuzu.edges
+    assert ("MyApp.ProductsController.GetTrend", "USES_SERVICE", "MyApp.IProductService") in kuzu.edges
+
+
 def test_build_graph_prefers_associated_file_for_duplicate_import_names() -> None:
     files = [
         FileRecord(path="src/hooks/useCustomer.ts", language="typescript", size_bytes=1, sha256="a", modified_time=0.0),

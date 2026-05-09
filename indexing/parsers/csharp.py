@@ -17,6 +17,9 @@ CS_DI_REGISTRATION_PATTERN = re.compile(
     r"\.Add(?P<lifetime>Scoped|Transient|Singleton)\s*<\s*(?P<service>[A-Za-z_][A-Za-z0-9_\.]*)\s*,\s*(?P<implementation>[A-Za-z_][A-Za-z0-9_\.]*)\s*>\s*\(",
     re.IGNORECASE,
 )
+CS_CLASS_BLOCK_PATTERN = re.compile(r"(?:public\s+|internal\s+|sealed\s+|partial\s+|abstract\s+)*class\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)[^{]*\{(?P<body>[\s\S]*?)(?=\n\s*(?:public\s+|internal\s+)?(?:class|record|interface|struct)\s+[A-Za-z_]|\Z)", re.IGNORECASE)
+CS_CONSTRUCTOR_PATTERN = re.compile(r"(?:public|internal|private|protected)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<params>[^)]*)\)", re.IGNORECASE)
+CS_PARAM_PATTERN = re.compile(r"(?P<type>[A-Za-z_][A-Za-z0-9_\.<>]*)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
 
 GENERIC_REFERENCE_TOKENS = {
     "bool",
@@ -81,6 +84,24 @@ def _csharp_di_registrations(source: str) -> list[dict[str, str]]:
     return registrations
 
 
+def _csharp_constructor_dependencies(source: str) -> dict[str, list[str]]:
+    dependencies: dict[str, list[str]] = {}
+    for class_match in CS_CLASS_BLOCK_PATTERN.finditer(source):
+        class_name = class_match.group("name")
+        body = class_match.group("body") or ""
+        deps: list[str] = []
+        for ctor in CS_CONSTRUCTOR_PATTERN.finditer(body):
+            if ctor.group("name") != class_name:
+                continue
+            for param in CS_PARAM_PATTERN.finditer(ctor.group("params") or ""):
+                dep_type = str(param.group("type") or "").strip()
+                if dep_type and dep_type not in deps:
+                    deps.append(dep_type)
+        if deps:
+            dependencies[class_name] = deps
+    return dependencies
+
+
 def extract_symbols(file_path: Path) -> list[SymbolRecord]:
     parser = tree_sitter_parser("c_sharp")
     if parser is not None:
@@ -97,6 +118,7 @@ def _extract_symbols_tree_sitter(file_path: Path, parser) -> list[SymbolRecord]:
     root = tree.root_node
     imports = sorted({match.group("module") for match in CS_IMPORT_PATTERN.finditer(source)})
     di_registrations = _csharp_di_registrations(source)
+    constructor_dependencies = _csharp_constructor_dependencies(source)
     symbols: list[SymbolRecord] = []
 
     def walk(node, parents: list[str]) -> None:
@@ -138,6 +160,7 @@ def _extract_symbols_tree_sitter(file_path: Path, parser) -> list[SymbolRecord]:
                             "calls": calls,
                             "references": references,
                             "di_registrations": di_registrations if node.type in {"namespace_declaration", "file_scoped_namespace_declaration"} else [],
+                            "constructor_dependencies": constructor_dependencies.get(name, []) if node.type in {"class_declaration", "record_declaration"} else [],
                             "parent_chain": parents,
                             "namespace": ".".join(parents[:1]) if parents else "",
                         },
@@ -178,6 +201,7 @@ def _extract_symbols_regex(file_path: Path) -> list[SymbolRecord]:
     source = file_path.read_text(encoding="utf-8", errors="ignore")
     imports = sorted({match.group("module") for match in CS_IMPORT_PATTERN.finditer(source)})
     di_registrations = _csharp_di_registrations(source)
+    constructor_dependencies = _csharp_constructor_dependencies(source)
     namespace_match = CS_NAMESPACE_PATTERN.search(source)
     namespace_name = namespace_match.group("name") if namespace_match else ""
     symbols: list[SymbolRecord] = []
@@ -207,6 +231,7 @@ def _extract_symbols_regex(file_path: Path) -> list[SymbolRecord]:
                     "calls": [],
                     "references": [],
                     "di_registrations": di_registrations if line_number == 1 or kind in {"class", "method"} else [],
+                    "constructor_dependencies": constructor_dependencies.get(name, []) if kind == "class" else [],
                     "namespace": namespace_name,
                 },
             )

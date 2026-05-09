@@ -1,6 +1,54 @@
 from services.process_service import trace_execution_flows
 
 
+class _CSharpDuck:
+    rows = {
+        "MyApp.ProductsController.GetTrend": {"qualified_name": "MyApp.ProductsController.GetTrend", "name": "GetTrend", "file_path": "Controllers/ProductsController.cs", "kind": "method"},
+        "MyApp.IProductService": {"qualified_name": "MyApp.IProductService", "name": "IProductService", "file_path": "Services/IProductService.cs", "kind": "interface"},
+        "MyApp.ProductService": {"qualified_name": "MyApp.ProductService", "name": "ProductService", "file_path": "Services/ProductService.cs", "kind": "class"},
+        "MyApp.ProductService.GetTrend": {"qualified_name": "MyApp.ProductService.GetTrend", "name": "GetTrend", "file_path": "Services/ProductService.cs", "kind": "method"},
+    }
+
+    def fetch_symbols_for_target(self, target, limit=25):
+        return [self.rows[target]] if target in self.rows else []
+
+
+class _CSharpKuzu:
+    def edges_for_target(self, target, relation=None):
+        return []
+
+    def edges_for_source(self, source, relation=None):
+        edges = {
+            ("MyApp.ProductsController.GetTrend", "USES_SERVICE"): [
+                {"source": source, "relation": "USES_SERVICE", "target": "MyApp.IProductService"}
+            ],
+            ("MyApp.IProductService", "INJECTS"): [
+                {"source": source, "relation": "INJECTS", "target": "MyApp.ProductService"}
+            ],
+            ("MyApp.ProductService", "CALLS"): [
+                {"source": source, "relation": "CALLS", "target": "MyApp.ProductService.GetTrend"}
+            ],
+        }
+        return edges.get((source, relation), [])
+
+
+def test_trace_execution_flows_follows_csharp_di_service_edges() -> None:
+    payload = trace_execution_flows(
+        _CSharpDuck(),
+        _CSharpKuzu(),
+        target="MyApp.ProductsController.GetTrend",
+        max_depth=4,
+        max_flows=4,
+    )
+
+    assert payload["flows"][0]["symbols"] == [
+        "MyApp.ProductsController.GetTrend",
+        "MyApp.IProductService",
+        "MyApp.ProductService",
+        "MyApp.ProductService.GetTrend",
+    ]
+
+
 class _Duck:
     rows = {
         "route_handler": {"qualified_name": "route_handler", "name": "route_handler", "file_path": "backend/routers/products.py", "kind": "function"},
