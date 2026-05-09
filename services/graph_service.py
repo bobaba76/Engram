@@ -185,6 +185,7 @@ def _expansion_warnings(target: str, depth: int, node_count: int, edge_count: in
 SYMBOL_CONTEXT_RELATIONS = (
     "CALLS",
     "IMPORTS",
+    "INCLUDES",
     "REFERENCES",
     "DECLARES",
     "DECLARES_IN_HEADER",
@@ -195,6 +196,8 @@ SYMBOL_CONTEXT_RELATIONS = (
     "ACCESSES",
     "FETCHES",
     "READS_FIELD",
+    "HAS_METHOD",
+    "HAS_PROPERTY",
     "EXTENDS",
     "IMPLEMENTS",
     "METHOD_OVERRIDES",

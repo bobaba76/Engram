@@ -397,6 +397,14 @@ def _parent_symbol(symbols: list[SymbolRecord], symbol: SymbolRecord) -> SymbolR
     return None
 
 
+def _member_ownership_relation(symbol: SymbolRecord) -> str:
+    if symbol.kind in {"method", "function"}:
+        return "HAS_METHOD"
+    if symbol.kind in {"field", "property"}:
+        return "HAS_PROPERTY"
+    return ""
+
+
 def build_graph(
     kuzu_store: KuzuStore,
     files: list[FileRecord],
@@ -444,6 +452,12 @@ def build_graph(
                     if target is None or target == symbol.qualified_name:
                         continue
                     kuzu_store.add_edge(symbol.qualified_name, relation, target)
+                    if relation == "IMPORTS" and str(symbol.metadata.get("language", "")).lower() in {"c", "cpp"}:
+                        kuzu_store.add_edge(symbol.qualified_name, "INCLUDES", target)
+            parent = _parent_symbol(symbols_by_file.get(file_record.path, []), symbol)
+            member_relation = _member_ownership_relation(symbol)
+            if parent is not None and member_relation:
+                kuzu_store.add_edge(parent.qualified_name, member_relation, symbol.qualified_name)
             for raw_access in symbol.metadata.get("accesses", []):
                 access_path = str(raw_access or "").strip()
                 if not access_path or "." not in access_path:

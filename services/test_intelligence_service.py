@@ -62,6 +62,32 @@ def _csharp_test_name_variants(file_path: str, qualified: str = "") -> set[str]:
     return {variant.lower() for variant in variants if variant}
 
 
+def _native_test_name_variants(file_path: str, qualified: str = "") -> set[str]:
+    normalized = str(file_path or "").replace("\\", "/")
+    stem = Path(normalized).stem
+    names = {stem}
+    if qualified:
+        tail = str(qualified).replace("::", ".").rsplit(".", 1)[-1]
+        if tail:
+            names.add(tail)
+    variants: set[str] = set()
+    for name in names:
+        if not name:
+            continue
+        variants.update(
+            {
+                name,
+                f"test_{name}",
+                f"{name}_test",
+                f"{name}_tests",
+                f"{name}Test",
+                f"{name}Tests",
+                f"{name}_spec",
+            }
+        )
+    return {variant.lower() for variant in variants if variant}
+
+
 def _rank_tests(target_tokens: set[str], rows: list[dict[str, object]], limit: int) -> list[dict[str, object]]:
     ranked = []
     for row in rows:
@@ -97,6 +123,36 @@ def _csharp_convention_tests(duckdb_store: DuckDBStore, target_files: list[str],
                 "score": 9,
                 "token_overlap": 2,
                 "why_relevant": "C# test naming convention match",
+            }
+        )
+    return sorted(mapped, key=lambda item: str(item["file_path"]))
+
+
+def _native_convention_tests(duckdb_store: DuckDBStore, target_files: list[str], target_symbols: list[str]) -> list[dict[str, object]]:
+    indexed_paths = _indexed_test_paths(duckdb_store)
+    if not indexed_paths:
+        return []
+    variants: set[str] = set()
+    for index, file_path in enumerate(target_files):
+        if not str(file_path).lower().endswith((".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx")):
+            continue
+        variants.update(_native_test_name_variants(file_path, target_symbols[index] if index < len(target_symbols) else ""))
+    mapped: list[dict[str, object]] = []
+    for path in indexed_paths:
+        if not path.lower().endswith((".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx")):
+            continue
+        stem = Path(path).stem.lower()
+        if stem not in variants:
+            continue
+        mapped.append(
+            {
+                "file_path": path,
+                "name": Path(path).stem,
+                "qualified_name": Path(path).stem,
+                "kind": "test_file",
+                "score": 8,
+                "token_overlap": 2,
+                "why_relevant": "C/C++ test naming convention match",
             }
         )
     return sorted(mapped, key=lambda item: str(item["file_path"]))
@@ -175,9 +231,10 @@ def find_tests_for_target(duckdb_store: DuckDBStore, target: str, limit: int = 1
             test_symbols.append({"file_path": path, "name": Path(path).name, "qualified_name": Path(path).stem, "kind": "test_file"})
     mapped_tests = _mapped_tests_for_seed(duckdb_store, [target, *target_files, *target_symbols])
     csharp_tests = _csharp_convention_tests(duckdb_store, target_files, target_symbols)
+    native_tests = _native_convention_tests(duckdb_store, target_files, target_symbols)
     ranked_tests = _keep_relevant_tests(_rank_tests(seed_tokens, test_symbols, limit=limit), fallback_limit=0)
     tests_by_file: dict[str, dict[str, object]] = {}
-    for item in [*mapped_tests, *csharp_tests, *ranked_tests]:
+    for item in [*mapped_tests, *csharp_tests, *native_tests, *ranked_tests]:
         file_path = str(item.get("file_path", "") or item.get("file", "") or "")
         if file_path and file_path not in tests_by_file:
             tests_by_file[file_path] = item

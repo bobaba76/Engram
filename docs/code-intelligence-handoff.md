@@ -29,6 +29,8 @@ Completed and validated:
 - response-shape extraction and shape checking
 - nested frontend field reads, including array items and Recharts `dataKey`
 - graph-backed `FETCHES` and `READS_FIELD` contract impact
+- graph-backed C/C++ `INCLUDES` impact
+- explicit OO member ownership through `HAS_METHOD` and `HAS_PROPERTY`
 - `field_impact` lookup
 - route-aware `api_impact`
 - changed-route and affected-consumer reporting in change reports
@@ -145,6 +147,7 @@ Current graph/context support includes:
 
 - `CALLS`
 - `IMPORTS`
+- `INCLUDES`
 - `REFERENCES`
 - `DECLARES`
 - `ASSOCIATED_WITH`
@@ -155,6 +158,8 @@ Current graph/context support includes:
 - `METHOD_IMPLEMENTS`
 - `FETCHES`
 - `READS_FIELD`
+- `HAS_METHOD`
+- `HAS_PROPERTY`
 
 Symbol context now exposes:
 
@@ -386,12 +391,16 @@ Current support:
 - first-pass native build-context discovery from `compile_commands.json`, CMake, Make, Visual Studio solution/project markers
 - parser and index-health visibility for build context confidence, include dirs, defines, standards, compilers, and targets
 - explicit native source/header graph relations: `DECLARES_IN_HEADER` and `DEFINES_IMPLEMENTATION`
+- explicit native include graph relation: `INCLUDES`
 - native header changes are treated as high-risk public/native surface changes in git-aware reports
+- native build target/config and exported API/ABI files are treated as high-risk in git-aware reports
+- C/C++ test suggestions understand common `test_thing.cpp`, `thing_test.cpp`, and related naming conventions
 - symbols, includes/import-like metadata, references, calls, and chunks depending on parser confidence
 
 Current limitation:
 
 - build-context discovery exists, but C/C++ graph quality still needs deeper target ownership, source/header pairing, callback handling, and ABI-aware impact before it reaches Python/React workflow depth.
+- C/C++ graph quality is now useful for include/header blast radius, but still needs deeper target ownership, callback handling, and ABI-aware impact before it reaches Python/React workflow depth.
 
 ### C# Current Support
 
@@ -443,7 +452,7 @@ Why:
 
 ### 2. Source/Header Pairing
 
-First-pass graph pairing is implemented for matching native header and implementation symbols.
+First-pass graph pairing and include blast-radius support are implemented for matching native header and implementation symbols.
 
 Implemented:
 
@@ -451,6 +460,7 @@ Implemented:
 - link declarations to implementations
 - add `DECLARES_IN_HEADER`
 - add `DEFINES_IMPLEMENTATION`
+- add `INCLUDES` for native include/import blast radius
 - surface those relations through graph/symbol context
 
 Still worth doing:
@@ -459,12 +469,12 @@ Still worth doing:
 - classify high fan-in headers
 - make parser qualified names robust enough to avoid declaration/definition symbol collisions in every C/C++ style
 
-Potential relations:
+Implemented/target relations:
 
 - `DECLARES`
 - `DEFINES_IMPLEMENTATION`
 - `DECLARES_IN_HEADER`
-- `INCLUDES_HEADER`
+- `INCLUDES`
 - `PUBLIC_API_HEADER`
 
 ### 3. Semantic Call Graph
@@ -502,17 +512,26 @@ Implement terminal detection for:
 
 ### 5. C/C++ Change Reports
 
-Add C/C++-specific risk and blast radius:
+First-pass C/C++-specific risk and blast radius is implemented.
+
+Implemented:
 
 - changed public header
+- changed native build target/config
+- changed exported API/ABI map-style files
+- include/header graph blast radius through `INCLUDES`
+- native test naming recommendations
+
+Still worth doing:
+
 - changed exported function
 - changed struct/class layout
 - changed enum/typedef
 - changed public macro
 - changed virtual interface
-- high fan-in include
-- build target ownership
+- high fan-in include scoring from graph fan-in
 - ABI risk
+- build target ownership
 
 Desired output:
 

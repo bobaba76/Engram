@@ -182,7 +182,26 @@ def test_build_graph_adds_inheritance_and_method_override_edges() -> None:
     build_graph(kuzu, files, symbols_by_file)
 
     assert ("CustomerService", "EXTENDS", "BaseService") in kuzu.edges
+    assert ("BaseService", "HAS_METHOD", "BaseService.run") in kuzu.edges
+    assert ("CustomerService", "HAS_METHOD", "CustomerService.run") in kuzu.edges
     assert ("CustomerService.run", "METHOD_OVERRIDES", "BaseService.run") in kuzu.edges
+
+
+def test_build_graph_adds_member_property_ownership_edges() -> None:
+    files = [
+        FileRecord(path="src/ProductDto.cs", language="csharp", size_bytes=1, sha256="a", modified_time=0.0),
+    ]
+    symbols_by_file = {
+        "src/ProductDto.cs": [
+            SymbolRecord(name="ProductDto", qualified_name="MyApp.ProductDto", kind="class", start_line=1, end_line=4, signature="MyApp.ProductDto", metadata={"imports": [], "calls": [], "references": []}),
+            SymbolRecord(name="InTransitStock", qualified_name="MyApp.ProductDto.InTransitStock", kind="property", start_line=2, end_line=2, signature="int InTransitStock", metadata={"imports": [], "calls": [], "references": [], "parent_chain": ["MyApp.ProductDto"]}),
+        ],
+    }
+    kuzu = _Kuzu()
+
+    build_graph(kuzu, files, symbols_by_file)
+
+    assert ("MyApp.ProductDto", "HAS_PROPERTY", "MyApp.ProductDto.InTransitStock") in kuzu.edges
 
 
 def test_build_graph_adds_explicit_native_header_implementation_edges() -> None:
@@ -236,6 +255,42 @@ def test_build_graph_adds_explicit_native_header_implementation_edges() -> None:
 
     assert ("engine.header.run_engine", "DECLARES_IN_HEADER", "engine.source.run_engine") in kuzu.edges
     assert ("engine.source.run_engine", "DEFINES_IMPLEMENTATION", "engine.header.run_engine") in kuzu.edges
+
+
+def test_build_graph_adds_native_include_edges() -> None:
+    files = [
+        FileRecord(path="include/engine.h", language="c", size_bytes=1, sha256="a", modified_time=0.0),
+        FileRecord(path="src/app.c", language="c", size_bytes=1, sha256="b", modified_time=0.0),
+    ]
+    symbols_by_file = {
+        "include/engine.h": [
+            SymbolRecord(
+                name="run_engine",
+                qualified_name="run_engine",
+                kind="function",
+                start_line=1,
+                end_line=1,
+                signature="run_engine(void)",
+                metadata={"imports": [], "calls": [], "references": [], "language": "c"},
+            )
+        ],
+        "src/app.c": [
+            SymbolRecord(
+                name="main",
+                qualified_name="main",
+                kind="function",
+                start_line=3,
+                end_line=5,
+                signature="main(void)",
+                metadata={"imports": ["engine.h", "run_engine"], "calls": ["run_engine"], "references": [], "language": "c"},
+            )
+        ],
+    }
+    kuzu = _Kuzu()
+
+    build_graph(kuzu, files, symbols_by_file)
+
+    assert ("main", "INCLUDES", "run_engine") in kuzu.edges
 
 
 def test_build_graph_adds_csharp_dependency_injection_edges() -> None:
