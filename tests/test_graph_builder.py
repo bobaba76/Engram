@@ -238,6 +238,42 @@ def test_build_graph_adds_explicit_native_header_implementation_edges() -> None:
     assert ("engine.source.run_engine", "DEFINES_IMPLEMENTATION", "engine.header.run_engine") in kuzu.edges
 
 
+def test_build_graph_adds_csharp_dependency_injection_edges() -> None:
+    files = [
+        FileRecord(path="Program.cs", language="csharp", size_bytes=1, sha256="a", modified_time=0.0),
+        FileRecord(path="Services.cs", language="csharp", size_bytes=1, sha256="b", modified_time=0.0),
+    ]
+    symbols_by_file = {
+        "Program.cs": [
+            SymbolRecord(
+                name="dependency_injection",
+                qualified_name="dependency_injection",
+                kind="module",
+                start_line=1,
+                end_line=3,
+                signature="dependency_injection",
+                metadata={
+                    "imports": [],
+                    "calls": [],
+                    "references": [],
+                    "di_registrations": [
+                        {"service": "IProductService", "implementation": "ProductService", "lifetime": "scoped"}
+                    ],
+                },
+            )
+        ],
+        "Services.cs": [
+            SymbolRecord(name="IProductService", qualified_name="MyApp.IProductService", kind="interface", start_line=1, end_line=2, signature="MyApp.IProductService", metadata={"imports": [], "calls": [], "references": []}),
+            SymbolRecord(name="ProductService", qualified_name="MyApp.ProductService", kind="class", start_line=4, end_line=8, signature="MyApp.ProductService", metadata={"imports": [], "calls": [], "references": []}),
+        ],
+    }
+    kuzu = _Kuzu()
+
+    build_graph(kuzu, files, symbols_by_file)
+
+    assert ("MyApp.IProductService", "INJECTS", "MyApp.ProductService") in kuzu.edges
+
+
 def test_build_graph_prefers_associated_file_for_duplicate_import_names() -> None:
     files = [
         FileRecord(path="src/hooks/useCustomer.ts", language="typescript", size_bytes=1, sha256="a", modified_time=0.0),

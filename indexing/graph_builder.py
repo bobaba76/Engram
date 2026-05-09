@@ -473,6 +473,37 @@ def build_graph(
                         continue
                     kuzu_store.add_edge(symbol.qualified_name, relation, target)
                     inheritance_edges.append((symbol.qualified_name, relation, target))
+            for registration in symbol.metadata.get("di_registrations", []):
+                if not isinstance(registration, dict):
+                    continue
+                service = str(registration.get("service", "") or "")
+                implementation = str(registration.get("implementation", "") or "")
+                service_target = _resolve_symbol_target(
+                    service,
+                    current_symbol=symbol,
+                    file_path=file_record.path,
+                    symbols_by_file=symbols_by_file,
+                    symbols_by_name=symbols_by_name,
+                    file_symbol_names=file_symbol_names,
+                    file_name_candidates=file_name_candidates,
+                    project_file_symbols=project_file_symbols,
+                    file_associations=file_associations,
+                    relation="REFERENCES",
+                )
+                implementation_target = _resolve_symbol_target(
+                    implementation,
+                    current_symbol=symbol,
+                    file_path=file_record.path,
+                    symbols_by_file=symbols_by_file,
+                    symbols_by_name=symbols_by_name,
+                    file_symbol_names=file_symbol_names,
+                    file_name_candidates=file_name_candidates,
+                    project_file_symbols=project_file_symbols,
+                    file_associations=file_associations,
+                    relation="REFERENCES",
+                )
+                if service_target and implementation_target and service_target != implementation_target:
+                    kuzu_store.add_edge(service_target, "INJECTS", implementation_target)
         if progress_callback is not None and _should_log_index(index, len(files)):
             progress_callback(f"graph edge progress: {index}/{len(files)} files ({file_record.path})")
     for child, relation, parent in inheritance_edges:

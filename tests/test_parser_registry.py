@@ -225,3 +225,25 @@ def test_typescript_parser_tracks_namespace_reexport_alias(tmp_path: Path) -> No
     assert re_exports[0]["namespace_export"] is True
     assert re_exports[0]["aliases"]["CustomerHooks"] == "__namespace__"
     assert "CustomerHooks" in export_symbol.metadata.get("export_names", [])
+
+
+def test_csharp_parser_tracks_dependency_injection_registrations(tmp_path: Path) -> None:
+    source = tmp_path / "Program.cs"
+    source.write_text(
+        "var builder = WebApplication.CreateBuilder(args);\n"
+        "builder.Services.AddScoped<IProductService, ProductService>();\n"
+        "builder.Services.AddSingleton<IClock, SystemClock>();\n",
+        encoding="utf-8",
+    )
+
+    symbols, status = extract_symbols_with_status(source)
+    di_symbol = next(symbol for symbol in symbols if symbol.name == "dependency_injection")
+
+    assert status["language"] == "csharp"
+    assert {
+        (item["service"], item["implementation"], item["lifetime"])
+        for item in di_symbol.metadata.get("di_registrations", [])
+    } == {
+        ("IProductService", "ProductService", "scoped"),
+        ("IClock", "SystemClock", "singleton"),
+    }

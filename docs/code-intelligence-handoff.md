@@ -403,10 +403,12 @@ Current support:
 - first-pass ASP.NET route extraction for controller attributes and minimal APIs
 - route map/API impact compatibility for C# handlers
 - first-pass C# DTO response-shape extraction from records/classes and `ActionResult<T>`
+- first-pass dependency-injection registrations from `AddScoped`, `AddTransient`, and `AddSingleton`
+- graph `INJECTS` edges from registered service/interface to implementation
 
 Current limitation:
 
-- dependency-injection graph and full controller/service/repository flow intelligence are not yet implemented deeply.
+- full controller/service/repository flow intelligence is not yet implemented deeply.
 
 ## C/C++ Workflow Roadmap
 
@@ -565,21 +567,23 @@ Use this for:
 
 ### 3. Dependency Injection Graph
 
-Implement:
+First-pass DI graph extraction is implemented.
+
+Implemented:
 
 - `AddScoped`
 - `AddTransient`
 - `AddSingleton`
 - interface-to-implementation mappings
+- `INJECTS` graph relation
+
+Still worth doing:
+
 - factory registrations
+- open generic registrations
 - hosted services
-
-Use DI edges to improve:
-
-- caller/callee graph
-- process tracing
-- impact analysis
-- risk scoring
+- constructor parameter to DI implementation resolution
+- use DI edges in process tracing, impact analysis, and risk scoring more deeply
 
 ### 4. Controller/Service/Repository Flows
 
