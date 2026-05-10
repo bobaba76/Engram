@@ -895,6 +895,49 @@ def test_detect_changes_surfaces_native_build_target_and_abi_symbol(monkeypatch,
     assert payload["changed_symbols"][0]["native_build_target"] == "engine"
 
 
+def test_detect_changes_surfaces_native_exported_symbol_risk(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "include" / "engine.h"
+    source.parent.mkdir()
+    source.write_text("ENGINE_API int run_engine(void);\n", encoding="utf-8")
+    diff_text = "\n".join(
+        [
+            "diff --git a/include/engine.h b/include/engine.h",
+            "+++ b/include/engine.h",
+            "@@ -1 +1 @@",
+            "+ENGINE_API int run_engine(void);",
+        ]
+    )
+    monkeypatch.setattr("services.detect_changes_service._diff_output", lambda repo_root, scope="unstaged", base_ref=None: diff_text)
+    monkeypatch.setattr("services.detect_changes_service._run_git", lambda repo_root, args: ".git")
+    monkeypatch.setattr("services.detect_changes_service._route_change_summary", lambda *args, **kwargs: {})
+    monkeypatch.setattr("services.detect_changes_service._process_change_summary", lambda *args, **kwargs: {})
+
+    class _Duck:
+        def fetch_symbols_for_file(self, file_path):
+            return [
+                {
+                    "name": "run_engine",
+                    "qualified_name": "run_engine",
+                    "kind": "function",
+                    "file_path": file_path,
+                    "start_line": 1,
+                    "end_line": 1,
+                    "metadata_json": '{"is_exported": true, "abi_surface": "exported_function"}',
+                }
+            ]
+
+    class _Kuzu:
+        def get_impacted_files(self, touched_files):
+            return set(touched_files)
+
+    payload = detect_changes(tmp_path, _Duck(), _Kuzu())
+    row = payload["risk_by_file"][0]
+
+    assert row["risk"] == "HIGH"
+    assert "native exported symbol" in row["risk_factors"]
+    assert "native ABI surface kind(s): exported_function" in row["risk_factors"]
+
+
 def test_detect_changes_marks_csharp_controller_as_high_risk(monkeypatch, tmp_path: Path) -> None:
     source = tmp_path / "backend" / "Controllers" / "ProductsController.cs"
     source.parent.mkdir(parents=True)

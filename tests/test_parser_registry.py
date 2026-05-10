@@ -264,3 +264,22 @@ def test_csharp_parser_tracks_constructor_dependencies(tmp_path: Path) -> None:
     controller = next(symbol for symbol in symbols if symbol.name == "ProductsController")
 
     assert controller.metadata.get("constructor_dependencies") == ["IProductService", "IClock"]
+
+
+def test_c_parser_marks_exported_symbols_and_abi_surface(tmp_path: Path) -> None:
+    source = tmp_path / "engine.h"
+    source.write_text(
+        "#define ENGINE_API __declspec(dllexport)\n"
+        "typedef struct EngineConfig { int mode; } EngineConfig;\n"
+        "ENGINE_API int run_engine(EngineConfig config);\n",
+        encoding="utf-8",
+    )
+
+    symbols, status = extract_symbols_with_status(source)
+    run_engine = next(symbol for symbol in symbols if symbol.name == "run_engine")
+    engine_config = next(symbol for symbol in symbols if symbol.name == "EngineConfig")
+
+    assert status["language"] == "c"
+    assert run_engine.metadata.get("is_exported") is True
+    assert run_engine.metadata.get("abi_surface") == "exported_function"
+    assert engine_config.metadata.get("abi_surface") == "layout"
