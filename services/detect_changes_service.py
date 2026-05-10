@@ -155,6 +155,15 @@ def _symbol_risk_hints(file_path: str, symbols: list[dict[str, object]]) -> list
     native_public_kinds = {"type", "typedef", "class", "macro", "constant"}
     if is_native_header and any(str(symbol.get("kind", "")).lower() in native_public_kinds for symbol in symbols):
         hints.append("native ABI/layout surface symbol")
+    if any(bool(symbol.get("metadata", {}).get("is_exported")) for symbol in symbols if isinstance(symbol.get("metadata", {}), dict)):
+        hints.append("native exported symbol")
+    abi_surfaces = sorted({
+        str(symbol.get("metadata", {}).get("abi_surface", "") or "")
+        for symbol in symbols
+        if isinstance(symbol.get("metadata", {}), dict) and str(symbol.get("metadata", {}).get("abi_surface", "") or "")
+    })
+    if abi_surfaces:
+        hints.append(f"native ABI surface kind(s): {', '.join(abi_surfaces[:3])}")
     native_targets = sorted({str(symbol.get("native_build_target", "") or "") for symbol in symbols if str(symbol.get("native_build_target", "") or "")})
     if native_targets:
         hints.append(f"native build target(s): {', '.join(native_targets[:3])}")
@@ -224,7 +233,7 @@ def _risk_by_file(changed_files: list[str], changed_symbols: list[dict[str, obje
         file_symbols = symbols_by_file.get(file_path, [])
         risk_factors = [*_path_risk_hints(file_path), *_symbol_risk_hints(file_path, file_symbols)]
         file_risk = _file_risk(file_path, len(file_symbols), file_path in impacted_set)
-        if any("native ABI/layout" in factor for factor in risk_factors):
+        if any("native ABI/layout" in factor or "native exported symbol" in factor for factor in risk_factors):
             file_risk = "HIGH"
         rows.append(
             {

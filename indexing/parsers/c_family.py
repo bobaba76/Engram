@@ -14,12 +14,13 @@ from models.entity_models import SymbolRecord
 C_INCLUDE_PATTERN = re.compile(r"^\s*#include\s+[<\"](?P<module>[^>\"]+)[>\"]", re.MULTILINE)
 C_DEFINE_PATTERN = re.compile(r"^\s*#define\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b(?P<body>.*)$", re.MULTILINE)
 C_REFERENCE_PATTERN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
-C_FUNCTION_PATTERN = re.compile(r"^\s*(?:static\s+|inline\s+|extern\s+|const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+[A-Za-z_][A-Za-z0-9_]*\s+|enum\s+[A-Za-z_][A-Za-z0-9_]*\s+|union\s+[A-Za-z_][A-Za-z0-9_]*\s+|[A-Za-z_][A-Za-z0-9_\*\s]+\s+)+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{", re.MULTILINE)
-C_FUNCTION_DECL_PATTERN = re.compile(r"^\s*(?:extern\s+|static\s+|inline\s+|const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+[A-Za-z_][A-Za-z0-9_]*\s+|enum\s+[A-Za-z_][A-Za-z0-9_]*\s+|union\s+[A-Za-z_][A-Za-z0-9_]*\s+|[A-Za-z_][A-Za-z0-9_\*\s]+\s+)+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*;", re.MULTILINE)
+C_FUNCTION_PATTERN = re.compile(r"^\s*(?:__declspec\s*\([^)]+\)\s+|__attribute__\s*\(\([^)]*\)\)\s+|[A-Z][A-Z0-9_]*(?:_API|_EXPORTS?|_PUBLIC)\s+|static\s+|inline\s+|extern\s+|const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+[A-Za-z_][A-Za-z0-9_]*\s+|enum\s+[A-Za-z_][A-Za-z0-9_]*\s+|union\s+[A-Za-z_][A-Za-z0-9_]*\s+|[A-Za-z_][A-Za-z0-9_\*\s]+\s+)+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{", re.MULTILINE)
+C_FUNCTION_DECL_PATTERN = re.compile(r"^\s*(?:__declspec\s*\([^)]+\)\s+|__attribute__\s*\(\([^)]*\)\)\s+|[A-Z][A-Z0-9_]*(?:_API|_EXPORTS?|_PUBLIC)\s+|extern\s+|static\s+|inline\s+|const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+[A-Za-z_][A-Za-z0-9_]*\s+|enum\s+[A-Za-z_][A-Za-z0-9_]*\s+|union\s+[A-Za-z_][A-Za-z0-9_]*\s+|[A-Za-z_][A-Za-z0-9_\*\s]+\s+)+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*;", re.MULTILINE)
 C_TYPE_PATTERN = re.compile(r"^\s*(?:typedef\s+)?(?:struct|enum|union|class)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
 C_TYPEDEF_ALIAS_PATTERN = re.compile(r"^\s*typedef\s+(?:[^;]*?\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;", re.MULTILINE)
 C_ENUM_BLOCK_PATTERN = re.compile(r"enum\s+(?P<enum_name>[A-Za-z_][A-Za-z0-9_]*)?\s*\{(?P<body>.*?)\}\s*(?P<alias>[A-Za-z_][A-Za-z0-9_]*)?\s*;", re.DOTALL)
 C_ENUM_CONSTANT_PATTERN = re.compile(r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b\s*(?:=\s*[^,}]+)?(?:,|$)")
+EXPORT_MARKER_PATTERN = re.compile(r"\b(__declspec\s*\(\s*dllexport\s*\)|__attribute__\s*\(\(\s*visibility\s*\(\s*['\"]default['\"]\s*\)\s*\)\)|[A-Z][A-Z0-9_]*(?:_API|_EXPORTS?|_PUBLIC))\b")
 
 GENERIC_REFERENCE_TOKENS = {
     "bool",
@@ -122,6 +123,40 @@ def _c_symbol_metadata(file_path: Path, language_name: str, imports: list[str], 
     }
 
 
+def _native_export_markers(text: str) -> list[str]:
+    markers: list[str] = []
+    for match in EXPORT_MARKER_PATTERN.finditer(text):
+        marker = re.sub(r"\s+", " ", match.group(1)).strip()
+        if marker and marker not in markers:
+            markers.append(marker)
+    return markers
+
+
+def _native_abi_surface_kind(symbol_kind: str, node_type: str, file_path: Path, is_exported: bool) -> str:
+    if not (is_exported or file_path.suffix.lower() in {".h", ".hpp", ".hh", ".hxx"}):
+        return ""
+    if symbol_kind in {"type", "typedef", "class"}:
+        return "layout"
+    if symbol_kind == "macro":
+        return "macro"
+    if symbol_kind == "constant":
+        return "enum"
+    if symbol_kind in {"function", "method"}:
+        return "exported_function" if is_exported else "public_function"
+    return ""
+
+
+def _apply_native_surface_metadata(metadata: dict[str, object], text: str, symbol_kind: str, file_path: Path) -> dict[str, object]:
+    export_markers = _native_export_markers(text)
+    if export_markers:
+        metadata["export_markers"] = export_markers
+        metadata["is_exported"] = True
+    abi_kind = _native_abi_surface_kind(symbol_kind, str(metadata.get("node_type", "")), file_path, bool(metadata.get("is_exported")))
+    if abi_kind:
+        metadata["abi_surface"] = abi_kind
+    return metadata
+
+
 def _c_family_symbol_kind(name: str, node_type: str, language_hint: str) -> str:
     if node_type in {"preproc_def", "macro_definition"}:
         return "macro"
@@ -142,7 +177,7 @@ def _c_family_symbol_kind(name: str, node_type: str, language_hint: str) -> str:
     return "type"
 
 
-def _append_c_macro_symbols(source: str, imports: list[str], symbols: list[SymbolRecord], language_name: str) -> None:
+def _append_c_macro_symbols(source: str, imports: list[str], symbols: list[SymbolRecord], language_name: str, file_path: Path) -> None:
     for match in C_DEFINE_PATTERN.finditer(source):
         name = match.group("name")
         if not name:
@@ -150,6 +185,8 @@ def _append_c_macro_symbols(source: str, imports: list[str], symbols: list[Symbo
         body = match.group("body") or ""
         line_number = _line_number_for_offset(source, match.start())
         _, references = _c_calls_and_references(body, name)
+        metadata = {"parser": "regex_macro", "language": language_name, "imports": imports, "calls": [], "references": references, "node_type": "macro_definition"}
+        _apply_native_surface_metadata(metadata, body, "macro", file_path)
         symbols.append(
             SymbolRecord(
                 name=name,
@@ -158,17 +195,19 @@ def _append_c_macro_symbols(source: str, imports: list[str], symbols: list[Symbo
                 start_line=line_number,
                 end_line=line_number,
                 signature=name,
-                metadata={"parser": "regex_macro", "language": language_name, "imports": imports, "calls": [], "references": references},
+                metadata=metadata,
             )
         )
 
 
-def _append_c_typedef_and_enum_symbols(source: str, imports: list[str], symbols: list[SymbolRecord], language_name: str) -> None:
+def _append_c_typedef_and_enum_symbols(source: str, imports: list[str], symbols: list[SymbolRecord], language_name: str, file_path: Path, build_context: dict[str, object]) -> None:
     for match in C_TYPEDEF_ALIAS_PATTERN.finditer(source):
         name = match.group("name")
         if not name:
             continue
         line_number = _line_number_for_offset(source, match.start())
+        metadata = {"parser": "regex_typedef", "language": language_name, "imports": imports, "calls": [], "references": [], "build_context": build_context, "node_type": "typedef"}
+        _apply_native_surface_metadata(metadata, match.group(0), "typedef", file_path)
         symbols.append(
             SymbolRecord(
                 name=name,
@@ -177,7 +216,7 @@ def _append_c_typedef_and_enum_symbols(source: str, imports: list[str], symbols:
                 start_line=line_number,
                 end_line=line_number,
                 signature=name,
-                metadata={"parser": "regex_typedef", "language": language_name, "imports": imports, "calls": [], "references": []},
+                metadata=metadata,
             )
         )
     for match in C_ENUM_BLOCK_PATTERN.finditer(source):
@@ -185,6 +224,8 @@ def _append_c_typedef_and_enum_symbols(source: str, imports: list[str], symbols:
         body = match.group("body") or ""
         base_line = _line_number_for_offset(source, match.start())
         if enum_name:
+            metadata = {"parser": "regex_enum", "language": language_name, "imports": imports, "calls": [], "references": [], "build_context": build_context, "node_type": "enum"}
+            _apply_native_surface_metadata(metadata, match.group(0), "type", file_path)
             symbols.append(
                 SymbolRecord(
                     name=enum_name,
@@ -193,7 +234,7 @@ def _append_c_typedef_and_enum_symbols(source: str, imports: list[str], symbols:
                     start_line=base_line,
                     end_line=_line_number_for_offset(source, match.end()),
                     signature=enum_name,
-                    metadata={"parser": "regex_enum", "language": language_name, "imports": imports, "calls": [], "references": []},
+                    metadata=metadata,
                 )
             )
         for enumerator_match in C_ENUM_CONSTANT_PATTERN.finditer(body):
@@ -201,6 +242,7 @@ def _append_c_typedef_and_enum_symbols(source: str, imports: list[str], symbols:
             if not constant_name:
                 continue
             line_number = base_line + body[:enumerator_match.start()].count("\n")
+            metadata = {"parser": "regex_enum", "language": language_name, "imports": imports, "calls": [], "references": [], "build_context": build_context, "node_type": "enum_constant", "abi_surface": "enum" if file_path.suffix.lower() in {".h", ".hpp", ".hh", ".hxx"} else ""}
             symbols.append(
                 SymbolRecord(
                     name=constant_name,
@@ -209,7 +251,7 @@ def _append_c_typedef_and_enum_symbols(source: str, imports: list[str], symbols:
                     start_line=line_number,
                     end_line=line_number,
                     signature=constant_name,
-                    metadata={"parser": "regex_enum", "language": language_name, "imports": imports, "calls": [], "references": []},
+                    metadata=metadata,
                 )
             )
 
@@ -274,13 +316,15 @@ def _extract_symbols_tree_sitter(file_path: Path, parser, language_name: str) ->
                     is_definition = node.type == "function_definition"
                     is_declaration = node.type in {"function_declarator", "declaration"} and not is_definition and body_text.strip().endswith(";")
                     qualified_name, signature = _c_qualified_name(file_path, name, body_text)
+                    symbol_kind = _c_family_symbol_kind(name, node.type, language_name)
                     metadata = _c_symbol_metadata(file_path, language_name, imports, calls, references, is_definition=is_definition, is_declaration=is_declaration, parser_name="tree_sitter", node_type=node.type)
                     metadata["build_context"] = build_context
+                    _apply_native_surface_metadata(metadata, body_text, symbol_kind, file_path)
                     symbols.append(
                         SymbolRecord(
                             name=name,
                             qualified_name=qualified_name,
-                            kind=_c_family_symbol_kind(name, node.type, language_name),
+                            kind=symbol_kind,
                             start_line=node.start_point[0] + 1,
                             end_line=node.end_point[0] + 1,
                             signature=signature,
@@ -291,8 +335,20 @@ def _extract_symbols_tree_sitter(file_path: Path, parser, language_name: str) ->
             walk(child)
 
     walk(root)
-    _append_c_macro_symbols(source, imports, symbols, language_name)
-    _append_c_typedef_and_enum_symbols(source, imports, symbols, language_name)
+    existing_names = {symbol.name for symbol in symbols}
+    for match in C_FUNCTION_DECL_PATTERN.finditer(source):
+        name = match.group("name")
+        if not name or name in existing_names:
+            continue
+        line_number = _line_number_for_offset(source, match.start())
+        declaration_text = match.group(0)
+        qualified_name, signature = _c_qualified_name(file_path, name, declaration_text)
+        metadata = _c_symbol_metadata(file_path, language_name, imports, [], [], is_declaration=True, parser_name="regex_declaration_supplement", node_type="function_declaration")
+        metadata["build_context"] = build_context
+        _apply_native_surface_metadata(metadata, declaration_text, "function", file_path)
+        symbols.append(SymbolRecord(name=name, qualified_name=qualified_name, kind="function", start_line=line_number, end_line=line_number, signature=signature, metadata=metadata))
+    _append_c_macro_symbols(source, imports, symbols, language_name, file_path)
+    _append_c_typedef_and_enum_symbols(source, imports, symbols, language_name, file_path, build_context)
     return dedupe_symbols(symbols)
 
 
@@ -309,6 +365,7 @@ def _extract_symbols_regex(file_path: Path, language_name: str) -> list[SymbolRe
             qualified_name, signature = _c_qualified_name(file_path, name, line)
             metadata = _c_symbol_metadata(file_path, language_name, imports, [], [], parser_name="regex_fallback", node_type="type")
             metadata["build_context"] = build_context
+            _apply_native_surface_metadata(metadata, line, "type", file_path)
             symbols.append(SymbolRecord(name=name, qualified_name=qualified_name, kind="type", start_line=line_number, end_line=line_number, signature=signature, metadata=metadata))
             continue
         func_match = C_FUNCTION_PATTERN.search(line)
@@ -319,6 +376,7 @@ def _extract_symbols_regex(file_path: Path, language_name: str) -> list[SymbolRe
             qualified_name, signature = _c_qualified_name(file_path, name, line)
             metadata = _c_symbol_metadata(file_path, language_name, imports, calls, references, is_definition=True, parser_name="regex_fallback", node_type="function_definition")
             metadata["build_context"] = build_context
+            _apply_native_surface_metadata(metadata, line, "function", file_path)
             symbols.append(SymbolRecord(name=name, qualified_name=qualified_name, kind="function", start_line=line_number, end_line=line_number, signature=signature, metadata=metadata))
             continue
         decl_match = C_FUNCTION_DECL_PATTERN.search(line)
@@ -327,9 +385,10 @@ def _extract_symbols_regex(file_path: Path, language_name: str) -> list[SymbolRe
             qualified_name, signature = _c_qualified_name(file_path, name, line)
             metadata = _c_symbol_metadata(file_path, language_name, imports, [], [], is_declaration=True, parser_name="regex_fallback", node_type="function_declaration")
             metadata["build_context"] = build_context
+            _apply_native_surface_metadata(metadata, line, "function", file_path)
             symbols.append(SymbolRecord(name=name, qualified_name=qualified_name, kind="function", start_line=line_number, end_line=line_number, signature=signature, metadata=metadata))
-    _append_c_macro_symbols(source, imports, symbols, language_name)
-    _append_c_typedef_and_enum_symbols(source, imports, symbols, language_name)
+    _append_c_macro_symbols(source, imports, symbols, language_name, file_path)
+    _append_c_typedef_and_enum_symbols(source, imports, symbols, language_name, file_path, build_context)
     return dedupe_symbols(symbols)
 
 
