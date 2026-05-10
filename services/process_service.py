@@ -91,6 +91,24 @@ def _is_generic_terminal(path: list[str]) -> bool:
     return terminal.rsplit(".", 1)[-1] in GENERIC_TERMINAL_NAMES
 
 
+def _symbol_boundary_role(duckdb_store: DuckDBStore, symbol_name: str) -> str:
+    row = _symbol_row(duckdb_store, symbol_name)
+    file_path = str(row.get("file_path", "") or "").replace("\\", "/").lower()
+    kind = str(row.get("kind", "") or "").lower()
+    name = str(row.get("name", "") or symbol_name.rsplit(".", 1)[-1]).lower()
+    qualified = str(row.get("qualified_name", "") or symbol_name).lower()
+    combined = " ".join([file_path, kind, name, qualified])
+    if any(token in combined for token in ("repository", "/repositories/", "dbcontext", "entityframework", "dataaccess", "/data/")):
+        return "data_access"
+    if any(token in combined for token in ("httpclient", "grpc", "restclient", "externalclient", "/clients/")):
+        return "external_io"
+    if any(token in combined for token in ("controller", "/controllers/", "/endpoints/", "/minimalapi")):
+        return "route_entrypoint"
+    if any(token in combined for token in ("service", "/services/")):
+        return "service"
+    return ""
+
+
 def _select_flows(duckdb_store: DuckDBStore, flows: list[list[str]], max_flows: int) -> list[list[str]]:
     ranked = sorted(flows, key=lambda path: _flow_priority(duckdb_store, path), reverse=True)
     focused = [path for path in ranked if not _is_generic_terminal(path)]
@@ -149,6 +167,20 @@ def _flow_risk(path: list[str], changed_steps: list[str]) -> tuple[str, list[str
     return "LOW", reasons
 
 
+def _flow_risk_with_boundaries(duckdb_store: DuckDBStore, path: list[str], changed_steps: list[str]) -> tuple[str, list[str]]:
+    risk, reasons = _flow_risk(path, changed_steps)
+    boundary_roles = [_symbol_boundary_role(duckdb_store, node) for node in path]
+    if "data_access" in boundary_roles:
+        reasons.append("flow reaches repository/data-access boundary")
+        if changed_steps and risk == "LOW":
+            risk = "MEDIUM"
+    if "external_io" in boundary_roles:
+        reasons.append("flow reaches external I/O client boundary")
+        if changed_steps and risk == "LOW":
+            risk = "MEDIUM"
+    return risk, reasons
+
+
 def _module_for_symbol(duckdb_store: DuckDBStore, symbol_name: str) -> str:
     rows = duckdb_store.fetch_symbols_for_target(symbol_name, limit=1)
     if not rows:
@@ -201,6 +233,7 @@ def _compact_flow_summaries(flow_rows: list[dict[str, object]], limit: int = 5) 
                 "entry_symbol": str(row.get("entry_symbol", "") or ""),
                 "target_symbol": str(row.get("target_symbol", "") or ""),
                 "terminal_symbol": str(row.get("terminal_symbol", "") or ""),
+                "terminal_type": str(row.get("terminal_type", "") or ""),
                 "files": row.get("files", []) if isinstance(row.get("files", []), list) else [],
                 "changed_symbols": row.get("changed_symbols", []) if isinstance(row.get("changed_symbols", []), list) else [],
             }
@@ -246,7 +279,8 @@ def trace_execution_flows(
                 continue
             module_name = _module_for_symbol(duckdb_store, flow[0])
             changed_steps = [node for node in flow if node in changed_symbol_set or node.rsplit(".", 1)[-1] in changed_symbol_set]
-            risk, risk_reasons = _flow_risk(flow, changed_steps)
+            risk, risk_reasons = _flow_risk_with_boundaries(duckdb_store, flow, changed_steps)
+            boundary_roles = [_symbol_boundary_role(duckdb_store, node) for node in flow]
             flow_rows.append(
                 {
                     "name": _flow_name(flow, module_name),
@@ -258,12 +292,16 @@ def trace_execution_flows(
                     "terminal_symbol": flow[-1] if flow else "",
                     "module": module_name,
                     "files": _flow_files(duckdb_store, flow),
+                    "entry_type": _symbol_boundary_role(duckdb_store, entrypoint),
+                    "terminal_type": _symbol_boundary_role(duckdb_store, flow[-1] if flow else ""),
+                    "boundary_roles": [role for role in boundary_roles if role],
                     "step_details": [
                         {
                             "symbol": node,
                             "file": _symbol_file(duckdb_store, node),
                             "step": step_index + 1,
                             "changed": node in changed_steps or node.rsplit(".", 1)[-1] in changed_steps,
+                            "role": _symbol_boundary_role(duckdb_store, node),
                         }
                         for step_index, node in enumerate(flow)
                     ],
@@ -287,6 +325,11 @@ def trace_execution_flows(
         symbol_name
         for row in flow_rows
         for symbol_name in row.get("symbols", [])
+        if isinstance(row, dict)
+    ])
+    terminal_types = _unique([
+        row.get("terminal_type", "")
+        for row in flow_rows
         if isinstance(row, dict)
     ])
     return {
@@ -319,6 +362,7 @@ def trace_execution_flows(
                 for file_path in top_files
                 if "/routers/" in file_path or "/routes/" in file_path or "/api/" in file_path
             ][:5],
+            "terminal_types": terminal_types,
             "max_steps": max((item["steps"] for item in flow_rows), default=0),
             "highest_risk": "HIGH" if any(item.get("risk") == "HIGH" for item in flow_rows) else "MEDIUM" if any(item.get("risk") == "MEDIUM" for item in flow_rows) else "LOW",
             "warnings": ["Target resolution is ambiguous; pass file_path or kind to narrow it."] if ambiguous else [],
