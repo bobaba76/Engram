@@ -426,6 +426,7 @@ Current support:
 - C# public route/API, DTO/contract, DI/config, and migration/schema files are risk-sensitive in git-aware reports
 - C# test suggestions understand common `.Tests` project and `ThingTests.cs` naming conventions
 - C# test suggestions prefer matching `.Tests` project ownership when source and test `.csproj` names line up
+- C# test suggestions use explicit `.csproj` `ProjectReference` metadata when available
 
 Current limitation:
 
@@ -657,6 +658,7 @@ Implemented:
 - controller/service/repository names
 - `.Tests` project/folder markers
 - source `.csproj` to matching `.Tests` project preference
+- explicit test `.csproj` `ProjectReference` to source project mapping
 - `ThingTests.cs`, `ThingTest.cs`, and `ThingSpecs.cs` naming
 
 Still worth doing:
@@ -664,7 +666,7 @@ Still worth doing:
 - xUnit/NUnit/MSTest attribute-aware test mapping
 - route name to test mapping
 - symbol-level test method ranking
-- parsing explicit `ProjectReference` metadata into test ownership where naming is insufficient
+- xUnit/NUnit/MSTest attribute-aware test method ranking
 
 ### 6. C# Risk Model
 

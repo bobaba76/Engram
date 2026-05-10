@@ -34,6 +34,9 @@ class _Duck:
     symbols = _Symbols()
     files = _Files()
 
+    def fetch_symbols_for_file(self, file_path):
+        return []
+
 
 class _Kuzu:
     pass
@@ -100,6 +103,48 @@ def test_find_tests_for_target_uses_csharp_project_test_mapping(monkeypatch) -> 
 
     assert payload["compact_summary"]["top_files"] == ["tests/Storefront.Tests/ProductServiceTests.cs"]
     assert payload["compact_results"][0]["why_relevant"] == "C# project test reference match"
+
+
+def test_find_tests_for_target_uses_explicit_csharp_project_reference(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "services.test_intelligence_service.resolve_candidates",
+        lambda duckdb_store, target="", limit=5: [
+            {
+                "symbol": {
+                    "qualified_name": "Storefront.Services.ProductService",
+                    "name": "ProductService",
+                    "file_path": "src/Storefront/Services/ProductService.cs",
+                }
+            }
+        ],
+    )
+
+    class _FilesWithExplicitProjectReference(_Files):
+        def fetch_all(self):
+            return [
+                {"path": "src/Storefront/Storefront.csproj"},
+                {"path": "src/Storefront/Services/ProductService.cs"},
+                {"path": "tests/ContractVerification.Tests/ContractVerification.Tests.csproj"},
+                {"path": "tests/ContractVerification.Tests/ProductServiceTests.cs"},
+                {"path": "tests/Other.Tests/ProductServiceTests.cs"},
+            ]
+
+    class _DuckWithExplicitProjectReference(_Duck):
+        files = _FilesWithExplicitProjectReference()
+
+        def fetch_symbols_for_file(self, file_path):
+            if file_path == "tests/ContractVerification.Tests/ContractVerification.Tests.csproj":
+                return [
+                    {
+                        "metadata_json": '{"project_references": ["../../src/Storefront/Storefront.csproj"]}',
+                    }
+                ]
+            return []
+
+    payload = find_tests_for_target(_DuckWithExplicitProjectReference(), "ProductService", limit=8)
+
+    assert payload["compact_summary"]["top_files"] == ["tests/ContractVerification.Tests/ProductServiceTests.cs"]
+    assert payload["compact_results"][0]["why_relevant"] == "C# explicit ProjectReference test match"
 
 
 def test_find_tests_for_target_uses_native_test_naming_conventions(monkeypatch) -> None:

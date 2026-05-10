@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -204,6 +205,47 @@ def _nearest_project(file_path: str, project_paths: set[str]) -> str:
     return candidates[0] if candidates else ""
 
 
+def _project_references(duckdb_store: DuckDBStore, project_path: str) -> set[str]:
+    try:
+        symbols = duckdb_store.fetch_symbols_for_file(project_path)
+    except Exception:
+        return set()
+    references: set[str] = set()
+    for symbol in symbols:
+        metadata = symbol.get("metadata") if isinstance(symbol, dict) else {}
+        if not isinstance(metadata, dict):
+            raw_json = str(symbol.get("metadata_json", "") if isinstance(symbol, dict) else "" or "").strip()
+            try:
+                metadata = json.loads(raw_json) if raw_json else {}
+            except json.JSONDecodeError:
+                metadata = {}
+        raw_refs = metadata.get("project_references", []) if isinstance(metadata, dict) else []
+        if isinstance(raw_refs, list):
+            references.update(str(item).replace("\\", "/") for item in raw_refs if str(item).strip())
+    project_dir = str(Path(project_path).parent).replace("\\", "/")
+    normalized: set[str] = set()
+    for ref in references:
+        ref_path = Path(project_dir) / ref
+        normalized.add(str(ref_path).replace("\\", "/"))
+        normalized.add(ref)
+        normalized.add(Path(ref).name)
+    return normalized
+
+
+def _project_references_source(test_project: str, source_project: str, references: set[str]) -> bool:
+    if not references:
+        return False
+    source_normalized = str(source_project).replace("\\", "/")
+    source_name = Path(source_normalized).name
+    test_dir = str(Path(test_project).parent).replace("\\", "/")
+    candidates = {
+        source_normalized,
+        source_name,
+        str(Path(test_dir) / source_normalized).replace("\\", "/"),
+    }
+    return bool(candidates & references)
+
+
 def _csharp_project_tests(duckdb_store: DuckDBStore, target_files: list[str], target_symbols: list[str]) -> list[dict[str, object]]:
     indexed_paths = _indexed_paths(duckdb_store)
     project_paths = {path for path in indexed_paths if path.lower().endswith(".csproj")}
@@ -225,7 +267,9 @@ def _csharp_project_tests(duckdb_store: DuckDBStore, target_files: list[str], ta
         variants = _csharp_test_name_variants(file_path, target_symbols[index] if index < len(target_symbols) else "")
         for test_project in test_project_paths:
             test_name = Path(test_project).stem.lower()
-            if source_name and source_name not in test_name:
+            references = _project_references(duckdb_store, test_project)
+            explicit_reference = _project_references_source(test_project, source_project, references)
+            if source_name and source_name not in test_name and not explicit_reference:
                 continue
             test_root = str(Path(test_project).parent).replace("\\", "/").rstrip("/")
             for path in sorted(indexed_paths):
@@ -240,9 +284,9 @@ def _csharp_project_tests(duckdb_store: DuckDBStore, target_files: list[str], ta
                         "name": Path(path).stem,
                         "qualified_name": Path(path).stem,
                         "kind": "test_file",
-                        "score": 10,
+                        "score": 11 if explicit_reference else 10,
                         "token_overlap": 2,
-                        "why_relevant": "C# project test reference match",
+                        "why_relevant": "C# explicit ProjectReference test match" if explicit_reference else "C# project test reference match",
                     }
                 )
     unique: dict[str, dict[str, object]] = {}
