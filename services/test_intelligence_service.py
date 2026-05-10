@@ -180,6 +180,77 @@ def _indexed_test_paths(duckdb_store: DuckDBStore) -> set[str]:
     return paths
 
 
+def _indexed_paths(duckdb_store: DuckDBStore) -> set[str]:
+    paths: set[str] = set()
+    try:
+        file_rows = duckdb_store.files.fetch_all()
+    except Exception:
+        return paths
+    for row in file_rows:
+        path = str(row.get("path", "") if isinstance(row, dict) else "")
+        if path:
+            paths.add(path.replace("\\", "/"))
+    return paths
+
+
+def _nearest_project(file_path: str, project_paths: set[str]) -> str:
+    normalized = str(file_path or "").replace("\\", "/")
+    candidates = [
+        project
+        for project in project_paths
+        if normalized.startswith(str(Path(project).parent).replace("\\", "/").rstrip("/") + "/")
+    ]
+    candidates.sort(key=lambda item: len(str(Path(item).parent).replace("\\", "/")), reverse=True)
+    return candidates[0] if candidates else ""
+
+
+def _csharp_project_tests(duckdb_store: DuckDBStore, target_files: list[str], target_symbols: list[str]) -> list[dict[str, object]]:
+    indexed_paths = _indexed_paths(duckdb_store)
+    project_paths = {path for path in indexed_paths if path.lower().endswith(".csproj")}
+    if not project_paths:
+        return []
+    mapped: list[dict[str, object]] = []
+    test_project_paths = {
+        project
+        for project in project_paths
+        if _is_test_path(project) or Path(project).stem.lower().endswith(("tests", "test", "specs"))
+    }
+    for index, file_path in enumerate(target_files):
+        if not str(file_path).lower().endswith(".cs"):
+            continue
+        source_project = _nearest_project(file_path, project_paths - test_project_paths)
+        if not source_project:
+            continue
+        source_name = Path(source_project).stem.lower()
+        variants = _csharp_test_name_variants(file_path, target_symbols[index] if index < len(target_symbols) else "")
+        for test_project in test_project_paths:
+            test_name = Path(test_project).stem.lower()
+            if source_name and source_name not in test_name:
+                continue
+            test_root = str(Path(test_project).parent).replace("\\", "/").rstrip("/")
+            for path in sorted(indexed_paths):
+                if not path.lower().endswith(".cs") or not path.startswith(test_root + "/"):
+                    continue
+                stem = Path(path).stem.lower()
+                if stem not in variants:
+                    continue
+                mapped.append(
+                    {
+                        "file_path": path,
+                        "name": Path(path).stem,
+                        "qualified_name": Path(path).stem,
+                        "kind": "test_file",
+                        "score": 10,
+                        "token_overlap": 2,
+                        "why_relevant": "C# project test reference match",
+                    }
+                )
+    unique: dict[str, dict[str, object]] = {}
+    for row in mapped:
+        unique[str(row["file_path"])] = row
+    return list(unique.values())
+
+
 def _mapped_tests_for_seed(duckdb_store: DuckDBStore, seed_values: list[str]) -> list[dict[str, object]]:
     indexed_paths = _indexed_test_paths(duckdb_store)
     seed_text = " ".join(value.replace("\\", "/").lower() for value in seed_values if value)
@@ -230,11 +301,12 @@ def find_tests_for_target(duckdb_store: DuckDBStore, target: str, limit: int = 1
         if _is_test_path(path):
             test_symbols.append({"file_path": path, "name": Path(path).name, "qualified_name": Path(path).stem, "kind": "test_file"})
     mapped_tests = _mapped_tests_for_seed(duckdb_store, [target, *target_files, *target_symbols])
-    csharp_tests = _csharp_convention_tests(duckdb_store, target_files, target_symbols)
+    csharp_project_tests = _csharp_project_tests(duckdb_store, target_files, target_symbols)
+    csharp_tests = [] if csharp_project_tests else _csharp_convention_tests(duckdb_store, target_files, target_symbols)
     native_tests = _native_convention_tests(duckdb_store, target_files, target_symbols)
     ranked_tests = _keep_relevant_tests(_rank_tests(seed_tokens, test_symbols, limit=limit), fallback_limit=0)
     tests_by_file: dict[str, dict[str, object]] = {}
-    for item in [*mapped_tests, *csharp_tests, *native_tests, *ranked_tests]:
+    for item in [*mapped_tests, *csharp_project_tests, *csharp_tests, *native_tests, *ranked_tests]:
         file_path = str(item.get("file_path", "") or item.get("file", "") or "")
         if file_path and file_path not in tests_by_file:
             tests_by_file[file_path] = item
