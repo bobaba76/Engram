@@ -164,6 +164,15 @@ def _symbol_risk_hints(file_path: str, symbols: list[dict[str, object]]) -> list
     })
     if abi_surfaces:
         hints.append(f"native ABI surface kind(s): {', '.join(abi_surfaces[:3])}")
+    layout_fields = sorted({
+        field
+        for symbol in symbols
+        if isinstance(symbol.get("metadata", {}), dict)
+        for field in symbol.get("metadata", {}).get("layout_fields", [])
+        if str(field)
+    })
+    if layout_fields:
+        hints.append(f"native layout field(s): {', '.join(layout_fields[:5])}")
     native_targets = sorted({str(symbol.get("native_build_target", "") or "") for symbol in symbols if str(symbol.get("native_build_target", "") or "")})
     if native_targets:
         hints.append(f"native build target(s): {', '.join(native_targets[:3])}")

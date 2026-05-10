@@ -283,3 +283,22 @@ def test_c_parser_marks_exported_symbols_and_abi_surface(tmp_path: Path) -> None
     assert run_engine.metadata.get("is_exported") is True
     assert run_engine.metadata.get("abi_surface") == "exported_function"
     assert engine_config.metadata.get("abi_surface") == "layout"
+    assert engine_config.metadata.get("layout_fields") == ["mode"]
+
+
+def test_c_parser_tracks_public_layout_fields(tmp_path: Path) -> None:
+    source = tmp_path / "engine.h"
+    source.write_text(
+        "typedef struct EngineConfig {\n"
+        "  int mode;\n"
+        "  unsigned long flags;\n"
+        "  char name[32];\n"
+        "} EngineConfig;\n",
+        encoding="utf-8",
+    )
+
+    symbols, _ = extract_symbols_with_status(source)
+    engine_config = next(symbol for symbol in symbols if symbol.name == "EngineConfig")
+
+    assert engine_config.metadata.get("abi_surface") == "layout"
+    assert engine_config.metadata.get("layout_fields") == ["mode", "flags", "name"]

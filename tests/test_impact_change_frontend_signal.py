@@ -895,6 +895,48 @@ def test_detect_changes_surfaces_native_build_target_and_abi_symbol(monkeypatch,
     assert payload["changed_symbols"][0]["native_build_target"] == "engine"
 
 
+def test_detect_changes_surfaces_native_layout_fields(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "include" / "engine.h"
+    source.parent.mkdir()
+    source.write_text("typedef struct EngineConfig { int mode; unsigned long flags; } EngineConfig;\n", encoding="utf-8")
+    diff_text = "\n".join(
+        [
+            "diff --git a/include/engine.h b/include/engine.h",
+            "+++ b/include/engine.h",
+            "@@ -1 +1 @@",
+            "+typedef struct EngineConfig { int mode; unsigned long flags; } EngineConfig;",
+        ]
+    )
+    monkeypatch.setattr("services.detect_changes_service._diff_output", lambda repo_root, scope="unstaged", base_ref=None: diff_text)
+    monkeypatch.setattr("services.detect_changes_service._run_git", lambda repo_root, args: ".git")
+    monkeypatch.setattr("services.detect_changes_service._route_change_summary", lambda *args, **kwargs: {})
+    monkeypatch.setattr("services.detect_changes_service._process_change_summary", lambda *args, **kwargs: {})
+
+    class _Duck:
+        def fetch_symbols_for_file(self, file_path):
+            return [
+                {
+                    "name": "EngineConfig",
+                    "qualified_name": "EngineConfig",
+                    "kind": "typedef",
+                    "file_path": file_path,
+                    "start_line": 1,
+                    "end_line": 1,
+                    "metadata_json": '{"abi_surface": "layout", "layout_fields": ["mode", "flags"]}',
+                }
+            ]
+
+    class _Kuzu:
+        def get_impacted_files(self, touched_files):
+            return set(touched_files)
+
+    payload = detect_changes(tmp_path, _Duck(), _Kuzu())
+    row = payload["risk_by_file"][0]
+
+    assert row["risk"] == "HIGH"
+    assert "native layout field(s): flags, mode" in row["risk_factors"]
+
+
 def test_detect_changes_surfaces_native_exported_symbol_risk(monkeypatch, tmp_path: Path) -> None:
     source = tmp_path / "include" / "engine.h"
     source.parent.mkdir()

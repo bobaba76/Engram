@@ -21,6 +21,7 @@ C_TYPEDEF_ALIAS_PATTERN = re.compile(r"^\s*typedef\s+(?:[^;]*?\s+)?(?P<name>[A-Z
 C_ENUM_BLOCK_PATTERN = re.compile(r"enum\s+(?P<enum_name>[A-Za-z_][A-Za-z0-9_]*)?\s*\{(?P<body>.*?)\}\s*(?P<alias>[A-Za-z_][A-Za-z0-9_]*)?\s*;", re.DOTALL)
 C_ENUM_CONSTANT_PATTERN = re.compile(r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b\s*(?:=\s*[^,}]+)?(?:,|$)")
 EXPORT_MARKER_PATTERN = re.compile(r"\b(__declspec\s*\(\s*dllexport\s*\)|__attribute__\s*\(\(\s*visibility\s*\(\s*['\"]default['\"]\s*\)\s*\)\)|[A-Z][A-Z0-9_]*(?:_API|_EXPORTS?|_PUBLIC))\b")
+LAYOUT_FIELD_PATTERN = re.compile(r"^\s*(?!typedef\b)(?:const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+[A-Za-z_][A-Za-z0-9_]*\s+|enum\s+[A-Za-z_][A-Za-z0-9_]*\s+|union\s+[A-Za-z_][A-Za-z0-9_]*\s+|[A-Za-z_][A-Za-z0-9_<>\*\s]+\s+)+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]+\])?\s*(?::\s*\d+)?;", re.MULTILINE)
 
 GENERIC_REFERENCE_TOKENS = {
     "bool",
@@ -154,7 +155,23 @@ def _apply_native_surface_metadata(metadata: dict[str, object], text: str, symbo
     abi_kind = _native_abi_surface_kind(symbol_kind, str(metadata.get("node_type", "")), file_path, bool(metadata.get("is_exported")))
     if abi_kind:
         metadata["abi_surface"] = abi_kind
+    if abi_kind == "layout":
+        layout_fields = _native_layout_fields(text)
+        if layout_fields:
+            metadata["layout_fields"] = layout_fields
     return metadata
+
+
+def _native_layout_fields(text: str) -> list[str]:
+    body_match = re.search(r"\{(?P<body>[\s\S]*?)\}", text)
+    if body_match is None:
+        return []
+    fields: list[str] = []
+    for match in LAYOUT_FIELD_PATTERN.finditer(body_match.group("body")):
+        name = str(match.group("name") or "").strip()
+        if name and name not in fields:
+            fields.append(name)
+    return fields[:50]
 
 
 def _c_family_symbol_kind(name: str, node_type: str, language_hint: str) -> str:

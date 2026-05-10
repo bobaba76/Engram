@@ -399,6 +399,7 @@ Current support:
 - native build target/config and exported API/ABI files are treated as high-risk in git-aware reports
 - native build targets are surfaced on changed symbols/files when build context can identify ownership
 - public header type/typedef/class/macro/constant changes are flagged as ABI/layout surface changes
+- public native layout symbols include detected field names for struct/class/union-style blast-radius explanations
 - native export markers such as `__declspec(dllexport)`, default visibility attributes, and `*_API` macros mark exported functions/API surface
 - C/C++ test suggestions understand common `test_thing.cpp`, `thing_test.cpp`, and related naming conventions
 - symbols, includes/import-like metadata, references, calls, and chunks depending on parser confidence
@@ -531,6 +532,7 @@ Implemented:
 - changed exported API/ABI map-style files
 - changed native build target ownership
 - changed public header ABI/layout symbols
+- changed public native layout fields
 - changed exported native functions
 - include/header graph blast radius through `INCLUDES`
 - native test naming recommendations
@@ -539,7 +541,7 @@ Still worth doing:
 
 - changed exported function
 - changed enum/typedef
-- deeper struct/class field-level layout diffing
+- compare old vs new layout fields from the actual diff instead of reporting only the current field set
 - public macro value compatibility
 - changed virtual interface
 - high fan-in include scoring from graph fan-in
