@@ -7,6 +7,7 @@ class _CSharpDuck:
         "MyApp.IProductService": {"qualified_name": "MyApp.IProductService", "name": "IProductService", "file_path": "Services/IProductService.cs", "kind": "interface"},
         "MyApp.ProductService": {"qualified_name": "MyApp.ProductService", "name": "ProductService", "file_path": "Services/ProductService.cs", "kind": "class"},
         "MyApp.ProductService.GetTrend": {"qualified_name": "MyApp.ProductService.GetTrend", "name": "GetTrend", "file_path": "Services/ProductService.cs", "kind": "method"},
+        "MyApp.ProductRepository.GetTrend": {"qualified_name": "MyApp.ProductRepository.GetTrend", "name": "GetTrend", "file_path": "Repositories/ProductRepository.cs", "kind": "method"},
     }
 
     def fetch_symbols_for_target(self, target, limit=25):
@@ -28,6 +29,9 @@ class _CSharpKuzu:
             ("MyApp.ProductService", "CALLS"): [
                 {"source": source, "relation": "CALLS", "target": "MyApp.ProductService.GetTrend"}
             ],
+            ("MyApp.ProductService.GetTrend", "CALLS"): [
+                {"source": source, "relation": "CALLS", "target": "MyApp.ProductRepository.GetTrend"}
+            ],
         }
         return edges.get((source, relation), [])
 
@@ -46,7 +50,12 @@ def test_trace_execution_flows_follows_csharp_di_service_edges() -> None:
         "MyApp.IProductService",
         "MyApp.ProductService",
         "MyApp.ProductService.GetTrend",
+        "MyApp.ProductRepository.GetTrend",
     ]
+    assert payload["flows"][0]["terminal_type"] == "data_access"
+    assert payload["flows"][0]["step_details"][-1]["role"] == "data_access"
+    assert "flow reaches repository/data-access boundary" in payload["flows"][0]["risk_reasons"]
+    assert payload["compact_summary"]["terminal_types"] == ["data_access"]
 
 
 class _Duck:

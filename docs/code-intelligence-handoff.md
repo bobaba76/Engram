@@ -420,6 +420,7 @@ Current support:
 - graph `INJECTS` edges from registered service/interface to implementation
 - constructor-injected service dependencies as `USES_SERVICE` edges
 - process tracing can follow controller/method -> interface -> implementation service paths
+- process tracing classifies controller/service/repository/data-access boundaries in C# flows
 - C# public route/API, DTO/contract, DI/config, and migration/schema files are risk-sensitive in git-aware reports
 - C# test suggestions understand common `.Tests` project and `ThingTests.cs` naming conventions
 - C# test suggestions prefer matching `.Tests` project ownership when source and test `.csproj` names line up
@@ -626,10 +627,11 @@ Currently traceable:
 
 - controller/minimal API entrypoint
 - service method
+- repository/data-access terminal boundary
+- route/service/repository step roles in traced flow details
 
 Still worth doing:
 
-- repository/data access
 - database or external HTTP client
 - queue/event publisher
 - response DTO return
