@@ -69,6 +69,39 @@ def test_find_tests_for_target_uses_csharp_test_naming_conventions(monkeypatch) 
     assert payload["compact_results"][0]["why_relevant"] == "C# test naming convention match"
 
 
+def test_find_tests_for_target_uses_csharp_project_test_mapping(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "services.test_intelligence_service.resolve_candidates",
+        lambda duckdb_store, target="", limit=5: [
+            {
+                "symbol": {
+                    "qualified_name": "Storefront.Services.ProductService",
+                    "name": "ProductService",
+                    "file_path": "src/Storefront/Services/ProductService.cs",
+                }
+            }
+        ],
+    )
+
+    class _FilesWithProjectTests(_Files):
+        def fetch_all(self):
+            return [
+                {"path": "src/Storefront/Storefront.csproj"},
+                {"path": "src/Storefront/Services/ProductService.cs"},
+                {"path": "tests/Storefront.Tests/Storefront.Tests.csproj"},
+                {"path": "tests/Storefront.Tests/ProductServiceTests.cs"},
+                {"path": "tests/Other.Tests/ProductServiceTests.cs"},
+            ]
+
+    class _DuckWithProjectTests(_Duck):
+        files = _FilesWithProjectTests()
+
+    payload = find_tests_for_target(_DuckWithProjectTests(), "ProductService", limit=8)
+
+    assert payload["compact_summary"]["top_files"] == ["tests/Storefront.Tests/ProductServiceTests.cs"]
+    assert payload["compact_results"][0]["why_relevant"] == "C# project test reference match"
+
+
 def test_find_tests_for_target_uses_native_test_naming_conventions(monkeypatch) -> None:
     monkeypatch.setattr(
         "services.test_intelligence_service.resolve_candidates",
