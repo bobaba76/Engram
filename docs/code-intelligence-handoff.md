@@ -22,7 +22,7 @@ Completed and validated:
 
 - explicit git/risk scope metadata
 - per-file, per-route, and per-process risk signals
-- FastAPI, Flask, Django, and Express route extraction
+- FastAPI, Flask, Django, Express, NestJS, Spring MVC, and ASP.NET route extraction
 - frontend `apiClient`, `axios`, and `fetch` consumer extraction
 - frontend route constant support
 - API wrapper to component propagation
@@ -66,6 +66,7 @@ Coder can extract and reason about:
 - FastAPI route decorators
 - Flask route decorators
 - Django `path` / `re_path` routes
+- Spring MVC controller mappings
 - response keys from returned dictionaries
 - common Pydantic response model fields
 - nested response keys
@@ -80,6 +81,7 @@ Coder can extract and reason about:
 - imports, calls, references, and property accesses
 - direct API calls through `apiClient`, `axios`, and `fetch`
 - optional API client calls such as `apiClient?.post(...)`
+- NestJS controller routes in backend TypeScript files
 - simple route constants
 - wrapper API functions
 - wrapper-to-component consumers

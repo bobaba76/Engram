@@ -25,6 +25,10 @@ EXPRESS_ROUTE_PATTERN = re.compile(
     r"\b(?P<router>app|router|[A-Za-z_][A-Za-z0-9_]*)\.(?P<method>get|post|put|delete|patch|all)\(\s*[`'\"](?P<route>/[^`'\"]+)[`'\"]\s*,\s*(?P<handler>[A-Za-z_][A-Za-z0-9_]*)?",
     re.IGNORECASE,
 )
+NEST_CONTROLLER_PATTERN = re.compile(r"@Controller\s*\(\s*['\"](?P<prefix>[^'\"]*)['\"]\s*\)\s*(?:export\s+)?class\s+(?P<class>[A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+NEST_METHOD_PATTERN = re.compile(r"@(?P<method>Get|Post|Put|Delete|Patch)\s*\(\s*(?:['\"](?P<route>[^'\"]*)['\"])?\s*\)[\s\r\n]*(?:public\s+|private\s+|protected\s+)?(?:async\s+)?(?P<handler>[A-Za-z_][A-Za-z0-9_]*)\s*\(", re.IGNORECASE)
+SPRING_CLASS_PATTERN = re.compile(r"@(?:RestController|Controller)[\s\S]{0,500}?(?:@RequestMapping\s*\(\s*(?:value\s*=\s*)?['\"](?P<prefix>[^'\"]*)['\"]\s*\)\s*)?public\s+class\s+(?P<class>[A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+SPRING_METHOD_PATTERN = re.compile(r"@(?P<kind>GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)\s*\(\s*(?P<args>[^)]*)\)[\s\r\n]*(?:public|private|protected)?\s*(?:[A-Za-z_][A-Za-z0-9_<>,\[\]\?\s]*\s+)+(?P<handler>[A-Za-z_][A-Za-z0-9_]*)\s*\(", re.IGNORECASE)
 CSHARP_MINIMAL_API_PATTERN = re.compile(
     r"\b(?P<router>app|endpoints|group|[A-Za-z_][A-Za-z0-9_]*)\.Map(?P<method>Get|Post|Put|Delete|Patch)\(\s*\"(?P<route>/[^\"]*)\"\s*,\s*(?P<handler>[A-Za-z_][A-Za-z0-9_]*)?",
     re.IGNORECASE,
@@ -147,6 +151,74 @@ def iter_express_route_handlers(source: str) -> list[dict[str, object]]:
                 "end": match.end(),
             }
         )
+    return handlers
+
+
+def _combine_web_routes(prefix: str, route: str) -> str:
+    parts = [str(part or "").strip().strip("/") for part in (prefix, route) if str(part or "").strip().strip("/")]
+    return "/" + "/".join(parts) if parts else "/"
+
+
+def iter_nestjs_route_handlers(source: str) -> list[dict[str, object]]:
+    """Return NestJS controller routes from TypeScript backend files."""
+    handlers: list[dict[str, object]] = []
+    classes = list(NEST_CONTROLLER_PATTERN.finditer(source))
+    for index, class_match in enumerate(classes):
+        class_end = classes[index + 1].start() if index + 1 < len(classes) else len(source)
+        body = source[class_match.end():class_end]
+        prefix = class_match.group("prefix") or ""
+        for method_match in NEST_METHOD_PATTERN.finditer(body):
+            method = method_match.group("method").upper()
+            route = _combine_web_routes(prefix, method_match.group("route") or "")
+            handlers.append(
+                {
+                    "router": class_match.group("class"),
+                    "method": method,
+                    "args": method_match.group(0),
+                    "route": route,
+                    "handler": method_match.group("handler") or "",
+                    "end": class_match.end() + method_match.end(),
+                    "framework": "nestjs_controller",
+                }
+            )
+    return handlers
+
+
+def _spring_method_from_kind(kind: str, args: str) -> str:
+    normalized = str(kind or "").lower()
+    if normalized == "requestmapping":
+        method_match = re.search(r"RequestMethod\.(GET|POST|PUT|DELETE|PATCH)", args, flags=re.IGNORECASE)
+        return method_match.group(1).upper() if method_match else "ANY"
+    return normalized.replace("mapping", "").upper()
+
+
+def _spring_route_from_args(args: str) -> str:
+    route_match = re.search(r"(?:value\s*=\s*)?['\"](?P<route>[^'\"]*)['\"]", args)
+    return route_match.group("route") if route_match is not None else ""
+
+
+def iter_spring_route_handlers(source: str) -> list[dict[str, object]]:
+    """Return Spring MVC controller routes from Java source."""
+    handlers: list[dict[str, object]] = []
+    classes = list(SPRING_CLASS_PATTERN.finditer(source))
+    for index, class_match in enumerate(classes):
+        class_end = classes[index + 1].start() if index + 1 < len(classes) else len(source)
+        body = source[class_match.end():class_end]
+        prefix = class_match.group("prefix") or ""
+        for method_match in SPRING_METHOD_PATTERN.finditer(body):
+            args = method_match.group("args") or ""
+            route = _combine_web_routes(prefix, _spring_route_from_args(args))
+            handlers.append(
+                {
+                    "router": class_match.group("class"),
+                    "method": _spring_method_from_kind(method_match.group("kind"), args),
+                    "args": method_match.group(0),
+                    "route": route,
+                    "handler": method_match.group("handler") or "",
+                    "end": class_match.end() + method_match.end(),
+                    "framework": "spring_mvc",
+                }
+            )
     return handlers
 
 

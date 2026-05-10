@@ -203,6 +203,68 @@ def test_route_map_extracts_express_routes_from_backend_scripts(tmp_path: Path) 
     assert "metrics" in payload["routes"][0]["handlers"][0]["response_keys"]
 
 
+def test_route_map_extracts_nestjs_controller_routes(tmp_path: Path) -> None:
+    backend = tmp_path / "server" / "products.controller.ts"
+    backend.parent.mkdir(parents=True)
+    backend.write_text(
+        "@Controller('products')\n"
+        "export class ProductsController {\n"
+        "  @Get('trends')\n"
+        "  async getTrends() {\n"
+        "    return { product_code: 'A', metrics: { intransit_stock: 1 } }\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    class _FilesRepoWithNestRoute:
+        def fetch_all(self):
+            return [{"path": "server/products.controller.ts"}]
+
+    class _StoreWithNestRoute(_Store):
+        files = _FilesRepoWithNestRoute()
+
+    payload = route_map(tmp_path, _StoreWithNestRoute(), route="/products/trends")
+
+    handler = payload["routes"][0]["handlers"][0]
+    assert payload["routes"][0]["route"] == "/products/trends"
+    assert handler["method"] == "GET"
+    assert handler["handler"] == "getTrends"
+    assert handler["router"] == "ProductsController"
+    assert handler["framework"] == "nestjs_controller"
+    assert "metrics" in handler["response_keys"]
+
+
+def test_route_map_extracts_spring_mvc_routes(tmp_path: Path) -> None:
+    backend = tmp_path / "src" / "main" / "java" / "ProductsController.java"
+    backend.parent.mkdir(parents=True)
+    backend.write_text(
+        "@RestController\n"
+        "@RequestMapping(\"/api/products\")\n"
+        "public class ProductsController {\n"
+        "  @GetMapping(\"/trends\")\n"
+        "  public ProductTrendDto getTrends() { return service.getTrends(); }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    class _FilesRepoWithSpringRoute:
+        def fetch_all(self):
+            return [{"path": "src/main/java/ProductsController.java"}]
+
+    class _StoreWithSpringRoute(_Store):
+        files = _FilesRepoWithSpringRoute()
+
+    payload = route_map(tmp_path, _StoreWithSpringRoute(), route="/products/trends")
+
+    handler = payload["routes"][0]["handlers"][0]
+    assert payload["routes"][0]["route"] == "/products/trends"
+    assert handler["method"] == "GET"
+    assert handler["handler"] == "getTrends"
+    assert handler["router"] == "ProductsController"
+    assert handler["framework"] == "spring_mvc"
+
+
 def test_route_map_extracts_aspnet_controller_routes(tmp_path: Path) -> None:
     controller = tmp_path / "backend" / "Controllers" / "ProductsController.cs"
     controller.parent.mkdir(parents=True)

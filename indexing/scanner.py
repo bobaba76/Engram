@@ -22,6 +22,7 @@ SUPPORTED_EXTENSIONS = {
     ".hh": "cpp",
     ".hxx": "cpp",
     ".cs": "csharp",
+    ".java": "java",
     ".csproj": "csharp_project",
     ".sln": "csharp_solution",
     ".vcxproj": "native_project",
