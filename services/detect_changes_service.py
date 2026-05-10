@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -115,6 +116,8 @@ def _symbols_for_changed_lines(duckdb_store: DuckDBStore, file_path: str, change
         start = int(symbol.get("start_line") or 0)
         end = int(symbol.get("end_line") or start)
         if any(start <= line <= end for line in changed_lines):
+            metadata = _symbol_metadata(symbol)
+            build_context = metadata.get("build_context", {}) if isinstance(metadata.get("build_context", {}), dict) else {}
             symbols.append(
                 {
                     "qualified_name": symbol.get("qualified_name", ""),
@@ -123,9 +126,39 @@ def _symbols_for_changed_lines(duckdb_store: DuckDBStore, file_path: str, change
                     "file_path": file_path,
                     "start_line": start,
                     "end_line": end,
+                    "metadata": metadata,
+                    "native_build_target": build_context.get("target", ""),
+                    "native_build_confidence": build_context.get("confidence", ""),
                 }
             )
     return symbols
+
+
+def _symbol_metadata(symbol: dict[str, object]) -> dict[str, object]:
+    raw = symbol.get("metadata")
+    if isinstance(raw, dict):
+        return raw
+    raw_json = str(symbol.get("metadata_json", "") or "").strip()
+    if not raw_json:
+        return {}
+    try:
+        parsed = json.loads(raw_json)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _symbol_risk_hints(file_path: str, symbols: list[dict[str, object]]) -> list[str]:
+    normalized = str(file_path or "").replace("\\", "/").lower()
+    hints: list[str] = []
+    is_native_header = normalized.endswith((".h", ".hh", ".hpp", ".hxx"))
+    native_public_kinds = {"type", "typedef", "class", "macro", "constant"}
+    if is_native_header and any(str(symbol.get("kind", "")).lower() in native_public_kinds for symbol in symbols):
+        hints.append("native ABI/layout surface symbol")
+    native_targets = sorted({str(symbol.get("native_build_target", "") or "") for symbol in symbols if str(symbol.get("native_build_target", "") or "")})
+    if native_targets:
+        hints.append(f"native build target(s): {', '.join(native_targets[:3])}")
+    return hints
 
 
 def _path_risk_hints(file_path: str) -> list[str]:
@@ -164,6 +197,7 @@ def _file_risk(file_path: str, changed_symbol_count: int, impacted: bool) -> str
         "auth/security" in hint
         or "database" in hint
         or "public/native header" in hint
+        or "native ABI/layout" in hint
         or "native build target/config" in hint
         or "native exported API/ABI" in hint
         or "C# public route/API" in hint
@@ -188,13 +222,18 @@ def _risk_by_file(changed_files: list[str], changed_symbols: list[dict[str, obje
     rows = []
     for file_path in changed_files:
         file_symbols = symbols_by_file.get(file_path, [])
+        risk_factors = [*_path_risk_hints(file_path), *_symbol_risk_hints(file_path, file_symbols)]
+        file_risk = _file_risk(file_path, len(file_symbols), file_path in impacted_set)
+        if any("native ABI/layout" in factor for factor in risk_factors):
+            file_risk = "HIGH"
         rows.append(
             {
                 "file": file_path,
-                "risk": _file_risk(file_path, len(file_symbols), file_path in impacted_set),
+                "risk": file_risk,
                 "changed_symbols": len(file_symbols),
                 "impacted": file_path in impacted_set,
-                "risk_factors": _path_risk_hints(file_path),
+                "risk_factors": risk_factors,
+                "native_build_targets": sorted({str(symbol.get("native_build_target", "") or "") for symbol in file_symbols if str(symbol.get("native_build_target", "") or "")}),
                 "top_changed_symbols": [
                     symbol.get("qualified_name") or symbol.get("name") or ""
                     for symbol in file_symbols[:5]

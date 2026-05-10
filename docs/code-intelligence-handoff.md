@@ -389,11 +389,14 @@ Current support:
 - tree-sitter fallback
 - regex fallback
 - first-pass native build-context discovery from `compile_commands.json`, CMake, Make, Visual Studio solution/project markers
+- first-pass CMake `add_library` / `add_executable` target ownership when `compile_commands.json` is absent
 - parser and index-health visibility for build context confidence, include dirs, defines, standards, compilers, and targets
 - explicit native source/header graph relations: `DECLARES_IN_HEADER` and `DEFINES_IMPLEMENTATION`
 - explicit native include graph relation: `INCLUDES`
 - native header changes are treated as high-risk public/native surface changes in git-aware reports
 - native build target/config and exported API/ABI files are treated as high-risk in git-aware reports
+- native build targets are surfaced on changed symbols/files when build context can identify ownership
+- public header type/typedef/class/macro/constant changes are flagged as ABI/layout surface changes
 - C/C++ test suggestions understand common `test_thing.cpp`, `thing_test.cpp`, and related naming conventions
 - symbols, includes/import-like metadata, references, calls, and chunks depending on parser confidence
 
@@ -401,6 +404,7 @@ Current limitation:
 
 - build-context discovery exists, but C/C++ graph quality still needs deeper target ownership, source/header pairing, callback handling, and ABI-aware impact before it reaches Python/React workflow depth.
 - C/C++ graph quality is now useful for include/header blast radius, but still needs deeper target ownership, callback handling, and ABI-aware impact before it reaches Python/React workflow depth.
+- C/C++ graph quality is now useful for include/header blast radius and first-pass build target ownership, but still needs callback handling and deeper ABI-aware impact before it reaches Python/React workflow depth.
 
 ### C# Current Support
 
@@ -433,6 +437,7 @@ Implemented:
 
 - detect `compile_commands.json`
 - detect common CMake, Make, solution, and Visual Studio project markers
+- map simple CMake `add_library` and `add_executable` sources to target names
 - capture include paths
 - capture defines/macros
 - capture compiler flags
@@ -441,10 +446,9 @@ Implemented:
 
 Still worth doing:
 
-- map files to build targets more precisely
-- parse CMake targets when `compile_commands.json` lacks output metadata
-- expose build-target ownership in change reports
-- use build context to improve C/C++ risk scoring
+- map files to build targets more precisely across nested/variable-heavy CMake projects
+- parse richer CMake target sources when lists are stored in variables
+- use build target ownership for commit slicing and test selection
 
 Why:
 
@@ -519,6 +523,8 @@ Implemented:
 - changed public header
 - changed native build target/config
 - changed exported API/ABI map-style files
+- changed native build target ownership
+- changed public header ABI/layout symbols
 - include/header graph blast radius through `INCLUDES`
 - native test naming recommendations
 
@@ -531,7 +537,7 @@ Still worth doing:
 - changed virtual interface
 - high fan-in include scoring from graph fan-in
 - ABI risk
-- build target ownership
+- richer build target ownership across complex CMake/Make/Visual Studio layouts
 
 Desired output:
 

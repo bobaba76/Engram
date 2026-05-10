@@ -95,3 +95,20 @@ def test_summarize_native_build_context_reports_repo_level_confidence(tmp_path: 
     assert "APP_BUILD" in summary["defines"]
     assert "c++20" in summary["standards"]
     assert tmp_path.name in summary["targets"]
+
+
+def test_native_build_context_maps_cmake_targets_without_compile_commands(tmp_path: Path) -> None:
+    source = tmp_path / "src" / "engine.c"
+    source.parent.mkdir()
+    source.write_text("int run_engine(void) { return 1; }\n", encoding="utf-8")
+    (tmp_path / "CMakeLists.txt").write_text(
+        "add_library(engine STATIC src/engine.c include/engine.h)\n",
+        encoding="utf-8",
+    )
+
+    context = load_native_build_context(str(source))
+    summary = summarize_native_build_context(tmp_path)
+
+    assert context["confidence"] == "medium"
+    assert context["target"] == "engine"
+    assert "engine" in summary["targets"]

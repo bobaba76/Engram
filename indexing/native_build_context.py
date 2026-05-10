@@ -11,6 +11,7 @@ _BUILD_MARKERS = ("compile_commands.json", "CMakeLists.txt", "Makefile")
 _STANDARD_PATTERN = re.compile(r"(?:-std=|/std:)(?P<value>[^\s]+)")
 _DEFINE_PATTERN = re.compile(r"^(?:-D|/D)(?P<value>.+)$")
 _INCLUDE_FLAG_PATTERN = re.compile(r"^(?:-I|/I)(?P<value>.+)$")
+_CMAKE_TARGET_PATTERN = re.compile(r"\badd_(?:executable|library)\s*\(\s*(?P<target>[A-Za-z_][A-Za-z0-9_.+-]*)\s+(?P<sources>[^)]*)\)", re.IGNORECASE | re.DOTALL)
 
 
 def _candidate_roots(file_path: Path) -> list[Path]:
@@ -138,6 +139,33 @@ def _compile_entry_target(compile_entry: dict[str, object], build_root: Path) ->
     return build_root.name
 
 
+@lru_cache(maxsize=64)
+def _cmake_target_map(root: str) -> dict[str, str]:
+    root_path = Path(root)
+    cmake_file = root_path / "CMakeLists.txt"
+    if not cmake_file.exists():
+        return {}
+    try:
+        source = cmake_file.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return {}
+    mapped: dict[str, str] = {}
+    for match in _CMAKE_TARGET_PATTERN.finditer(source):
+        target = str(match.group("target") or "").strip()
+        raw_sources = str(match.group("sources") or "")
+        for token in re.split(r"[\s\r\n]+", raw_sources):
+            normalized = token.strip().strip('"').strip("'")
+            if not normalized or normalized.startswith("$") or normalized.upper() in {"STATIC", "SHARED", "MODULE", "OBJECT", "EXCLUDE_FROM_ALL"}:
+                continue
+            suffix = Path(normalized).suffix.lower()
+            if suffix not in {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh", ".hxx"}:
+                continue
+            candidate = (root_path / normalized).resolve()
+            mapped[str(candidate)] = target
+            mapped[normalized.replace("\\", "/")] = target
+    return mapped
+
+
 @lru_cache(maxsize=128)
 def load_native_build_context(file_path_str: str) -> dict[str, object]:
     file_path = Path(file_path_str).resolve()
@@ -161,6 +189,9 @@ def load_native_build_context(file_path_str: str) -> dict[str, object]:
             context["build_systems"] = build_systems
             context["project_files"] = [str(path.name) for path in list(root.glob("*.sln"))[:4] + list(root.glob("*.vcxproj"))[:8]]
             context["confidence"] = "medium"
+            cmake_target = _cmake_target_map(str(root)).get(str(file_path)) or _cmake_target_map(str(root)).get(str(file_path.relative_to(root)).replace("\\", "/")) if root in file_path.parents or root == file_path.parent else ""
+            if cmake_target and not context["target"]:
+                context["target"] = cmake_target
         compile_entry = _compile_commands_map(str(root)).get(str(file_path))
         if compile_entry:
             context["has_compile_commands"] = True
@@ -205,6 +236,7 @@ def summarize_native_build_context(repo_root: str | Path, sample_limit: int = 20
         build_roots.append(str(candidate_root).replace("\\", "/"))
         build_systems.extend(systems)
         project_files.extend(str(path.relative_to(root)).replace("\\", "/") for path in list(candidate_root.glob("*.sln"))[:4] + list(candidate_root.glob("*.vcxproj"))[:8])
+        targets.extend(_cmake_target_map(str(candidate_root)).values())
         compile_commands = candidate_root / "compile_commands.json"
         if not compile_commands.exists():
             continue
