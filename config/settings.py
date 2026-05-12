@@ -128,4 +128,5 @@ def load_settings(project_root: Path | None = None) -> RuntimeConfig:
         openrouter_api_key=openrouter_api_key,
         openrouter_site_url=os.environ.get("OPENROUTER_SITE_URL", ""),
         openrouter_app_name=os.environ.get("OPENROUTER_APP_NAME", "Coder"),
+        agents_file_enabled=_get_bool_env("CODER_AGENTS_FILE_ENABLED", True),
     )

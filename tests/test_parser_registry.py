@@ -302,3 +302,166 @@ def test_c_parser_tracks_public_layout_fields(tmp_path: Path) -> None:
 
     assert engine_config.metadata.get("abi_surface") == "layout"
     assert engine_config.metadata.get("layout_fields") == ["mode", "flags", "name"]
+
+
+def test_object_pascal_parser_extracts_units_types_routines_and_uses(tmp_path: Path) -> None:
+    source = tmp_path / "CustomerService.pas"
+    source.write_text(
+        "unit CustomerService;\n"
+        "\n"
+        "interface\n"
+        "\n"
+        "uses SysUtils, Classes;\n"
+        "\n"
+        "type\n"
+        "  TCustomerService = class\n"
+        "  public\n"
+        "    procedure LoadCustomer(Id: Integer);\n"
+        "    property Name: string read FName;\n"
+        "  end;\n"
+        "\n"
+        "implementation\n"
+        "\n"
+        "procedure TCustomerService.LoadCustomer(Id: Integer);\n"
+        "begin\n"
+        "  NormalizeCustomer(Id);\n"
+        "end;\n"
+        "\n"
+        "end.\n",
+        encoding="utf-8",
+    )
+
+    symbols, status = extract_symbols_with_status(source)
+    names = {symbol.qualified_name for symbol in symbols}
+    service = next(symbol for symbol in symbols if symbol.name == "TCustomerService")
+    implementation = next(symbol for symbol in symbols if symbol.qualified_name == "CustomerService.TCustomerService.LoadCustomer")
+
+    assert status["language"] == "object_pascal"
+    assert "CustomerService" in names
+    assert "CustomerService.TCustomerService" in names
+    assert "CustomerService.TCustomerService.LoadCustomer" in names
+    assert service.kind == "class"
+    assert service.metadata.get("imports") == ["SysUtils", "Classes"]
+    assert service.metadata.get("interface_uses") == ["SysUtils", "Classes"]
+    assert service.metadata.get("implementation_uses") == []
+    assert service.metadata.get("public_dependency_surface") is True
+    assert any(path.endswith("CustomerService.dfm") for path in service.metadata.get("source_associations", []))
+    assert implementation.metadata.get("parent") == "CustomerService.TCustomerService"
+    assert implementation.metadata.get("is_definition") is True
+    assert "NormalizeCustomer" in implementation.metadata.get("calls", [])
+
+
+def test_object_pascal_project_file_extracts_references(tmp_path: Path) -> None:
+    source = tmp_path / "CustomerApp.dproj"
+    source.write_text(
+        "<Project>\n"
+        "  <MainSource>CustomerApp.dpr</MainSource>\n"
+        "  <Filename>CustomerService.pas</Filename>\n"
+        "</Project>\n",
+        encoding="utf-8",
+    )
+
+    symbols, status = extract_symbols_with_status(source)
+    project = symbols[0]
+
+    assert status["language"] == "object_pascal_project"
+    assert project.kind == "project"
+    assert sorted(project.metadata.get("project_references", [])) == ["CustomerApp.dpr", "CustomerService.pas"]
+    assert project.metadata.get("project_ownership_surface") is True
+
+
+def test_object_pascal_parser_classifies_interface_and_implementation_uses(tmp_path: Path) -> None:
+    source = tmp_path / "Orders.pas"
+    source.write_text(
+        "unit Orders;\n"
+        "interface\n"
+        "uses SysUtils, Classes;\n"
+        "type TOrders = class end;\n"
+        "implementation\n"
+        "uses DB, Logger;\n"
+        "end.\n",
+        encoding="utf-8",
+    )
+
+    symbols, status = extract_symbols_with_status(source)
+    unit = next(symbol for symbol in symbols if symbol.name == "Orders")
+
+    assert status["interface_uses"] == ["SysUtils", "Classes"]
+    assert status["implementation_uses"] == ["DB", "Logger"]
+    assert unit.metadata.get("imports") == ["SysUtils", "Classes", "DB", "Logger"]
+    assert unit.metadata.get("public_dependency_surface") is True
+
+
+def test_object_pascal_parser_extracts_class_inheritance_and_interfaces(tmp_path: Path) -> None:
+    source = tmp_path / "Forms.pas"
+    source.write_text(
+        "unit Forms;\n"
+        "interface\n"
+        "type\n"
+        "  TBaseForm = class(TForm)\n"
+        "  end;\n"
+        "  TCustomerForm = class(TBaseForm, IPrintable, IAuditable)\n"
+        "  end;\n"
+        "implementation\n"
+        "end.\n",
+        encoding="utf-8",
+    )
+
+    symbols, _ = extract_symbols_with_status(source)
+    base = next(symbol for symbol in symbols if symbol.name == "TBaseForm")
+    child = next(symbol for symbol in symbols if symbol.name == "TCustomerForm")
+
+    assert base.metadata.get("extends") == ["TForm"]
+    assert base.metadata.get("implements") == []
+    assert child.metadata.get("extends") == ["TBaseForm"]
+    assert child.metadata.get("implements") == ["IPrintable", "IAuditable"]
+
+
+def test_object_pascal_parser_keys_class_method_declarations_to_implementations(tmp_path: Path) -> None:
+    source = tmp_path / "CustomerService.pas"
+    source.write_text(
+        "unit CustomerService;\n"
+        "interface\n"
+        "type\n"
+        "  TCustomerService = class\n"
+        "    procedure LoadCustomer;\n"
+        "  end;\n"
+        "implementation\n"
+        "procedure TCustomerService.LoadCustomer;\n"
+        "begin\n"
+        "end;\n"
+        "end.\n",
+        encoding="utf-8",
+    )
+
+    symbols, _ = extract_symbols_with_status(source)
+    declaration = next(symbol for symbol in symbols if symbol.name == "LoadCustomer" and symbol.metadata.get("is_declaration"))
+    definition = next(symbol for symbol in symbols if symbol.name == "LoadCustomer" and symbol.metadata.get("is_definition"))
+
+    assert declaration.metadata.get("parent") == "CustomerService.TCustomerService"
+    assert definition.metadata.get("parent") == "CustomerService.TCustomerService"
+    assert declaration.metadata.get("declaration_key") == "CustomerService.TCustomerService.LoadCustomer"
+    assert definition.metadata.get("declaration_key") == "CustomerService.TCustomerService.LoadCustomer"
+
+
+def test_object_pascal_parser_extracts_includes_and_conditionals(tmp_path: Path) -> None:
+    source = tmp_path / "CustomerService.pas"
+    source.write_text(
+        "unit CustomerService;\n"
+        "{$I Shared.inc}\n"
+        "{$INCLUDE VersionInfo.inc}\n"
+        "{$DEFINE ENTERPRISE}\n"
+        "{$IFDEF DEBUG}\n"
+        "interface\n"
+        "implementation\n"
+        "end.\n",
+        encoding="utf-8",
+    )
+
+    symbols, status = extract_symbols_with_status(source)
+    unit = next(symbol for symbol in symbols if symbol.name == "CustomerService")
+
+    assert status["include_files"] == ["Shared.inc", "VersionInfo.inc"]
+    assert status["conditional_symbols"] == ["DEBUG", "ENTERPRISE"]
+    assert unit.metadata["include_files"] == ["Shared.inc", "VersionInfo.inc"]
+    assert {"directive": "IFDEF", "symbol": "DEBUG"} in unit.metadata["compiler_conditionals"]

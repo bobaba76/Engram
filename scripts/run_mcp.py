@@ -13,6 +13,7 @@ if sys.platform == "win32":
 import os
 import subprocess
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -174,6 +175,10 @@ def _fast_repo_root_for_tool(selected_repo_root: Path, repo: str = "") -> Path:
     repo_text = str(repo or "").strip()
     if not repo_text:
         return selected_repo_root
+    try:
+        return resolve_indexed_repo(selected_repo_root, repo_text)
+    except ValueError:
+        pass
     explicit = Path(repo_text)
     if explicit.is_absolute() and explicit.exists():
         return explicit.resolve()
@@ -188,7 +193,26 @@ def _fast_repo_root_for_tool(selected_repo_root: Path, repo: str = "") -> Path:
 def _mcp_change_preflight_payload(repo_root: Path, scope: str, base_ref: str, changed_files: list[str], normalized_scope: str, force: bool = False) -> dict[str, object] | None:
     if not force and normalized_scope != "staged" and changed_files and len(changed_files) <= MCP_CHANGE_PREFLIGHT_FILE_LIMIT:
         return None
-    risk = "LOW" if not changed_files else "CRITICAL" if len(changed_files) >= 25 else "HIGH"
+    def risk_hints(file_path: str) -> list[str]:
+        normalized = file_path.replace("\\", "/").lower()
+        name = Path(normalized).name
+        hints: list[str] = []
+        if normalized.endswith((".s", ".asm", ".inc")):
+            hints.append("embedded/native assembly startup or include path")
+        if normalized.endswith((".mcp", ".mcw", ".mptags", ".scl", ".plt")):
+            hints.append("MPLAB embedded project/config path")
+        if normalized.endswith((".h", ".hh", ".hpp", ".hxx")):
+            hints.append("public/native header surface")
+        if name in {"global.h", "globals.h", "typedefs.h", "sysdefs.h"}:
+            hints.append("global embedded C contract header")
+        if any(token in name for token in ("trap", "isr", "interrupt", "vector", "reset")):
+            hints.append("interrupt/trap/startup path")
+        if any(token in name for token in ("uart", "flash", "init", "bootloader")):
+            hints.append("embedded peripheral/init/flash path")
+        return hints
+
+    high_risk_files = [file_path for file_path in changed_files if risk_hints(file_path)]
+    risk = "LOW" if not changed_files else "CRITICAL" if len(changed_files) >= 25 else "HIGH" if high_risk_files else "MEDIUM"
     warnings: list[str] = [
         "MCP git preflight returned a bounded partial response without spawning git; run local detect_changes service or narrow the target for full analysis."
     ]
@@ -206,8 +230,21 @@ def _mcp_change_preflight_payload(repo_root: Path, scope: str, base_ref: str, ch
         "risk_scope": "staged_index" if normalized_scope == "staged" else "comparison_range" if normalized_scope == "compare" else "staged_and_unstaged_working_tree" if normalized_scope == "all" else "unstaged_working_tree",
         "risk_applies_to": [f"{normalized_scope} changes"],
         "not_limited_to_recent_edits": normalized_scope in {"unstaged", "staged", "all"},
-        "risk_explanation": [f"{len(changed_files)} files changed", "Preflight response skipped symbol/graph traversal."],
-        "risk_by_file": [{"file": file_path, "risk": "MEDIUM", "changed_symbols": 0, "impacted": False, "risk_factors": []} for file_path in changed_files[:50]],
+        "risk_explanation": [
+            f"{len(changed_files)} files changed",
+            *([f"{len(high_risk_files)} embedded/native sensitive file(s) changed"] if high_risk_files else []),
+            "Preflight response skipped symbol/graph traversal.",
+        ],
+        "risk_by_file": [
+            {
+                "file": file_path,
+                "risk": "HIGH" if risk_hints(file_path) else "MEDIUM",
+                "changed_symbols": 0,
+                "impacted": False,
+                "risk_factors": risk_hints(file_path),
+            }
+            for file_path in changed_files[:50]
+        ],
         "changed_routes": [],
         "affected_consumers": [],
         "changed_response_shapes": [],
@@ -233,7 +270,11 @@ def _mcp_change_preflight_payload(repo_root: Path, scope: str, base_ref: str, ch
             "impacted_file_count": 0,
             "risk": risk,
             "confidence": "low" if changed_files else "medium",
-            "risk_explanation": [f"{len(changed_files)} files changed", "Preflight response skipped symbol/graph traversal."],
+            "risk_explanation": [
+                f"{len(changed_files)} files changed",
+                *([f"{len(high_risk_files)} embedded/native sensitive file(s) changed"] if high_risk_files else []),
+                "Preflight response skipped symbol/graph traversal.",
+            ],
             "top_changed_files": changed_files[:8],
             "top_changed_symbols": [],
             "top_impacted_files": [],
@@ -340,6 +381,7 @@ def main() -> int:
     manifest.setdefault("mcp_resolution_source", resolved_by)
     server = MCPServer()
     repo_context_cache: dict[Path, dict[str, Any]] = {}
+    reindex_jobs: dict[str, dict[str, Any]] = {}
     _kuzu_init_lock = threading.Lock()
     selected_repo_root = settings.repo_root.resolve()
 
@@ -410,6 +452,123 @@ def main() -> int:
                 close()
         context["kuzu_store"] = None
 
+    def _close_all_repo_contexts() -> None:
+        for cached_context in list(repo_context_cache.values()):
+            _close_repo_context(cached_context)
+        repo_context_cache.clear()
+
+    def _refresh_selected_manifest(target_root: Path, refreshed_manifest: dict[str, object]) -> None:
+        if target_root == settings.repo_root:
+            manifest.clear()
+            manifest.update(refreshed_manifest)
+
+    def _reindex_status_payload(job_id: str) -> dict[str, object]:
+        job = reindex_jobs.get(job_id)
+        if job is None:
+            return {"job_id": job_id, "status": "not_found", "ok": False}
+        process = job.get("process")
+        if isinstance(process, subprocess.Popen) and job.get("status") == "running":
+            return_code = process.poll()
+            if return_code is not None:
+                target_root = Path(str(job.get("project_root", ""))).resolve()
+                repo_settings = load_settings(target_root)
+                refreshed_manifest = ManifestStore(repo_settings.manifest_path).read_current()
+                refreshed_manifest.setdefault("mcp_resolved_repo_root", str(repo_settings.repo_root))
+                refreshed_manifest.setdefault("mcp_resolution_source", "reindex_tool_background")
+                job["return_code"] = return_code
+                job["finished_at"] = time.time()
+                job["status"] = "completed" if return_code == 0 else "failed"
+                job["manifest"] = refreshed_manifest
+                _close_all_repo_contexts()
+                _refresh_selected_manifest(target_root, refreshed_manifest)
+        stdout_path = Path(str(job.get("stdout_path", "")))
+        stderr_path = Path(str(job.get("stderr_path", "")))
+        return {
+            "job_id": job_id,
+            "status": job.get("status", "unknown"),
+            "ok": job.get("status") == "completed",
+            "project_root": job.get("project_root", ""),
+            "run_mode": job.get("run_mode", ""),
+            "pid": job.get("pid"),
+            "started_at": job.get("started_at"),
+            "finished_at": job.get("finished_at"),
+            "return_code": job.get("return_code"),
+            "command": job.get("command", []),
+            "stdout_tail": _read_log_tail(stdout_path),
+            "stderr_tail": _read_log_tail(stderr_path),
+            "manifest": job.get("manifest", {}),
+            "compact_summary": {
+                "target": job.get("project_root", ""),
+                "status": job.get("status", "unknown"),
+                "run_mode": job.get("run_mode", ""),
+                "return_code": job.get("return_code"),
+                "manifest_counts": (job.get("manifest", {}) if isinstance(job.get("manifest", {}), dict) else {}).get("counts", {}),
+            },
+        }
+
+    def _start_background_reindex(target_root: Path, run_mode: str) -> dict[str, object]:
+        normalized_mode = _normalize_run_mode(run_mode)
+        job_id = uuid.uuid4().hex[:12]
+        job_root = _reindex_job_root(job_id)
+        job_root.mkdir(parents=True, exist_ok=True)
+        stdout_path = job_root / "stdout.log"
+        stderr_path = job_root / "stderr.log"
+        command = [
+            sys.executable,
+            str(ROOT / "scripts" / "run_index.py"),
+            str(target_root.resolve()),
+            normalized_mode,
+        ]
+        _close_all_repo_contexts()
+        stdout_handle = stdout_path.open("w", encoding="utf-8", errors="replace")
+        stderr_handle = stderr_path.open("w", encoding="utf-8", errors="replace")
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creationflags,
+            )
+        finally:
+            stdout_handle.close()
+            stderr_handle.close()
+        reindex_jobs[job_id] = {
+            "job_id": job_id,
+            "status": "running",
+            "project_root": str(target_root.resolve()),
+            "run_mode": normalized_mode,
+            "command": command,
+            "pid": process.pid,
+            "process": process,
+            "started_at": time.time(),
+            "finished_at": None,
+            "return_code": None,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "manifest": {},
+        }
+        return {
+            "job_id": job_id,
+            "status": "started",
+            "ok": True,
+            "project_root": str(target_root.resolve()),
+            "run_mode": normalized_mode,
+            "pid": process.pid,
+            "status_tool": "reindex_status",
+            "compact_summary": {
+                "target": str(target_root.resolve()),
+                "status": "started",
+                "run_mode": normalized_mode,
+                "job_id": job_id,
+            },
+        }
+
     def index_status(repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
         return get_index_status(context["manifest"])
@@ -441,16 +600,17 @@ def main() -> int:
         context = _get_repo_context(repo)
         return get_run_metrics(context["duckdb_store"], run_id=run_id)
 
-    def reindex_project_tool(project_root: str = "", run_mode: str = INCREMENTAL) -> dict[str, object]:
+    def reindex_project_tool(project_root: str = "", run_mode: str = INCREMENTAL, background: bool = True) -> dict[str, object]:
         target_root = Path(project_root).resolve() if str(project_root or '').strip() else settings.repo_root
-        for cached_context in list(repo_context_cache.values()):
-            _close_repo_context(cached_context)
-        repo_context_cache.clear()
+        if background:
+            return _start_background_reindex(target_root, run_mode)
+        _close_all_repo_contexts()
         result = _index_project(target_root, run_mode=run_mode)
-        if target_root == settings.repo_root:
-            manifest.clear()
-            manifest.update(result["manifest"] if isinstance(result["manifest"], dict) else {})
+        _refresh_selected_manifest(target_root, result["manifest"] if isinstance(result["manifest"], dict) else {})
         return result
+
+    def reindex_status_tool(job_id: str) -> dict[str, object]:
+        return _reindex_status_payload(job_id)
 
     def unified_context_tool(
         target: str,
@@ -932,7 +1092,8 @@ def main() -> int:
         ("select_repo", select_repo_tool, "Select the default repo target for this MCP session."),
         ("get_recent_runs", get_recent_runs_tool, "List recent persisted index runs including parsed stage summaries."),
         ("get_run_metrics", get_run_metrics_tool, "Show parsed persisted stage metrics for a specific run ID."),
-        ("reindex_project", reindex_project_tool, "Run an incremental or full index refresh for a repository."),
+        ("reindex_project", reindex_project_tool, "Start an incremental or full index refresh for a repository. Defaults to background mode to avoid MCP client timeouts."),
+        ("reindex_status", reindex_status_tool, "Poll a background reindex job started by reindex_project."),
         ("unified_context", unified_context_tool, "Resolve an exact or near-exact target and return matches, callers/callees, dependencies, and graph neighborhood. Prefer after resolve_target for broad names."),
         ("impact_analysis", impact_analysis_tool, "Estimate upstream or downstream impact for a symbol target. Prefer exact symbols or resolved targets; broad inputs may return partial results with warnings."),
         ("graph_query", graph_query_tool, "Execute a read-only graph query against the indexed Kuzu graph."),

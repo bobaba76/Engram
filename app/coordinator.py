@@ -30,6 +30,7 @@ from reviewers.maintainability_reviewer import MaintainabilityReviewer
 from reviewers.providers import build_review_analysis_provider
 from reviewers.scheduler import build_review_jobs
 from reviewers.security_reviewer import SecurityReviewer
+from services.agents_file_service import update_agents_file
 from services.run_summary_service import generate_run_summary, write_run_reports
 from services.index_pipeline_stages import persist_chunk_records, persist_parse_records
 from storage.duckdb_store import DuckDBStore
@@ -582,6 +583,12 @@ class Coordinator:
             },
         }
         self.manifest_store.write_current(manifest)
+        self._log_progress("AGENTS.md update started")
+        agents_file_result = update_agents_file(self.settings.repo_root, enabled=self.settings.agents_file_enabled)
+        if agents_file_result.get("updated"):
+            self._log_progress(f"AGENTS.md updated: {agents_file_result.get('path')}")
+        else:
+            self._log_progress("AGENTS.md already current or disabled")
         self._log_progress("run metadata write started")
         self.duckdb.runs.upsert(
             {

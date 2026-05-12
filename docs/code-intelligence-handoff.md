@@ -18,6 +18,18 @@ The goal remains GitNexus-style workflow intelligence for IDE agents:
 
 Coder is now far beyond the original Phase 1 and Phase 2 baseline.
 
+Latest embedded-C/MPLAB live MCP smoke against `V0.99`:
+
+- `list_repos` sees `V0.99`.
+- `select_repo("V0.99")` works.
+- `index_health(repo="V0.99")` recognizes MPLAB with `native_build_context.confidence = medium`.
+- MPLAB project files are detected, including `Video Overlay.mcp`, `Video Overlay.mcw`, `Video Overlay.mptags`, `test.scl`, `VideoSync.SCL`, and `Video Overlay.plt`.
+- `get_dependencies(repo="V0.99", target="GLOBAL_H")` is capped and summarized with `inbound_total_count = 397`, `outbound_total_count = 2`, `truncated = true`, and relation counts including `IMPORTS=198`, `INCLUDES=198`, `DEFINES=1`.
+- `detect_changes(repo="V0.99", scope="unstaged")` sees the untracked C app, reports 62 changed files, 2703 indexed symbols changed, `risk = CRITICAL`, and flags 27 embedded-C sensitive files.
+- MPLAB files, global headers, device headers, init/flash/UART/trap/startup/assembly paths are risk-sensitive.
+
+The remaining live blocker was `reindex_project` timing out at the MCP client's 120s limit before publishing a new manifest. `reindex_project` now defaults to background mode and `reindex_status(job_id)` can poll completion.
+
 Completed and validated:
 
 - explicit git/risk scope metadata
@@ -231,6 +243,8 @@ Key tools for IDE agents:
 - `trace_processes`
 - `index_status`
 - `index_health`
+- `reindex_project`
+- `reindex_status`
 
 All broad tools should preserve predictable response fields where possible:
 
@@ -729,6 +743,7 @@ Prefer adding new fields over replacing existing fields.
 ## Operational Notes
 
 - Restart the MCP server after code changes; live MCP behavior reflects the running process.
+- `reindex_project` defaults to background mode; poll with `reindex_status(job_id)`.
 - Keep broad-query tools bounded and partial-friendly.
 - Preserve Windows path handling.
 - Avoid adding slow eager startup work to `scripts/run_mcp.py`.

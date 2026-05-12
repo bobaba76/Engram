@@ -14,3 +14,11 @@ def test_mcp_startup_keeps_heavy_resources_lazy() -> None:
     assert "_get_repo_context()" not in before_index_status
     assert "_get_kuzu_store()" not in before_index_status
     assert "prewarm_jina_model(" not in before_index_status
+
+
+def test_reindex_project_defaults_to_background_and_registers_status_tool() -> None:
+    source = Path("scripts/run_mcp.py").read_text(encoding="utf-8")
+
+    assert "def reindex_project_tool(project_root: str = \"\", run_mode: str = INCREMENTAL, background: bool = True)" in source
+    assert "subprocess.Popen" in source
+    assert "(\"reindex_status\", reindex_status_tool" in source

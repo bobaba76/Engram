@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 
 
+_MPLAB_PROJECT_EXTENSIONS = (".mcp", ".mcw", ".mptags", ".scl", ".plt")
 _BUILD_MARKERS = ("compile_commands.json", "CMakeLists.txt", "Makefile")
 _STANDARD_PATTERN = re.compile(r"(?:-std=|/std:)(?P<value>[^\s]+)")
 _DEFINE_PATTERN = re.compile(r"^(?:-D|/D)(?P<value>.+)$")
@@ -20,6 +21,8 @@ def _candidate_roots(file_path: Path) -> list[Path]:
         if any((parent / marker).exists() for marker in _BUILD_MARKERS):
             roots.append(parent)
         if any(parent.glob("*.sln")) or any(parent.glob("*.vcxproj")):
+            roots.append(parent)
+        if any(any(parent.glob(f"*{extension}")) for extension in _MPLAB_PROJECT_EXTENSIONS):
             roots.append(parent)
     deduped: list[Path] = []
     seen: set[Path] = set()
@@ -126,6 +129,8 @@ def _build_systems_for_root(root: Path) -> list[str]:
         build_systems.append("sln")
     if any(root.glob("*.vcxproj")):
         build_systems.append("vcxproj")
+    if any(any(root.glob(f"*{extension}")) for extension in _MPLAB_PROJECT_EXTENSIONS):
+        build_systems.append("mplab")
     return build_systems
 
 
@@ -187,7 +192,14 @@ def load_native_build_context(file_path_str: str) -> dict[str, object]:
         if build_systems:
             context["build_root"] = str(root).replace("\\", "/")
             context["build_systems"] = build_systems
-            context["project_files"] = [str(path.name) for path in list(root.glob("*.sln"))[:4] + list(root.glob("*.vcxproj"))[:8]]
+            context["project_files"] = [
+                str(path.name)
+                for path in (
+                    list(root.glob("*.sln"))[:4]
+                    + list(root.glob("*.vcxproj"))[:8]
+                    + [path for extension in _MPLAB_PROJECT_EXTENSIONS for path in list(root.glob(f"*{extension}"))[:4]]
+                )
+            ]
             context["confidence"] = "medium"
             cmake_target = _cmake_target_map(str(root)).get(str(file_path)) or _cmake_target_map(str(root)).get(str(file_path.relative_to(root)).replace("\\", "/")) if root in file_path.parents or root == file_path.parent else ""
             if cmake_target and not context["target"]:
@@ -227,6 +239,8 @@ def summarize_native_build_context(repo_root: str | Path, sample_limit: int = 20
     candidate_roots.extend(path.parent for path in root.rglob("Makefile"))
     candidate_roots.extend(path.parent for path in root.rglob("*.sln"))
     candidate_roots.extend(path.parent for path in root.rglob("*.vcxproj"))
+    for extension in _MPLAB_PROJECT_EXTENSIONS:
+        candidate_roots.extend(path.parent for path in root.rglob(f"*{extension}"))
 
     for candidate in _unique([str(path) for path in candidate_roots], limit=100):
         candidate_root = Path(candidate)
@@ -235,7 +249,14 @@ def summarize_native_build_context(repo_root: str | Path, sample_limit: int = 20
             continue
         build_roots.append(str(candidate_root).replace("\\", "/"))
         build_systems.extend(systems)
-        project_files.extend(str(path.relative_to(root)).replace("\\", "/") for path in list(candidate_root.glob("*.sln"))[:4] + list(candidate_root.glob("*.vcxproj"))[:8])
+        project_files.extend(
+            str(path.relative_to(root)).replace("\\", "/")
+            for path in (
+                list(candidate_root.glob("*.sln"))[:4]
+                + list(candidate_root.glob("*.vcxproj"))[:8]
+                + [path for extension in _MPLAB_PROJECT_EXTENSIONS for path in list(candidate_root.glob(f"*{extension}"))[:4]]
+            )
+        )
         targets.extend(_cmake_target_map(str(candidate_root)).values())
         compile_commands = candidate_root / "compile_commands.json"
         if not compile_commands.exists():

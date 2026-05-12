@@ -11,6 +11,7 @@ except ImportError:
 
 
 DELETE_BATCH_SIZE = 50
+VECTOR_DIMENSION_ERROR_MARKERS = ("FixedSizeList", "Cannot cast", "value at index 0 has length")
 
 
 def _quote_lancedb_string(value: str) -> str:
@@ -35,6 +36,11 @@ def _batched_chunk_id_predicates(chunk_ids: list[str], batch_size: int = DELETE_
             continue
         predicates.append(" OR ".join(f"chunk_id = {_quote_lancedb_string(chunk_id)}" for chunk_id in batch))
     return predicates
+
+
+def _is_vector_dimension_error(exc: Exception) -> bool:
+    message = str(exc)
+    return all(marker in message for marker in VECTOR_DIMENSION_ERROR_MARKERS)
 
 
 class VectorStore:
@@ -119,7 +125,15 @@ class VectorStore:
         if self.table is None:
             self.table = self.db.create_table("chunks", data=[row], mode="overwrite")
         else:
-            self.table.add([row])
+            try:
+                self.table.add([row])
+            except ValueError as exc:
+                if not _is_vector_dimension_error(exc):
+                    raise
+                self.db.drop_table("chunks")
+                self.table = self.db.create_table("chunks", data=[row], mode="overwrite")
+                self.embedding_cache = {}
+                self.cache_path.unlink(missing_ok=True)
 
     def add_items(self, items: list[dict[str, Any]]) -> None:
         if not items:
@@ -132,7 +146,15 @@ class VectorStore:
         if self.table is None:
             self.table = self.db.create_table("chunks", data=rows, mode="overwrite")
         else:
-            self.table.add(rows)
+            try:
+                self.table.add(rows)
+            except ValueError as exc:
+                if not _is_vector_dimension_error(exc):
+                    raise
+                self.db.drop_table("chunks")
+                self.table = self.db.create_table("chunks", data=rows, mode="overwrite")
+                self.embedding_cache = {}
+                self.cache_path.unlink(missing_ok=True)
 
     def search(self, task: str, limit: int = 5, embedding: list[float] | None = None) -> list[dict[str, Any]]:
         if self.db is not None and self.table is not None and embedding is not None:

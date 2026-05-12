@@ -36,6 +36,59 @@ def _run_git(repo_root: Path, args: list[str]) -> str:
     return completed.stdout
 
 
+def _git_top_level(repo_root: Path) -> Path:
+    output = _run_git(repo_root, ["rev-parse", "--show-toplevel"]).strip()
+    return Path(output).resolve() if output else repo_root
+
+
+def _normalize_status_path(repo_root: Path, git_top: Path, path: str) -> str:
+    direct = repo_root / path
+    if direct.exists():
+        return path
+    from_top = git_top / path
+    try:
+        return str(from_top.resolve().relative_to(repo_root.resolve())).replace("\\", "/")
+    except ValueError:
+        return path
+
+
+def _untracked_files(repo_root: Path) -> list[str]:
+    output = _run_git(repo_root, ["status", "--porcelain=v1", "-uall", "--"])
+    files: list[str] = []
+    git_top = _git_top_level(repo_root)
+    for line in output.splitlines():
+        if not line.startswith("?? "):
+            continue
+        path = line[3:].strip().strip('"').replace("\\", "/")
+        if path:
+            files.append(_normalize_status_path(repo_root, git_top, path))
+    return sorted(dict.fromkeys(files))
+
+
+def _synthetic_untracked_diff(repo_root: Path, files: list[str]) -> str:
+    parts: list[str] = []
+    for file_path in files:
+        absolute = repo_root / file_path
+        if not absolute.is_file():
+            continue
+        try:
+            line_count = len(absolute.read_text(encoding="utf-8", errors="ignore").splitlines())
+        except OSError:
+            line_count = 1
+        line_count = max(line_count, 1)
+        parts.extend(
+            [
+                f"diff --git a/{file_path} b/{file_path}",
+                "new file mode 100644",
+                "index 0000000..0000000",
+                "--- /dev/null",
+                f"+++ b/{file_path}",
+                f"@@ -0,0 +1,{line_count} @@",
+            ]
+        )
+    return "\n".join(parts)
+
+
 def _diff_output(repo_root: Path, scope: str, base_ref: str | None = None) -> str:
     normalized = scope if scope in {"unstaged", "staged", "all", "compare"} else "unstaged"
     if normalized == "staged":
@@ -43,11 +96,14 @@ def _diff_output(repo_root: Path, scope: str, base_ref: str | None = None) -> st
     if normalized == "all":
         staged = _run_git(repo_root, ["diff", "--cached", "--unified=0", "--no-color"])
         unstaged = _run_git(repo_root, ["diff", "--unified=0", "--no-color"])
-        return "\n".join(part for part in (staged, unstaged) if part.strip())
+        untracked = _synthetic_untracked_diff(repo_root, _untracked_files(repo_root))
+        return "\n".join(part for part in (staged, unstaged, untracked) if part.strip())
     if normalized == "compare":
         compare_ref = (base_ref or "HEAD").strip() or "HEAD"
         return _run_git(repo_root, ["diff", f"{compare_ref}...HEAD", "--unified=0", "--no-color"])
-    return _run_git(repo_root, ["diff", "--unified=0", "--no-color"])
+    unstaged = _run_git(repo_root, ["diff", "--unified=0", "--no-color"])
+    untracked = _synthetic_untracked_diff(repo_root, _untracked_files(repo_root))
+    return "\n".join(part for part in (unstaged, untracked) if part.strip())
 
 
 def _normalized_scope(scope: str) -> str:
@@ -176,12 +232,33 @@ def _symbol_risk_hints(file_path: str, symbols: list[dict[str, object]]) -> list
     native_targets = sorted({str(symbol.get("native_build_target", "") or "") for symbol in symbols if str(symbol.get("native_build_target", "") or "")})
     if native_targets:
         hints.append(f"native build target(s): {', '.join(native_targets[:3])}")
+    if any(bool(symbol.get("metadata", {}).get("public_dependency_surface")) for symbol in symbols if isinstance(symbol.get("metadata", {}), dict)):
+        hints.append("Object Pascal public unit dependency surface")
+    if any(bool(symbol.get("metadata", {}).get("project_ownership_surface")) for symbol in symbols if isinstance(symbol.get("metadata", {}), dict)):
+        hints.append("Object Pascal project ownership surface")
+    if any(bool(symbol.get("metadata", {}).get("include_files")) for symbol in symbols if isinstance(symbol.get("metadata", {}), dict)):
+        hints.append("Object Pascal include dependency surface")
+    if any(bool(symbol.get("metadata", {}).get("conditional_symbols")) for symbol in symbols if isinstance(symbol.get("metadata", {}), dict)):
+        hints.append("Object Pascal conditional compilation surface")
     return hints
 
 
 def _path_risk_hints(file_path: str) -> list[str]:
     normalized = str(file_path or "").replace("\\", "/").lower()
+    name = Path(normalized).name
     hints = []
+    if normalized.endswith((".s", ".asm", ".inc")):
+        hints.append("embedded/native assembly startup or include path")
+    if normalized.endswith((".mcp", ".mcw", ".mptags", ".scl", ".plt")):
+        hints.append("MPLAB embedded project/config path")
+    if re.match(r"p\d+[a-z0-9_]*\.h$", name) or name.startswith(("xc", "pic", "dspic")):
+        hints.append("device/vendor register header")
+    if name in {"global.h", "globals.h", "typedefs.h", "sysdefs.h"}:
+        hints.append("global embedded C contract header")
+    if any(token in name for token in ("trap", "isr", "interrupt", "vector", "reset")):
+        hints.append("interrupt/trap/startup path")
+    if any(token in name for token in ("uart", "flash", "init", "bootloader")):
+        hints.append("embedded peripheral/init/flash path")
     if normalized.endswith((".h", ".hh", ".hpp", ".hxx")):
         hints.append("public/native header surface")
     if normalized.endswith((".c", ".cc", ".cpp", ".cxx")):
@@ -198,6 +275,15 @@ def _path_risk_hints(file_path: str) -> list[str]:
         hints.append("C# dependency-injection/config path")
     if normalized.endswith(".cs") and any(part in normalized for part in ("/migrations/", "migration", "dbcontext")):
         hints.append("C# database/schema path")
+    if normalized.endswith((".dpr", ".dpk", ".dproj", ".groupproj", ".lpi", ".lpk")):
+        hints.append("Object Pascal project/package path")
+    if normalized.endswith((".dfm", ".lfm")):
+        hints.append("Object Pascal form/resource path")
+        hints.append("Object Pascal form event wiring path")
+    if normalized.endswith((".pas", ".pp")):
+        hints.append("Object Pascal unit/source path")
+    if normalized.endswith(".inc"):
+        hints.append("Object Pascal/global include path")
     if any(part in normalized for part in ("/auth", "/security", "/middleware")):
         hints.append("auth/security/middleware path")
     if any(part in normalized for part in ("/routers/", "/routes/", "/api/")):
@@ -214,6 +300,10 @@ def _file_risk(file_path: str, changed_symbol_count: int, impacted: bool) -> str
     if changed_symbol_count >= 8 or any(
         "auth/security" in hint
         or "database" in hint
+        or "device/vendor register header" in hint
+        or "global embedded C contract header" in hint
+        or "interrupt/trap/startup" in hint
+        or "MPLAB embedded project/config" in hint
         or "public/native header" in hint
         or "native ABI/layout" in hint
         or "native build target/config" in hint
@@ -222,6 +312,13 @@ def _file_risk(file_path: str, changed_symbol_count: int, impacted: bool) -> str
         or "C# DTO/API contract" in hint
         or "C# dependency-injection/config" in hint
         or "C# database/schema" in hint
+        or "Object Pascal project/package" in hint
+        or "Object Pascal form/resource" in hint
+        or "Object Pascal/global include" in hint
+        or "Object Pascal public unit dependency" in hint
+        or "Object Pascal project ownership" in hint
+        or "Object Pascal include dependency" in hint
+        or "Object Pascal conditional compilation" in hint
         for hint in hints
     ):
         return "HIGH"
@@ -280,6 +377,16 @@ def _risk_explanation(changed_files: list[str], changed_symbols: list[dict[str, 
         reasons.append("100+ changed symbols escalates whole-tree risk")
     if len(impacted_files) >= 50:
         reasons.append("50+ impacted files indicates broad graph blast radius")
+    embedded_files = [
+        row["file"]
+        for row in risk_by_file
+        if any(
+            str(factor).startswith(("embedded", "MPLAB", "device/vendor", "global embedded", "interrupt/trap"))
+            for factor in row.get("risk_factors", [])
+        )
+    ]
+    if embedded_files:
+        reasons.append(f"{len(embedded_files)} embedded-C sensitive file(s) changed")
     return reasons
 
 
@@ -316,8 +423,16 @@ def _weighted_risk(
     add(min(len(impacted_files) // 2, 40), f"{len(impacted_files)} graph-impacted file(s)")
     high_files = [row for row in risk_by_file if row.get("risk") == "HIGH"]
     medium_files = [row for row in risk_by_file if row.get("risk") == "MEDIUM"]
+    embedded_sensitive = [
+        row for row in risk_by_file
+        if any(
+            str(factor).startswith(("embedded", "MPLAB", "device/vendor", "global embedded", "interrupt/trap"))
+            for factor in row.get("risk_factors", [])
+        )
+    ]
     add(len(high_files) * 10, f"{len(high_files)} high-risk changed file(s)")
     add(len(medium_files) * 4, f"{len(medium_files)} medium-risk changed file(s)")
+    add(len(embedded_sensitive) * 12, f"{len(embedded_sensitive)} embedded-C sensitive changed file(s)")
     changed_routes = route_summary.get("changed_routes", []) if isinstance(route_summary.get("changed_routes", []), list) else []
     affected_consumers = route_summary.get("affected_consumers", []) if isinstance(route_summary.get("affected_consumers", []), list) else []
     shape_mismatches = route_summary.get("shape_mismatches", []) if isinstance(route_summary.get("shape_mismatches", []), list) else []

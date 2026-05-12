@@ -9,7 +9,7 @@ class GeneralReviewer(BaseReviewer):
     review_type = "general"
 
     def review(self, job: ReviewJob, file_path: Path) -> ReviewResult:
-        text = file_path.read_text(encoding="utf-8")
+        text = file_path.read_text(encoding="utf-8", errors="ignore")
         lowered = text.lower()
         findings = []
         if "todo" in lowered:
