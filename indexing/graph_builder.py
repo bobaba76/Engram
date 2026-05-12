@@ -92,7 +92,36 @@ def _normalized_signature(value: str) -> str:
     return token
 
 
+def _normalize_file_reference(value: str) -> str:
+    token = str(value or "").strip().strip("'\"")
+    if not token:
+        return ""
+    token = token.replace("\\", "/")
+    while token.startswith("./"):
+        token = token[2:]
+    return token
+
+
+def _project_reference_targets(raw_reference: str, symbols_by_file: dict[str, list[SymbolRecord]]) -> list[str]:
+    reference = _normalize_file_reference(raw_reference)
+    if not reference:
+        return []
+    basename = reference.split("/")[-1]
+    stem = basename.rsplit(".", 1)[0] if "." in basename else basename
+    matches: list[str] = []
+    for file_path, symbols in symbols_by_file.items():
+        normalized_path = _normalize_file_reference(file_path)
+        normalized_basename = normalized_path.split("/")[-1]
+        normalized_stem = normalized_basename.rsplit(".", 1)[0] if "." in normalized_basename else normalized_basename
+        if normalized_path == reference or normalized_path.endswith(f"/{reference}") or normalized_basename == basename or normalized_stem == stem:
+            matches.extend(symbol.qualified_name for symbol in symbols)
+    return matches
+
+
 def _symbol_match_key(symbol: SymbolRecord) -> tuple[str, str]:
+    declaration_key = _normalized_signature(str(symbol.metadata.get("declaration_key", "") or ""))
+    if declaration_key:
+        return _qualified_tail(declaration_key), declaration_key
     qualified = _normalized_signature(symbol.qualified_name)
     signature = _normalized_signature(symbol.signature)
     tail = _qualified_tail(qualified or symbol.name)
@@ -104,6 +133,8 @@ def _translation_unit_symbols(symbols_by_file: dict[str, list[SymbolRecord]]) ->
     for file_path, symbols in symbols_by_file.items():
         for symbol in symbols:
             translation_unit = str(symbol.metadata.get("translation_unit", "")).strip()
+            if not translation_unit and str(symbol.metadata.get("language", "")).lower() == "object_pascal":
+                translation_unit = file_path
             if translation_unit:
                 groups.setdefault(translation_unit, []).append((file_path, symbol))
     return groups
@@ -154,6 +185,15 @@ def _associated_special_target(
     associated_files = file_associations.get(file_path, set())
     if not associated_files:
         return None
+    if str(current_symbol.metadata.get("language", "")).lower() == "object_pascal_form" and relation in {"CALLS", "REFERENCES"}:
+        matches = [
+            symbol.qualified_name
+            for associated_file in associated_files
+            for symbol in symbols_by_file.get(associated_file, [])
+            if symbol.name == raw_target and symbol.kind in {"procedure", "function", "constructor", "destructor", "method"}
+        ]
+        if len(set(matches)) == 1:
+            return matches[0]
     namespace_aliases = current_symbol.metadata.get("import_aliases", {})
     if isinstance(namespace_aliases, dict) and "." in raw_target:
         namespace_name, member_name = raw_target.split(".", 1)
@@ -369,8 +409,8 @@ def _field_symbol_name(field_path: str) -> str:
 
 def _parent_symbol_name(symbol: SymbolRecord) -> str:
     parent = str(symbol.metadata.get("parent", "") or "").strip()
-    if parent and "." in symbol.qualified_name:
-        return symbol.qualified_name.rsplit(".", 1)[0]
+    if parent:
+        return parent
     parent_chain = symbol.metadata.get("parent_chain", [])
     if isinstance(parent_chain, list) and parent_chain:
         return ".".join(str(item) for item in parent_chain if str(item))
@@ -398,7 +438,7 @@ def _parent_symbol(symbols: list[SymbolRecord], symbol: SymbolRecord) -> SymbolR
 
 
 def _member_ownership_relation(symbol: SymbolRecord) -> str:
-    if symbol.kind in {"method", "function"}:
+    if symbol.kind in {"method", "function", "procedure", "constructor", "destructor"}:
         return "HAS_METHOD"
     if symbol.kind in {"field", "property"}:
         return "HAS_PROPERTY"
@@ -454,10 +494,39 @@ def build_graph(
                     kuzu_store.add_edge(symbol.qualified_name, relation, target)
                     if relation == "IMPORTS" and str(symbol.metadata.get("language", "")).lower() in {"c", "cpp"}:
                         kuzu_store.add_edge(symbol.qualified_name, "INCLUDES", target)
+            for raw_reference in symbol.metadata.get("project_references", []):
+                for target in _project_reference_targets(str(raw_reference), symbols_by_file):
+                    if target == symbol.qualified_name:
+                        continue
+                    kuzu_store.add_edge(symbol.qualified_name, "REFERENCES", target)
+                    if str(symbol.metadata.get("language", "")).lower().startswith("object_pascal"):
+                        kuzu_store.add_edge(symbol.qualified_name, "OWNS", target)
+            for raw_include in symbol.metadata.get("include_files", []):
+                for target in _project_reference_targets(str(raw_include), symbols_by_file):
+                    if target == symbol.qualified_name:
+                        continue
+                    kuzu_store.add_edge(symbol.qualified_name, "INCLUDES", target)
+                    kuzu_store.add_edge(symbol.qualified_name, "REFERENCES", target)
             parent = _parent_symbol(symbols_by_file.get(file_record.path, []), symbol)
             member_relation = _member_ownership_relation(symbol)
             if parent is not None and member_relation:
                 kuzu_store.add_edge(parent.qualified_name, member_relation, symbol.qualified_name)
+            component_parent = str(symbol.metadata.get("component_parent", "") or "").strip()
+            if component_parent:
+                target = _resolve_symbol_target(
+                    component_parent,
+                    current_symbol=symbol,
+                    file_path=file_record.path,
+                    symbols_by_file=symbols_by_file,
+                    symbols_by_name=symbols_by_name,
+                    file_symbol_names=file_symbol_names,
+                    file_name_candidates=file_name_candidates,
+                    project_file_symbols=project_file_symbols,
+                    file_associations=file_associations,
+                    relation="REFERENCES",
+                )
+                if target and target != symbol.qualified_name:
+                    kuzu_store.add_edge(target, "HAS_COMPONENT", symbol.qualified_name)
             for raw_access in symbol.metadata.get("accesses", []):
                 access_path = str(raw_access or "").strip()
                 if not access_path or "." not in access_path:

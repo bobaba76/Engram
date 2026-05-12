@@ -66,4 +66,5 @@ class RuntimeConfig:
     review_retry_attempts: int = 3
     review_retry_backoff_seconds: float = 1.0
     start_mcp_after_index: bool = True
+    agents_file_enabled: bool = True
     versions: VersionConfig = field(default_factory=VersionConfig)
