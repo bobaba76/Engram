@@ -20,5 +20,6 @@ def test_reindex_project_defaults_to_background_and_registers_status_tool() -> N
     source = Path("scripts/run_mcp.py").read_text(encoding="utf-8")
 
     assert "def reindex_project_tool(project_root: str = \"\", run_mode: str = INCREMENTAL, background: bool = True)" in source
+    assert "def _reindex_job_root(job_id: str) -> Path:" in source
     assert "subprocess.Popen" in source
     assert "(\"reindex_status\", reindex_status_tool" in source
