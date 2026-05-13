@@ -385,6 +385,10 @@ def main() -> int:
     _kuzu_init_lock = threading.Lock()
     selected_repo_root = settings.repo_root.resolve()
 
+    def _reindex_job_root(job_id: str) -> Path:
+        safe_job_id = "".join(ch for ch in str(job_id) if ch.isalnum() or ch in {"-", "_"})[:64] or "unknown"
+        return ROOT / "data" / "reindex_jobs" / safe_job_id
+
     def _get_repo_context(repo: str = "") -> dict[str, Any]:
         repo_root = resolve_indexed_repo(selected_repo_root, repo or None) if str(repo or "").strip() else selected_repo_root
         cached = repo_context_cache.get(repo_root)
