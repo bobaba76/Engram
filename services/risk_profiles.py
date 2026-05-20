@@ -49,6 +49,7 @@ PATH_RISK_RULES = (
     PathRiskRule("embedded peripheral/init/flash path", _name_contains_any("uart", "flash", "init", "bootloader"), embedded_sensitive=True),
     PathRiskRule("public/native header surface", _endswith(".h", ".hh", ".hpp", ".hxx"), high_risk=True),
     PathRiskRule("native implementation file", _endswith(".c", ".cc", ".cpp", ".cxx")),
+    PathRiskRule("native linker/memory layout script", _endswith(".gld", ".ld", ".lds"), high_risk=True, embedded_sensitive=True),
     PathRiskRule("native build target/config path", lambda normalized, name: normalized.endswith((".cmake", "cmakelists.txt", "makefile")) or normalized.endswith((".vcxproj", ".vcxproj.filters")), high_risk=True),
     PathRiskRule("native exported API/ABI surface", lambda normalized, name: normalized.endswith((".def", ".map")) or "/exports/" in normalized, high_risk=True),
     PathRiskRule("C# public route/API path", lambda normalized, name: normalized.endswith(".cs") and any(part in normalized for part in ("/controllers/", "/endpoints/", "/minimalapi", "program.cs")), high_risk=True),

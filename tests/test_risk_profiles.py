@@ -44,6 +44,9 @@ def test_symbol_hint_classification_is_centralized() -> None:
 def test_interrupt_vector_hint_does_not_match_normal_vector_store_names() -> None:
     assert "interrupt/trap/startup path" not in path_risk_hints("storage/vector_store.py")
     assert "interrupt/trap/startup path" in path_risk_hints("firmware/interrupt_vectors.c")
+    linker_hints = path_risk_hints("firmware/app.gld")
+    assert "native linker/memory layout script" in linker_hints
+    assert high_risk_path_hints(linker_hints)
 
 
 def test_embedded_sensitive_counts_use_profile_metadata() -> None:

@@ -145,6 +145,58 @@ def test_native_build_context_maps_cmake_targets_without_compile_commands(tmp_pa
     assert "engine" in summary["targets"]
 
 
+def test_native_build_context_parses_mplab_project_without_compile_commands(tmp_path: Path) -> None:
+    project = tmp_path / "Video Overlay.mcp"
+    project.write_text(
+        "\n".join(
+            [
+                "[HEADER]",
+                "device=dsPIC33FJ64GP204",
+                "[PATH_INFO]",
+                "dir_inc=include",
+                "[FILE_SUBFOLDERS]",
+                "file_000=.",
+                "file_001=.",
+                "file_002=bootloader",
+                "file_003=.",
+                "[FILE_INFO]",
+                "file_000=main.c",
+                "file_001=global.h",
+                "file_002=bootloader\\start.S",
+                "file_003=app.gld",
+                "[TOOL_SETTINGS]",
+                "TS{compiler}=-g -I include -DAPP_BUILD=1 -std=gnu99",
+                "TS{linker}=--script app.gld -Map=\"$(TARGETBASE).map\"",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    (tmp_path / "global.h").write_text("#define GLOBAL_FLAG 1\n", encoding="utf-8")
+    (tmp_path / "include").mkdir()
+    (tmp_path / "bootloader").mkdir()
+    (tmp_path / "bootloader" / "start.S").write_text("reset:\n", encoding="utf-8")
+    (tmp_path / "app.gld").write_text("MEMORY {}\n", encoding="utf-8")
+    (tmp_path / "stimulus.scl").write_text('configuration for "pic24fj16ga002" is\nend configuration;\n', encoding="utf-8")
+
+    context = load_native_build_context(str(tmp_path / "main.c"))
+    summary = summarize_native_build_context(tmp_path)
+
+    assert context["confidence"] == "medium"
+    assert context["target"] == "Video Overlay"
+    assert "mplab" in context["build_systems"]
+    assert "dsPIC33FJ64GP204" in context["devices"]
+    assert "APP_BUILD=1" in context["defines"]
+    assert "gnu99" in context["standards"]
+    assert "main.c" in context["source_files"]
+    assert "global.h" in context["header_files"]
+    assert any(str(item).endswith("stimulus.scl") for item in context["linker_scripts"])
+    assert "Video Overlay" in summary["targets"]
+    assert "dsPIC33FJ64GP204" in summary["devices"]
+    assert "main.c" in summary["source_files"]
+    assert any("MPLAB project metadata was parsed" in warning for warning in summary["warnings"])
+
+
 def test_macro_extraction_skips_function_like_recursive_and_unsafe_macros() -> None:
     source = "\n".join(
         [

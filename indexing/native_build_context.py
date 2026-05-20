@@ -15,6 +15,9 @@ _INCLUDE_FLAG_PATTERN = re.compile(r"^(?:-I|/I)(?P<value>.+)$")
 _CMAKE_TARGET_PATTERN = re.compile(r"\badd_(?:executable|library)\s*\(\s*(?P<target>[A-Za-z_][A-Za-z0-9_.+-]*)\s+(?P<sources>[^)]*)\)", re.IGNORECASE | re.DOTALL)
 _MACRO_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SAFE_MACRO_BODY_PATTERN = re.compile(r"^[A-Za-z0-9_\s+\-*/%<>=!&|^~().,?:'\"\\[\]]*$")
+_MPLAB_SOURCE_EXTENSIONS = {".c", ".cc", ".cpp", ".cxx", ".s", ".asm", ".S"}
+_MPLAB_HEADER_EXTENSIONS = {".h", ".hh", ".hpp", ".hxx", ".inc"}
+_MPLAB_LINKER_EXTENSIONS = {".gld", ".ld", ".lds", ".scl"}
 MAX_EXPANDABLE_MACRO_BODY_LENGTH = 200
 
 
@@ -109,6 +112,154 @@ def _parse_compile_flags(command_tokens: list[str], base_dir: Path) -> dict[str,
     }
 
 
+def _read_text_file(path: Path, max_bytes: int = 1_000_000) -> str:
+    try:
+        payload = path.read_bytes()[:max_bytes]
+    except OSError:
+        return ""
+    return payload.decode("utf-8", errors="ignore")
+
+
+def _parse_ini_sections(source: str) -> dict[str, dict[str, str]]:
+    sections: dict[str, dict[str, str]] = {}
+    current = ""
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";", "//")):
+            continue
+        section_match = re.fullmatch(r"\[(?P<section>[^\]]+)\]", line)
+        if section_match:
+            current = section_match.group("section").strip()
+            sections.setdefault(current, {})
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        sections.setdefault(current, {})[key.strip()] = value.strip().strip('"')
+    return sections
+
+
+def _normalize_project_path(root: Path, value: str) -> str:
+    token = str(value or "").strip().strip('"').replace("\\", "/")
+    if not token:
+        return ""
+    path = Path(token)
+    if not path.is_absolute():
+        path = root / token
+    try:
+        return str(path.resolve()).replace("\\", "/")
+    except OSError:
+        return str(path).replace("\\", "/")
+
+
+def _relative_project_path(root: Path, value: str) -> str:
+    normalized = _normalize_project_path(root, value)
+    if not normalized:
+        return ""
+    try:
+        return str(Path(normalized).resolve().relative_to(root.resolve())).replace("\\", "/")
+    except Exception:
+        return normalized
+
+
+def _parse_mplab_tool_options(sections: dict[str, dict[str, str]], root: Path) -> dict[str, list[str]]:
+    include_dirs: list[str] = []
+    defines: list[str] = []
+    standards: list[str] = []
+    tool_options: list[str] = []
+    for value in sections.get("TOOL_SETTINGS", {}).values():
+        if not value:
+            continue
+        tool_options.append(value)
+        parsed = _parse_compile_flags(_tokenize_command(value), root)
+        include_dirs.extend(str(item) for item in parsed.get("include_dirs", []) if item)
+        defines.extend(str(item) for item in parsed.get("defines", []) if item)
+        standards.extend(str(item) for item in parsed.get("standards", []) if item)
+    return {
+        "include_dirs": _unique(include_dirs, limit=30),
+        "defines": _unique(defines, limit=30),
+        "standards": _unique(standards, limit=12),
+        "tool_options": _unique(tool_options, limit=12),
+    }
+
+
+@lru_cache(maxsize=64)
+def _mplab_project_context(root: str) -> dict[str, object]:
+    root_path = Path(root)
+    project_files = sorted([path for extension in _MPLAB_PROJECT_EXTENSIONS for path in root_path.glob(f"*{extension}")])
+    project_names: list[str] = []
+    devices: list[str] = []
+    include_dirs: list[str] = [str(root_path.resolve()).replace("\\", "/")]
+    defines: list[str] = []
+    standards: list[str] = []
+    source_files: list[str] = []
+    header_files: list[str] = []
+    linker_scripts: list[str] = []
+    tool_options: list[str] = []
+
+    for project_file in project_files:
+        if project_file.suffix.lower() != ".mcp":
+            continue
+        project_names.append(project_file.stem)
+        sections = _parse_ini_sections(_read_text_file(project_file))
+        header = sections.get("HEADER", {})
+        if header.get("device"):
+            devices.append(header["device"])
+        path_info = sections.get("PATH_INFO", {})
+        for key, value in path_info.items():
+            if key.lower().startswith("dir_") and value:
+                include_dirs.append(_normalize_project_path(root_path, value))
+        subfolders = sections.get("CAT_SUBFOLDERS", {})
+        for key, value in subfolders.items():
+            if value and ("inc" in key.lower() or "src" in key.lower()):
+                include_dirs.append(_normalize_project_path(root_path, value.replace("_", "")))
+                include_dirs.append(_normalize_project_path(root_path, value))
+        file_subfolders = sections.get("FILE_SUBFOLDERS", {})
+        file_info = sections.get("FILE_INFO", {})
+        for key, value in file_info.items():
+            if not value:
+                continue
+            raw_path = value.replace("\\", "/")
+            if "/" not in raw_path:
+                subfolder = file_subfolders.get(key, "").replace("\\", "/").strip(".")
+                if subfolder:
+                    raw_path = f"{subfolder}/{raw_path}"
+            relative = _relative_project_path(root_path, raw_path)
+            suffix = Path(relative).suffix.lower()
+            if suffix in {item.lower() for item in _MPLAB_SOURCE_EXTENSIONS}:
+                source_files.append(relative)
+            elif suffix in _MPLAB_HEADER_EXTENSIONS:
+                header_files.append(relative)
+            elif suffix in _MPLAB_LINKER_EXTENSIONS:
+                linker_scripts.append(relative)
+        parsed_tools = _parse_mplab_tool_options(sections, root_path)
+        include_dirs.extend(parsed_tools["include_dirs"])
+        defines.extend(parsed_tools["defines"])
+        standards.extend(parsed_tools["standards"])
+        tool_options.extend(parsed_tools["tool_options"])
+
+    for scl_file in root_path.glob("*.scl"):
+        linker_scripts.append(str(scl_file.resolve()).replace("\\", "/"))
+        scl_source = _read_text_file(scl_file)
+        for match in re.finditer(r'for\s+"(?P<device>[^"]+)"', scl_source, re.IGNORECASE):
+            devices.append(match.group("device"))
+    for plt_file in root_path.glob("*.plt"):
+        linker_scripts.append(str(plt_file.resolve()).replace("\\", "/"))
+
+    return {
+        "project_names": _unique(project_names, limit=12),
+        "devices": _unique(devices, limit=12),
+        "include_dirs": _unique(include_dirs, limit=40),
+        "defines": _unique(defines, limit=40),
+        "standards": _unique(standards, limit=12),
+        "source_files": _unique(source_files, limit=200),
+        "header_files": _unique(header_files, limit=200),
+        "linker_scripts": _unique(linker_scripts, limit=40),
+        "tool_options": _unique(tool_options, limit=20),
+        "project_files": _unique([path.name for path in project_files], limit=40),
+    }
+
+
 def _unique(values: list[object], limit: int = 50) -> list[str]:
     seen: list[str] = []
     for value in values:
@@ -185,6 +336,11 @@ def load_native_build_context(file_path_str: str) -> dict[str, object]:
         "defines": [],
         "standards": [],
         "project_files": [],
+        "source_files": [],
+        "header_files": [],
+        "linker_scripts": [],
+        "devices": [],
+        "tool_options": [],
         "has_compile_commands": False,
         "compile_command_file": "",
         "target": "",
@@ -204,6 +360,20 @@ def load_native_build_context(file_path_str: str) -> dict[str, object]:
                 )
             ]
             context["confidence"] = "medium"
+            if "mplab" in build_systems:
+                mplab = _mplab_project_context(str(root))
+                context["project_files"] = _unique(list(context["project_files"]) + list(mplab.get("project_files", [])), limit=40)
+                context["include_dirs"] = _unique(list(context["include_dirs"]) + list(mplab.get("include_dirs", [])), limit=40)
+                context["defines"] = _unique(list(context["defines"]) + list(mplab.get("defines", [])), limit=40)
+                context["standards"] = _unique(list(context["standards"]) + list(mplab.get("standards", [])), limit=12)
+                context["source_files"] = list(mplab.get("source_files", []))
+                context["header_files"] = list(mplab.get("header_files", []))
+                context["linker_scripts"] = list(mplab.get("linker_scripts", []))
+                context["devices"] = list(mplab.get("devices", []))
+                context["tool_options"] = list(mplab.get("tool_options", []))
+                if not context["target"]:
+                    project_names = list(mplab.get("project_names", []))
+                    context["target"] = project_names[0] if project_names else root.name
             cmake_target = _cmake_target_map(str(root)).get(str(file_path)) or _cmake_target_map(str(root)).get(str(file_path.relative_to(root)).replace("\\", "/")) if root in file_path.parents or root == file_path.parent else ""
             if cmake_target and not context["target"]:
                 context["target"] = cmake_target
@@ -234,6 +404,11 @@ def summarize_native_build_context(repo_root: str | Path, sample_limit: int = 20
     standards: list[str] = []
     targets: list[str] = []
     compile_command_files: list[str] = []
+    source_files: list[str] = []
+    header_files: list[str] = []
+    linker_scripts: list[str] = []
+    devices: list[str] = []
+    tool_options: list[str] = []
     compile_entry_count = 0
 
     candidate_roots = [root]
@@ -261,6 +436,17 @@ def summarize_native_build_context(repo_root: str | Path, sample_limit: int = 20
             )
         )
         targets.extend(_cmake_target_map(str(candidate_root)).values())
+        if "mplab" in systems:
+            mplab = _mplab_project_context(str(candidate_root))
+            include_dirs.extend(str(item) for item in mplab.get("include_dirs", []) if item)
+            defines.extend(str(item) for item in mplab.get("defines", []) if item)
+            standards.extend(str(item) for item in mplab.get("standards", []) if item)
+            source_files.extend(str(item) for item in mplab.get("source_files", []) if item)
+            header_files.extend(str(item) for item in mplab.get("header_files", []) if item)
+            linker_scripts.extend(str(item) for item in mplab.get("linker_scripts", []) if item)
+            devices.extend(str(item) for item in mplab.get("devices", []) if item)
+            tool_options.extend(str(item) for item in mplab.get("tool_options", []) if item)
+            targets.extend(str(item) for item in mplab.get("project_names", []) if item)
         compile_commands = candidate_root / "compile_commands.json"
         if not compile_commands.exists():
             continue
@@ -279,7 +465,10 @@ def summarize_native_build_context(repo_root: str | Path, sample_limit: int = 20
     confidence = "high" if compile_command_files else "medium" if systems else "low"
     warnings: list[str] = []
     if systems and not compile_command_files:
-        warnings.append("Native build markers found, but no compile_commands.json was discovered; C/C++ semantic confidence is limited.")
+        if "mplab" in systems and (source_files or header_files):
+            warnings.append("MPLAB project metadata was parsed, but no compile_commands.json was discovered; C/C++ compiler-flag confidence is limited.")
+        else:
+            warnings.append("Native build markers found, but no compile_commands.json was discovered; C/C++ semantic confidence is limited.")
     if not systems:
         warnings.append("No native build context discovered for C/C++ files.")
     return {
@@ -294,6 +483,11 @@ def summarize_native_build_context(repo_root: str | Path, sample_limit: int = 20
         "defines": _unique(defines, limit=20),
         "standards": _unique(standards, limit=8),
         "targets": _unique(targets, limit=20),
+        "devices": _unique(devices, limit=12),
+        "source_files": _unique(source_files, limit=40),
+        "header_files": _unique(header_files, limit=40),
+        "linker_scripts": _unique(linker_scripts, limit=20),
+        "tool_options": _unique(tool_options, limit=12),
         "project_files": _unique(project_files, limit=12),
         "warnings": warnings,
     }

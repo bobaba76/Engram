@@ -211,6 +211,94 @@ class KuzuStore:
             for row in rows
             if len(row) >= 3
         ]
+
+    def symbols_for_file(self, file_path: str, limit: int | None = None) -> list[dict[str, Any]]:
+        limit_clause = f" LIMIT {int(limit)}" if limit is not None and int(limit) > 0 else ""
+        try:
+            rows = _safe_get_all(
+                self.connection.execute(
+                    f"""
+                    MATCH (s:Symbol)
+                    WHERE s.file_path = $file_path
+                    RETURN s.qualified_name, s.file_path, s.kind, s.start_line, s.end_line
+                    ORDER BY s.start_line ASC, s.qualified_name ASC{limit_clause}
+                    """,
+                    {"file_path": file_path},
+                )
+            )
+        except RuntimeError:
+            rows = []
+        return [
+            {
+                "qualified_name": str(row[0]),
+                "file_path": str(row[1]),
+                "kind": str(row[2]),
+                "start_line": int(row[3] or 0),
+                "end_line": int(row[4] or 0),
+            }
+            for row in rows
+            if len(row) >= 5
+        ]
+
+    def symbol_edges_for_target_file(self, file_path: str, relation: str, limit: int | None = None) -> list[dict[str, Any]]:
+        if relation not in SYMBOL_RELATIONS:
+            return []
+        limit_clause = f" LIMIT {int(limit)}" if limit is not None and int(limit) > 0 else ""
+        try:
+            rows = _safe_get_all(
+                self.connection.execute(
+                    f"""
+                    MATCH (source:Symbol)-[:{relation}]->(target:Symbol)
+                    WHERE target.file_path = $file_path
+                    RETURN source.qualified_name, source.file_path, '{relation}', target.qualified_name, target.file_path
+                    ORDER BY source.file_path ASC, source.qualified_name ASC{limit_clause}
+                    """,
+                    {"file_path": file_path},
+                )
+            )
+        except RuntimeError:
+            rows = []
+        return [
+            {
+                "source": str(row[0]),
+                "source_file": str(row[1]),
+                "relation": str(row[2]),
+                "target": str(row[3]),
+                "target_file": str(row[4]),
+            }
+            for row in rows
+            if len(row) >= 5
+        ]
+
+    def symbol_edges_for_target_symbol(self, target: str, relation: str, limit: int | None = None) -> list[dict[str, Any]]:
+        if relation not in SYMBOL_RELATIONS:
+            return []
+        limit_clause = f" LIMIT {int(limit)}" if limit is not None and int(limit) > 0 else ""
+        try:
+            rows = _safe_get_all(
+                self.connection.execute(
+                    f"""
+                    MATCH (source:Symbol)-[:{relation}]->(target:Symbol)
+                    WHERE target.qualified_name = $target
+                    RETURN source.qualified_name, source.file_path, '{relation}', target.qualified_name, target.file_path
+                    ORDER BY source.file_path ASC, source.qualified_name ASC{limit_clause}
+                    """,
+                    {"target": target},
+                )
+            )
+        except RuntimeError:
+            rows = []
+        return [
+            {
+                "source": str(row[0]),
+                "source_file": str(row[1]),
+                "relation": str(row[2]),
+                "target": str(row[3]),
+                "target_file": str(row[4]),
+            }
+            for row in rows
+            if len(row) >= 5
+        ]
  
     def count_edges(self) -> int:
         total = 0
