@@ -6,7 +6,7 @@ The project is currently used as the Coder MCP backend.
 
 ## Current Status
 
-Engram is strongest today for Python backends and TypeScript/React frontends. Recent work added GitNexus-style intelligence for:
+Engram is strongest today for Python backends and TypeScript/React frontends. Recent work added intelligence for:
 
 - git-aware change detection and risk scope
 - route/API/consumer impact

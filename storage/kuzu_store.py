@@ -193,15 +193,16 @@ class KuzuStore:
         except RuntimeError:
             pass
  
-    def _relation_queries(self, relation: str) -> tuple[str, str]:
+    def _relation_queries(self, relation: str, limit: int | None = None) -> tuple[str, str]:
+        limit_clause = f" LIMIT {int(limit)}" if limit is not None and int(limit) > 0 else ""
         if relation == "DEFINES":
             return (
-                "MATCH (f:File)-[:DEFINES]->(s:Symbol) WHERE f.path = $value RETURN f.path, 'DEFINES', s.qualified_name",
-                "MATCH (f:File)-[:DEFINES]->(s:Symbol) WHERE s.qualified_name = $value RETURN f.path, 'DEFINES', s.qualified_name",
+                f"MATCH (f:File)-[:DEFINES]->(s:Symbol) WHERE f.path = $value RETURN f.path, 'DEFINES', s.qualified_name{limit_clause}",
+                f"MATCH (f:File)-[:DEFINES]->(s:Symbol) WHERE s.qualified_name = $value RETURN f.path, 'DEFINES', s.qualified_name{limit_clause}",
             )
         return (
-            f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) WHERE s1.qualified_name = $value RETURN s1.qualified_name, '{relation}', s2.qualified_name",
-            f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) WHERE s2.qualified_name = $value RETURN s1.qualified_name, '{relation}', s2.qualified_name",
+            f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) WHERE s1.qualified_name = $value RETURN s1.qualified_name, '{relation}', s2.qualified_name{limit_clause}",
+            f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) WHERE s2.qualified_name = $value RETURN s1.qualified_name, '{relation}', s2.qualified_name{limit_clause}",
         )
  
     def _rows_to_edges(self, rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
@@ -277,6 +278,51 @@ class KuzuStore:
             )
         return edges
 
+    def graph_integrity_report(self) -> dict[str, Any]:
+        try:
+            file_rows = _safe_get_all(self.connection.execute("MATCH (f:File) RETURN f.path"))
+        except RuntimeError:
+            file_rows = []
+        file_paths = {str(row[0]) for row in file_rows if row and row[0]}
+        try:
+            symbol_rows = _safe_get_all(
+                self.connection.execute("MATCH (s:Symbol) RETURN s.qualified_name, s.file_path")
+            )
+        except RuntimeError:
+            symbol_rows = []
+        symbols = [
+            {"qualified_name": str(row[0]), "file_path": str(row[1])}
+            for row in symbol_rows
+            if len(row) >= 2
+        ]
+        try:
+            define_rows = _safe_get_all(
+                self.connection.execute("MATCH (f:File)-[:DEFINES]->(s:Symbol) RETURN f.path, s.qualified_name")
+            )
+        except RuntimeError:
+            define_rows = []
+        defines = {(str(row[0]), str(row[1])) for row in define_rows if len(row) >= 2}
+        symbols_missing_file_node = [
+            symbol
+            for symbol in symbols
+            if symbol["file_path"] and symbol["file_path"] not in file_paths
+        ]
+        symbols_missing_defines_edge = [
+            symbol
+            for symbol in symbols
+            if symbol["file_path"]
+            and not symbol["qualified_name"].startswith("property:")
+            and (symbol["file_path"], symbol["qualified_name"]) not in defines
+        ]
+        return {
+            "file_count": len(file_paths),
+            "symbol_count": len(symbols),
+            "edge_count": self.count_edges(),
+            "symbols_missing_file_node": symbols_missing_file_node,
+            "symbols_missing_defines_edge": symbols_missing_defines_edge,
+            "ok": not symbols_missing_file_node and not symbols_missing_defines_edge,
+        }
+
     def edges_for_relation(self, relation: str) -> list[dict[str, Any]]:
         queries = {
             "DEFINES": "MATCH (f:File)-[:DEFINES]->(s:Symbol) RETURN f.path, s.qualified_name",
@@ -295,11 +341,11 @@ class KuzuStore:
             for row in rows
         ]
  
-    def edges_for_target(self, target: str, relation: str | None = None) -> list[dict[str, Any]]:
+    def edges_for_target(self, target: str, relation: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         relations = [relation] if relation is not None else ["DEFINES", *SYMBOL_RELATIONS]
         edges: list[dict[str, Any]] = []
         for relation_name in relations:
-            _, target_query = self._relation_queries(relation_name)
+            _, target_query = self._relation_queries(relation_name, limit=limit)
             try:
                 rows = _safe_get_all(self.connection.execute(target_query, {"value": target}))
             except RuntimeError:
@@ -307,11 +353,11 @@ class KuzuStore:
             edges.extend(self._rows_to_edges(rows))
         return edges
  
-    def edges_for_source(self, source: str, relation: str | None = None) -> list[dict[str, Any]]:
+    def edges_for_source(self, source: str, relation: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         relations = [relation] if relation is not None else ["DEFINES", *SYMBOL_RELATIONS]
         edges: list[dict[str, Any]] = []
         for relation_name in relations:
-            source_query, _ = self._relation_queries(relation_name)
+            source_query, _ = self._relation_queries(relation_name, limit=limit)
             try:
                 rows = _safe_get_all(self.connection.execute(source_query, {"value": source}))
             except RuntimeError:

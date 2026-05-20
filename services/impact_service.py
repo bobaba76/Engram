@@ -5,15 +5,16 @@ import json
 
 from storage.duckdb_store import DuckDBStore
 from storage.kuzu_store import KuzuStore
+from services.graph_edge_utils import edges_for_source_limited, edges_for_target_limited
 from services.symbol_resolution_service import ambiguity_status, resolve_candidates, symbol_uid_from_target
 
 
 DEFAULT_RELATIONS = ("CALLS", "IMPORTS", "INCLUDES", "REFERENCES", "ACCESSES", "FETCHES", "READS_FIELD", "HAS_METHOD", "HAS_PROPERTY", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS", "INJECTS", "USES_SERVICE")
 RELATION_WEIGHTS = {
     "CALLS": 1.0,
-    "IMPORTS": 0.85,
+    "IMPORTS": 0.18,
     "INCLUDES": 0.8,
-    "REFERENCES": 0.45,
+    "REFERENCES": 0.35,
     "ACCESSES": 0.35,
     "FETCHES": 0.9,
     "READS_FIELD": 0.55,
@@ -30,6 +31,7 @@ DEFAULT_EDGE_LIMIT_PER_RELATION = 80
 BROAD_EDGE_LIMIT_PER_RELATION = 18
 DEFAULT_NODE_BUDGET = 240
 BROAD_NODE_BUDGET = 80
+RUNTIME_RELATIONS = {"CALLS", "FETCHES", "READS_FIELD", "ACCESSES", "USES_SERVICE", "INJECTS"}
 
 
 def _normalize_symbol_uid(target: str, symbol_uid: str | None) -> str | None:
@@ -61,19 +63,19 @@ def _relation_edges(kuzu_store: KuzuStore, node: str, direction: str, relation_t
     edges = []
     for relation in relation_types:
         if direction == "upstream":
-            edges.extend(kuzu_store.edges_for_target(node, relation=relation)[:per_relation_limit])
+            edges.extend(edges_for_target_limited(kuzu_store, node, relation=relation, limit=per_relation_limit))
         else:
-            edges.extend(kuzu_store.edges_for_source(node, relation=relation)[:per_relation_limit])
+            edges.extend(edges_for_source_limited(kuzu_store, node, relation=relation, limit=per_relation_limit))
     unique: dict[tuple[str, str, str], dict[str, object]] = {}
     for edge in edges:
         unique[(str(edge.get("source")), str(edge.get("relation")), str(edge.get("target")))] = edge
     return list(unique.values())
 
 
-def _risk_level(direct_count: int, impacted_count: int, files_affected: int, ambiguous: bool) -> str:
-    if direct_count >= 10 or impacted_count >= 25 or files_affected >= 12:
+def _risk_level(direct_count: int, impacted_count: int, files_affected: int, ambiguous: bool, runtime_direct_count: int, semantic_weight: float) -> str:
+    if runtime_direct_count >= 8 or semantic_weight >= 35 or files_affected >= 12:
         return "HIGH"
-    if direct_count >= 4 or impacted_count >= 10 or files_affected >= 5 or (ambiguous and impacted_count > 0):
+    if runtime_direct_count >= 3 or semantic_weight >= 10 or files_affected >= 5 or direct_count >= 20 or (ambiguous and impacted_count > 0):
         return "MEDIUM"
     return "LOW"
 
@@ -238,9 +240,10 @@ def analyze_impact(
             queue.append((neighbor, depth + 1))
     impacted_count = len(all_impacted)
     direct_count = len(by_depth.get("d=1", []))
+    runtime_direct_count = sum(1 for item in by_depth.get("d=1", []) if str(item.get("relation", "")).upper() in RUNTIME_RELATIONS)
     files_affected = len({item["file_path"] for item in all_impacted if item.get("file_path")})
     semantic_weight = _semantic_weight(all_impacted)
-    risk = _risk_level(direct_count, impacted_count, files_affected, ambiguous)
+    risk = _risk_level(direct_count, impacted_count, files_affected, ambiguous, runtime_direct_count, semantic_weight)
     process_participation = _process_participation(duckdb_store, graph_target)
     frontend_graph = _frontend_graph_summary(str(target_symbol.get("file_path", "") or ""), all_impacted)
     warnings = ["Target resolution is ambiguous; pass file_path or kind to narrow it."] if ambiguous else []
@@ -283,6 +286,7 @@ def analyze_impact(
         },
         "summary": {
             "direct": direct_count,
+            "runtime_direct": runtime_direct_count,
             "max_depth": max_depth,
             "files_affected": files_affected,
             "semantic_weight": semantic_weight,
@@ -295,6 +299,8 @@ def analyze_impact(
             "status": "partial" if traversal_truncated else "ambiguous" if ambiguous else "found",
             "impacted_count": impacted_count,
             "direct": direct_count,
+            "runtime_direct": runtime_direct_count,
+            "semantic_weight": semantic_weight,
             "top_impacted": [item["symbol"] for item in all_impacted[:8]],
             "frontend_graph": frontend_graph,
             "warnings": warnings,

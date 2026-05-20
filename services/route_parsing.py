@@ -58,6 +58,14 @@ CHART_DATAKEY_PATTERN = re.compile(r"\b(?P<parent>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*
 JSON_RESPONSE_PATTERN = re.compile(r"json\((?P<body>\{[\s\S]{0,2000}?\})\)", re.IGNORECASE)
 FUNCTION_NAME_PATTERN = re.compile(r"(?:export\s+)?(?:const|let|var)\s+(?P<const_name>[A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*[^=]+?)?\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)?(?:\s*:\s*[^=]+?)?\s*=>|(?:export\s+)?(?:async\s+)?function\s+(?P<func_name>[A-Za-z_][A-Za-z0-9_]*)")
 STRING_LITERAL_PATTERN = re.compile(r"^\s*(['\"])(?P<value>/[^'\"]*)\1")
+EXCLUDED_RESPONSE_KEYS = {
+    "HTTPException",
+    "Exception",
+    "detail",
+    "e",
+    "exc",
+    "status_code",
+}
 
 
 def iter_backend_route_decorators(source: str) -> list[dict[str, object]]:
@@ -478,11 +486,13 @@ def frontend_route_usages(source: str, language: str = "tsx") -> list[dict[str, 
 
 
 def response_keys(snippet: str) -> list[str]:
+    stripped = snippet.strip()
     keys = {match.group("key") for match in BACKEND_RESPONSE_KEY_PATTERN.finditer(snippet) if match.group("key")}
-    keys.update(match.group("key") for match in JS_RESPONSE_KEY_PATTERN.finditer(snippet) if match.group("key"))
+    if "{" in snippet and ("=>" in snippet or "return {" in snippet or ".json(" in snippet or stripped.startswith("{")):
+        keys.update(match.group("key") for match in JS_RESPONSE_KEY_PATTERN.finditer(snippet) if match.group("key"))
     if "new {" in snippet:
         keys.update(match.group("key") for match in CSHARP_ANONYMOUS_OBJECT_KEY_PATTERN.finditer(snippet) if match.group("key"))
-    return sorted(keys)[:30]
+    return sorted(key for key in keys if key not in EXCLUDED_RESPONSE_KEYS)[:30]
 
 
 def _model_name_from_type(type_hint: str) -> tuple[str, bool]:
@@ -543,14 +553,16 @@ def balanced_body(snippet: str, start: int, opener: str, closer: str) -> str:
 
 def nested_response_keys(snippet: str) -> dict[str, list[str]]:
     nested: dict[str, list[str]] = {}
-    for match in re.finditer(r"['\"](?P<parent>[A-Za-z_][A-Za-z0-9_]*)['\"]\s*:\s*\{", snippet):
-        parent = match.group("parent")
+    object_parent_pattern = r"(?:['\"](?P<quoted>[A-Za-z_][A-Za-z0-9_]*)['\"]|(?<![A-Za-z0-9_$])(?P<bare>[A-Za-z_][A-Za-z0-9_]*))\s*:\s*\{"
+    array_parent_pattern = r"(?:['\"](?P<quoted>[A-Za-z_][A-Za-z0-9_]*)['\"]|(?<![A-Za-z0-9_$])(?P<bare>[A-Za-z_][A-Za-z0-9_]*))\s*:\s*\[\s*\{"
+    for match in re.finditer(object_parent_pattern, snippet):
+        parent = match.group("quoted") or match.group("bare")
         body = balanced_body(snippet, match.end(), "{", "}")
         keys = response_keys(body)
         if keys:
             nested[parent] = keys
-    for match in re.finditer(r"['\"](?P<parent>[A-Za-z_][A-Za-z0-9_]*)['\"]\s*:\s*\[\s*\{", snippet):
-        parent = f"{match.group('parent')}[]"
+    for match in re.finditer(array_parent_pattern, snippet):
+        parent = f"{match.group('quoted') or match.group('bare')}[]"
         body = balanced_body(snippet, match.end(), "{", "}")
         keys = response_keys(body)
         if keys:
@@ -559,9 +571,11 @@ def nested_response_keys(snippet: str) -> dict[str, list[str]]:
 
 
 def returned_payload_source(handler_source: str) -> str:
+    handler_source = re.split(r"\n\s*except\b|\n\s*raise\b", handler_source, maxsplit=1)[0]
     direct_return = re.search(r"return\s+(?P<body>\{)", handler_source)
     if direct_return is not None:
-        return handler_source[direct_return.start():]
+        body = balanced_body(handler_source, direct_return.end(), "{", "}")
+        return "{" + body + "}"
     return_match = re.search(r"return\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b", handler_source)
     if return_match is None:
         return handler_source

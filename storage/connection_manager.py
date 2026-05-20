@@ -51,7 +51,12 @@ class DuckDBConnectionManager:
         return conn.executemany(query, parameters)
 
     def close(self) -> None:
+        local_conn = getattr(self._local, "conn", None)
+        close_local = getattr(local_conn, "close", None)
+        if callable(close_local):
+            close_local()
+        if hasattr(self._local, "conn"):
+            delattr(self._local, "conn")
         close_shared = getattr(self.shared_connection, "close", None)
         if callable(close_shared):
             close_shared()
-        # Thread-local connections will be cleaned up automatically by GC

@@ -13,6 +13,9 @@ _STANDARD_PATTERN = re.compile(r"(?:-std=|/std:)(?P<value>[^\s]+)")
 _DEFINE_PATTERN = re.compile(r"^(?:-D|/D)(?P<value>.+)$")
 _INCLUDE_FLAG_PATTERN = re.compile(r"^(?:-I|/I)(?P<value>.+)$")
 _CMAKE_TARGET_PATTERN = re.compile(r"\badd_(?:executable|library)\s*\(\s*(?P<target>[A-Za-z_][A-Za-z0-9_.+-]*)\s+(?P<sources>[^)]*)\)", re.IGNORECASE | re.DOTALL)
+_MACRO_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SAFE_MACRO_BODY_PATTERN = re.compile(r"^[A-Za-z0-9_\s+\-*/%<>=!&|^~().,?:'\"\\[\]]*$")
+MAX_EXPANDABLE_MACRO_BODY_LENGTH = 200
 
 
 def _candidate_roots(file_path: Path) -> list[Path]:
@@ -304,15 +307,56 @@ def extract_macro_definitions(source: str, build_context: dict[str, object]) -> 
             continue
         if "=" in token:
             name, value = token.split("=", 1)
-            macros[name.strip()] = value.strip()
+            name = name.strip()
+            value = value.strip()
+            if _is_expandable_object_macro(name, value):
+                macros[name] = value
         else:
-            macros[token] = "1"
-    for match in re.finditer(r"^\s*#define\s+([A-Za-z_][A-Za-z0-9_]*)\s*(.*)$", source, re.MULTILINE):
-        name = str(match.group(1) or "").strip()
-        body = str(match.group(2) or "").strip()
-        if name and "(" not in name:
+            if _is_expandable_object_macro(token, "1"):
+                macros[token] = "1"
+    for line in source.splitlines():
+        parsed = _parse_object_like_define(line)
+        if parsed is None:
+            continue
+        name, body = parsed
+        if _is_expandable_object_macro(name, body):
             macros[name] = body or "1"
     return macros
+
+
+def _parse_object_like_define(line: str) -> tuple[str, str] | None:
+    stripped = line.strip()
+    if not stripped.startswith("#define"):
+        return None
+    rest = stripped[len("#define"):].lstrip()
+    if not rest:
+        return None
+    match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)(.*)$", rest)
+    if match is None:
+        return None
+    name = match.group(1)
+    suffix = match.group(2)
+    if suffix.startswith("("):
+        return None
+    return name, suffix.strip()
+
+
+def _is_expandable_object_macro(name: str, body: str) -> bool:
+    macro_name = str(name or "").strip()
+    macro_body = str(body or "").strip() or "1"
+    if not _MACRO_NAME_PATTERN.match(macro_name):
+        return False
+    if len(macro_body) > MAX_EXPANDABLE_MACRO_BODY_LENGTH:
+        return False
+    if re.match(r"^\(\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*,|\s*\))", macro_body):
+        return False
+    if "#" in macro_body:
+        return False
+    if re.search(rf"\b{re.escape(macro_name)}\b", macro_body):
+        return False
+    if not _SAFE_MACRO_BODY_PATTERN.match(macro_body):
+        return False
+    return True
 
 
 def expand_object_like_macros(text: str, macros: dict[str, str]) -> str:
@@ -320,7 +364,7 @@ def expand_object_like_macros(text: str, macros: dict[str, str]) -> str:
     for _ in range(3):
         changed = False
         for name, value in macros.items():
-            if not name or "(" in name:
+            if not _is_expandable_object_macro(name, value):
                 continue
             pattern = re.compile(rf"\b{re.escape(name)}\b")
             updated = pattern.sub(lambda _: str(value), expanded)

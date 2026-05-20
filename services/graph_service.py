@@ -165,6 +165,63 @@ def _relation_breakdown(edges: list[dict[str, object]], limit_per_relation: int 
     return breakdown
 
 
+def _hub_summary(
+    target: str,
+    all_edges: list[dict[str, object]],
+    filtered_edges: list[dict[str, object]],
+    raw_node_count: int,
+    filtered_node_count: int,
+) -> dict[str, object]:
+    direct_edges = [edge for edge in all_edges if edge.get("source") == target or edge.get("target") == target]
+    relation_counts: dict[str, int] = {}
+    direct_relation_counts: dict[str, int] = {}
+    incoming_count = 0
+    outgoing_count = 0
+    for edge in all_edges:
+        relation = str(edge.get("relation", "UNKNOWN") or "UNKNOWN")
+        relation_counts[relation] = relation_counts.get(relation, 0) + 1
+        if edge.get("target") == target:
+            incoming_count += 1
+        if edge.get("source") == target:
+            outgoing_count += 1
+        if edge in direct_edges:
+            direct_relation_counts[relation] = direct_relation_counts.get(relation, 0) + 1
+
+    edge_count = len(all_edges)
+    truncated_edge_count = max(0, edge_count - len(filtered_edges))
+    is_hub = bool(
+        _hub_penalty(target) >= 2
+        or edge_count >= 80
+        or len(direct_edges) >= 40
+        or raw_node_count >= 120
+    )
+    guidance: list[str] = []
+    if is_hub:
+        guidance.append("Treat this target as a high fan-out hub; prefer relation filters or direct mode before deep traversal.")
+    if truncated_edge_count:
+        guidance.append(f"{truncated_edge_count} edge(s) were omitted by the current cap/filter.")
+    if edge_count >= 80 and len(filtered_edges) < edge_count:
+        guidance.append("Use the relation breakdown and top neighbors as the first-pass blast radius summary.")
+
+    return {
+        "is_hub": is_hub,
+        "target_hub_penalty": _hub_penalty(target),
+        "raw_node_count": raw_node_count,
+        "filtered_node_count": filtered_node_count,
+        "raw_edge_count": edge_count,
+        "filtered_edge_count": len(filtered_edges),
+        "truncated_edge_count": truncated_edge_count,
+        "direct_edge_count": len(direct_edges),
+        "incoming_edge_count": incoming_count,
+        "outgoing_edge_count": outgoing_count,
+        "relation_counts": dict(sorted(relation_counts.items())),
+        "direct_relation_counts": dict(sorted(direct_relation_counts.items())),
+        "top_neighbors": _top_neighbors(all_edges, target, limit=10),
+        "top_filtered_neighbors": _top_neighbors(filtered_edges, target, limit=8),
+        "guidance": guidance,
+    }
+
+
 def _expansion_warnings(target: str, depth: int, node_count: int, edge_count: int, mode: str, relation: str | None, suppress_common_hubs: bool) -> list[str]:
     warnings: list[str] = []
     if edge_count >= 200 or node_count >= 120:
@@ -301,6 +358,11 @@ def get_graph_neighborhood_with_options(
     filtered_edges = _filter_edges(all_edges, target=resolved_target, relation=relation, mode=normalized_mode, max_edges=max_edges, suppress_common_hubs=suppress_common_hubs)
     direct_edges = [edge for edge in filtered_edges if edge.get("source") == resolved_target or edge.get("target") == resolved_target]
     filtered_nodes = _nodes_for_edges(resolved_target, filtered_edges)
+    raw_node_count = len(neighborhood.get("nodes", []))
+    hub_summary = _hub_summary(resolved_target, all_edges, filtered_edges, raw_node_count, len(filtered_nodes))
+    warnings = _expansion_warnings(resolved_target, depth, len(filtered_nodes), len(filtered_edges), normalized_mode, relation, suppress_common_hubs)
+    if hub_summary["is_hub"]:
+        warnings.insert(0, "This target behaves like a graph hub; results are summarized and may be partial.")
     return {
         "target": resolved_target,
         "depth": depth,
@@ -308,10 +370,12 @@ def get_graph_neighborhood_with_options(
         "relation_filter": relation,
         "max_edges": max_edges,
         "suppress_common_hubs": suppress_common_hubs,
+        "partial": bool(hub_summary["truncated_edge_count"]),
+        "hub_summary": hub_summary,
         "nodes": filtered_nodes,
         "edges": filtered_edges,
         "raw_counts": {
-            "node_count": len(neighborhood.get("nodes", [])),
+            "node_count": raw_node_count,
             "edge_count": len(all_edges),
         },
         "compact_summary": {
@@ -323,12 +387,14 @@ def get_graph_neighborhood_with_options(
             "node_count": len(filtered_nodes),
             "edge_count": len(filtered_edges),
             "direct_edge_count": len(direct_edges),
-            "raw_node_count": len(neighborhood.get("nodes", [])),
+            "raw_node_count": raw_node_count,
             "raw_edge_count": len(all_edges),
+            "partial": bool(hub_summary["truncated_edge_count"]),
+            "hub_summary": hub_summary,
             "top_edges": filtered_edges[:8],
             "top_direct_edges": direct_edges[:8],
             "top_neighbors": _top_neighbors(filtered_edges, resolved_target),
             "relation_breakdown": _relation_breakdown(filtered_edges),
-            "warnings": _expansion_warnings(resolved_target, depth, len(filtered_nodes), len(filtered_edges), normalized_mode, relation, suppress_common_hubs),
+            "warnings": warnings,
         },
     }

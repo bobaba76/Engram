@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from services.api_impact_service import api_impact
+from services.graph_edge_utils import edges_for_source_limited, edges_for_target_limited
 from services.route_map_service import route_map
 
 if TYPE_CHECKING:
@@ -20,6 +21,7 @@ TABLE_PATTERN = re.compile(
 COMPONENT_FILE_HINTS = ("/components/", "/pages/", "/views/", "/screens/")
 REPOSITORY_FILE_HINTS = ("/repositories/", "/repository/", "/models/", "/database", "/db_")
 ENDPOINT_FILE_HINTS = ("/routers/", "/routes/", "/api/")
+SERVICE_FILE_HINTS = ("/services/", "/service/")
 
 
 def _target_tokens(value: str) -> list[str]:
@@ -163,6 +165,60 @@ def _processes_for_files(duckdb_store: DuckDBStore, file_paths: set[str], limit:
     return rows[:limit]
 
 
+def _lexical_candidate_files(duckdb_store: DuckDBStore, tokens: list[str], limit: int = 12) -> list[str]:
+    normalized_tokens = [token.lower().replace("-", "_") for token in tokens if len(token) >= 3]
+    if not normalized_tokens:
+        return []
+    scored: list[tuple[int, str]] = []
+    token_aliases: dict[str, set[str]] = {
+        "trends": {"trend", "trends"},
+        "trend": {"trend", "trends"},
+        "intransit": {"intransit", "in_transit", "transit"},
+        "product": {"product", "products"},
+        "products": {"product", "products"},
+        "stock": {"stock"},
+    }
+    expanded_tokens: set[str] = set(normalized_tokens)
+    for token in normalized_tokens:
+        expanded_tokens.update(token_aliases.get(token, set()))
+    for row in duckdb_store.files.fetch_all():
+        path = str(row.get("path", "") if isinstance(row, dict) else "").replace("\\", "/")
+        if not path:
+            continue
+        haystack = path.lower().replace("-", "_")
+        score = sum(1 for token in expanded_tokens if token in haystack)
+        if score:
+            scored.append((score, path))
+    for token in list(expanded_tokens)[:8]:
+        for symbol in duckdb_store.fetch_symbols_for_target(token, limit=20):
+            path = str(symbol.get("file_path", "") or "").replace("\\", "/")
+            if path:
+                scored.append((3, path))
+        for chunk in duckdb_store.search_chunks_content(token, limit=30):
+            path = str(chunk.get("file_path", "") or "").replace("\\", "/")
+            if path:
+                scored.append((int(chunk.get("token_hits", 1) or 1) + 3, path))
+    ranked: dict[str, int] = {}
+    for score, path in scored:
+        normalized = f"/{path}".lower()
+        boost = 0
+        if any(hint in normalized for hint in SERVICE_FILE_HINTS):
+            boost += 2
+        if any(hint in normalized for hint in COMPONENT_FILE_HINTS):
+            boost += 2
+        if any(hint in normalized for hint in ENDPOINT_FILE_HINTS):
+            boost += 1
+        if "trend" in normalized and "product" in normalized:
+            boost += 3
+        if any(token in normalized for token in ("intransit", "in_transit", "transit")):
+            boost += 2
+        ranked[path] = max(score + boost, ranked.get(path, 0))
+    return [
+        path
+        for path, _score in sorted(ranked.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    ]
+
+
 def _graph_edges_for_files(kuzu_store: KuzuStore, duckdb_store: DuckDBStore, file_paths: set[str], limit: int = 40) -> list[dict[str, object]]:
     edges: list[dict[str, object]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -171,7 +227,9 @@ def _graph_edges_for_files(kuzu_store: KuzuStore, duckdb_store: DuckDBStore, fil
             qualified_name = str(symbol.get("qualified_name", ""))
             if not qualified_name:
                 continue
-            for edge in [*kuzu_store.edges_for_source(qualified_name), *kuzu_store.edges_for_target(qualified_name)]:
+            source_edges = edges_for_source_limited(kuzu_store, qualified_name, limit=24)
+            target_edges = edges_for_target_limited(kuzu_store, qualified_name, limit=24)
+            for edge in [*source_edges, *target_edges]:
                 key = (str(edge.get("source", "")), str(edge.get("relation", "")), str(edge.get("target", "")))
                 if key in seen:
                     continue
@@ -209,14 +267,30 @@ def app_context(repo_root: Path, duckdb_store: DuckDBStore, kuzu_store: KuzuStor
     symbol_limit = limit * (2 if bool(target_shape["is_broad"]) else 3)
     symbol_rows = duckdb_store.fetch_symbols_for_target(normalized_target, limit=symbol_limit) if normalized_target else []
     symbol_files = {str(row.get("file_path", "")) for row in symbol_rows if row.get("file_path")}
-    candidate_files = route_files | set(list(symbol_files)[:limit])
+    candidate_file_order = [path for path in [*sorted(route_files), *list(symbol_files)[:limit]] if path]
+    candidate_files = set(candidate_file_order)
+    if not candidate_files and normalized_target:
+        fallback_files = _lexical_candidate_files(duckdb_store, [str(token) for token in target_shape.get("tokens", [])], limit=limit)
+        candidate_file_order = fallback_files
+        candidate_files.update(fallback_files)
+        if fallback_files:
+            warnings.append("No exact route/symbol match; used lexical file fallback.")
     if not candidate_files and not normalized_target:
         for row in duckdb_store.files.fetch_all()[:limit]:
-            candidate_files.add(str(row.get("path", "")))
+            path = str(row.get("path", ""))
+            candidate_files.add(path)
+            candidate_file_order.append(path)
     if bool(target_shape["is_broad"]):
         warnings.append("Target is broad; app context was narrowed to direct symbol/file matches to avoid an expensive fan-out.")
 
-    file_nodes = [_inflate_file_node(repo_root, duckdb_store, file_path) for file_path in sorted(candidate_files)[:limit]]
+    ordered_files = []
+    for file_path in candidate_file_order:
+        if file_path in candidate_files and file_path not in ordered_files:
+            ordered_files.append(file_path)
+    for file_path in sorted(candidate_files):
+        if file_path not in ordered_files:
+            ordered_files.append(file_path)
+    file_nodes = [_inflate_file_node(repo_root, duckdb_store, file_path) for file_path in ordered_files[:limit]]
     kinds: dict[str, int] = {}
     tables: set[str] = set()
     for node in file_nodes:

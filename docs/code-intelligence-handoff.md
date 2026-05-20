@@ -30,6 +30,8 @@ Latest embedded-C/MPLAB live MCP smoke against `V0.99`:
 
 The remaining live blocker was `reindex_project` timing out at the MCP client's 120s limit before publishing a new manifest. `reindex_project` now defaults to background mode and `reindex_status(job_id)` can poll completion.
 
+See `docs/engineering-landmines.md` for the incremental hardening backlog from external review notes. That file tracks runtime safety, scale, graph consistency, and maintainability concerns separately from this roadmap.
+
 Completed and validated:
 
 - explicit git/risk scope metadata

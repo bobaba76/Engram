@@ -1,6 +1,7 @@
 import sys
 import io
 import hashlib
+import inspect
 import json
 import time
 
@@ -14,6 +15,7 @@ import os
 import subprocess
 import threading
 import uuid
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -389,6 +391,49 @@ def main() -> int:
         safe_job_id = "".join(ch for ch in str(job_id) if ch.isalnum() or ch in {"-", "_"})[:64] or "unknown"
         return ROOT / "data" / "reindex_jobs" / safe_job_id
 
+    def _reindex_job_state_path(job_id: str) -> Path:
+        return _reindex_job_root(job_id) / "job.json"
+
+    def _serializable_reindex_job(job: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in job.items() if key != "process"}
+
+    def _persist_reindex_job(job: dict[str, Any]) -> None:
+        job_id = str(job.get("job_id", ""))
+        if not job_id:
+            return
+        state_path = _reindex_job_state_path(job_id)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = state_path.with_suffix(".tmp")
+        try:
+            temp_path.write_text(json.dumps(_serializable_reindex_job(job), indent=2, sort_keys=True), encoding="utf-8")
+            temp_path.replace(state_path)
+        except OSError:
+            return
+
+    def _load_reindex_job(job_id: str) -> dict[str, Any] | None:
+        state_path = _reindex_job_state_path(job_id)
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload.setdefault("job_id", job_id)
+        return payload
+
+    def _read_log_tail(path: Path, max_chars: int = 4000) -> str:
+        if not path or not path.exists():
+            return ""
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as handle:
+                if size > max_chars:
+                    handle.seek(max(0, size - max_chars))
+                data = handle.read(max_chars)
+        except OSError:
+            return ""
+        return data.decode("utf-8", errors="replace")
+
     def _get_repo_context(repo: str = "") -> dict[str, Any]:
         repo_root = resolve_indexed_repo(selected_repo_root, repo or None) if str(repo or "").strip() else selected_repo_root
         cached = repo_context_cache.get(repo_root)
@@ -449,12 +494,14 @@ def main() -> int:
         )
 
     def _close_repo_context(context: dict[str, Any]) -> None:
-        for key in ("kuzu_store", "duckdb_store"):
+        for key in ("kuzu_store", "duckdb_store", "vector_store"):
             store = context.get(key)
             close = getattr(store, "close", None)
             if callable(close):
                 close()
         context["kuzu_store"] = None
+        context["duckdb_store"] = None
+        context["vector_store"] = None
 
     def _close_all_repo_contexts() -> None:
         for cached_context in list(repo_context_cache.values()):
@@ -469,7 +516,10 @@ def main() -> int:
     def _reindex_status_payload(job_id: str) -> dict[str, object]:
         job = reindex_jobs.get(job_id)
         if job is None:
-            return {"job_id": job_id, "status": "not_found", "ok": False}
+            job = _load_reindex_job(job_id)
+            if job is None:
+                return {"job_id": job_id, "status": "not_found", "ok": False}
+            reindex_jobs[job_id] = job
         process = job.get("process")
         if isinstance(process, subprocess.Popen) and job.get("status") == "running":
             return_code = process.poll()
@@ -483,10 +533,16 @@ def main() -> int:
                 job["finished_at"] = time.time()
                 job["status"] = "completed" if return_code == 0 else "failed"
                 job["manifest"] = refreshed_manifest
+                _persist_reindex_job(job)
                 _close_all_repo_contexts()
                 _refresh_selected_manifest(target_root, refreshed_manifest)
         stdout_path = Path(str(job.get("stdout_path", "")))
         stderr_path = Path(str(job.get("stderr_path", "")))
+        warnings: list[str] = []
+        if job.get("status") == "running" and not isinstance(job.get("process"), subprocess.Popen):
+            warnings.append(
+                "Job state was restored after an MCP restart; live process polling is unavailable for this job. Check stdout/stderr tails or start a new reindex if status does not change."
+            )
         return {
             "job_id": job_id,
             "status": job.get("status", "unknown"),
@@ -501,12 +557,15 @@ def main() -> int:
             "stdout_tail": _read_log_tail(stdout_path),
             "stderr_tail": _read_log_tail(stderr_path),
             "manifest": job.get("manifest", {}),
+            "warnings": warnings,
+            "persisted_state_path": str(_reindex_job_state_path(job_id)),
             "compact_summary": {
                 "target": job.get("project_root", ""),
                 "status": job.get("status", "unknown"),
                 "run_mode": job.get("run_mode", ""),
                 "return_code": job.get("return_code"),
                 "manifest_counts": (job.get("manifest", {}) if isinstance(job.get("manifest", {}), dict) else {}).get("counts", {}),
+                "warnings": warnings,
             },
         }
 
@@ -557,6 +616,7 @@ def main() -> int:
             "stderr_path": str(stderr_path),
             "manifest": {},
         }
+        _persist_reindex_job(reindex_jobs[job_id])
         return {
             "job_id": job_id,
             "status": "started",
@@ -590,10 +650,22 @@ def main() -> int:
         context = _get_repo_context()
         return {
             "selected_repo": str(selected_repo_root),
+            "repo_root": str(selected_repo_root),
             "repo_name": selected_repo_root.name,
+            "repo_selection": {
+                "mode": "selected_repo_updated",
+                "requested_repo": repo,
+                "resolved_repo_root": str(selected_repo_root),
+                "resolved_repo_name": selected_repo_root.name,
+            },
             "manifest": context["manifest"],
             "summary_text": f"Selected repo: {selected_repo_root}",
-            "highlights": [f"Selected repo: {selected_repo_root.name}"],
+            "highlights": [f"Selected repo: {selected_repo_root.name}", f"Repo root: {selected_repo_root}"],
+            "compact_summary": {
+                "selected_repo": selected_repo_root.name,
+                "repo_root": str(selected_repo_root),
+                "repo_selection_mode": "selected_repo_updated",
+            },
         }
 
     def get_recent_runs_tool(limit: int = 10, repo: str = "") -> dict[str, object]:
@@ -685,11 +757,11 @@ def main() -> int:
 
     def api_impact_tool(route: str = "", repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
-        return api_impact(context["repo_root"], context["duckdb_store"], route=route, kuzu_store=_get_kuzu_store(repo))
+        return api_impact(context["repo_root"], context["duckdb_store"], route=route, kuzu_store=LazyKuzuStore(lambda: _get_kuzu_store(repo)))
 
     def shape_check_tool(route: str = "", repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
-        return shape_check(context["repo_root"], context["duckdb_store"], route=route, kuzu_store=_get_kuzu_store(repo))
+        return shape_check(context["repo_root"], context["duckdb_store"], route=route, kuzu_store=LazyKuzuStore(lambda: _get_kuzu_store(repo)))
 
     def field_impact_tool(field: str, route: str = "", repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
@@ -698,7 +770,7 @@ def main() -> int:
             context["duckdb_store"],
             field=field,
             route=route,
-            kuzu_store=_get_kuzu_store(repo),
+            kuzu_store=LazyKuzuStore(lambda: _get_kuzu_store(repo)),
         )
 
     def app_context_tool(target: str = "", limit: int = 12, repo: str = "") -> dict[str, object]:
@@ -994,7 +1066,7 @@ def main() -> int:
 
     def find_tests_for_target_tool(target: str, limit: int = 10, repo: str = "") -> dict[str, object]:
         context = _get_repo_context(repo)
-        return find_tests_for_target(context["duckdb_store"], target=target, limit=limit)
+        return find_tests_for_target(context["duckdb_store"], target=target, limit=limit, kuzu_store=LazyKuzuStore(lambda: _get_kuzu_store(repo)))
 
     def suggest_tests_for_change_tool(scope: str = "unstaged", base_ref: str = "", repo: str = "") -> dict[str, object]:
         cached_changes = _detect_changes_from_cache(scope, base_ref, repo)
@@ -1090,6 +1162,61 @@ def main() -> int:
         context = _get_repo_context(repo)
         return get_source_context(context["duckdb_store"], target=target, limit=limit, repo_root=context["repo_root"])
 
+    def _append_warning(payload: dict[str, Any], warning: str) -> None:
+        warnings = payload.setdefault("warnings", [])
+        if isinstance(warnings, list) and warning not in warnings:
+            warnings.append(warning)
+        compact_summary = payload.setdefault("compact_summary", {})
+        if isinstance(compact_summary, dict):
+            summary_warnings = compact_summary.setdefault("warnings", [])
+            if isinstance(summary_warnings, list) and warning not in summary_warnings:
+                summary_warnings.append(warning)
+
+    def _add_repo_metadata(payload: Any, handler: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        if not isinstance(payload, dict):
+            return payload
+        signature = inspect.signature(handler)
+        if "repo" not in signature.parameters:
+            return payload
+        try:
+            bound = signature.bind_partial(*args, **kwargs)
+        except TypeError:
+            bound = None
+        repo_arg = ""
+        if bound is not None:
+            repo_arg = str(bound.arguments.get("repo") or "").strip()
+        resolved_repo_root = _fast_repo_root_for_tool(selected_repo_root, repo_arg)
+        payload.setdefault("repo_root", str(resolved_repo_root))
+        payload.setdefault("repo_name", resolved_repo_root.name)
+        selection_mode = "explicit_repo" if repo_arg else "selected_repo_fallback"
+        payload.setdefault(
+            "repo_selection",
+            {
+                "mode": selection_mode,
+                "requested_repo": repo_arg or None,
+                "resolved_repo_root": str(resolved_repo_root),
+                "resolved_repo_name": resolved_repo_root.name,
+            },
+        )
+        compact_summary = payload.setdefault("compact_summary", {})
+        if isinstance(compact_summary, dict):
+            compact_summary.setdefault("repo_root", str(resolved_repo_root))
+            compact_summary.setdefault("repo_name", resolved_repo_root.name)
+            compact_summary.setdefault("repo_selection_mode", selection_mode)
+        if not repo_arg:
+            _append_warning(payload, f"No repo argument provided; used selected repo '{resolved_repo_root.name}'.")
+        return payload
+
+    def _repo_safe_handler(handler: Any) -> Any:
+        signature = inspect.signature(handler)
+
+        @wraps(handler)
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            return _add_repo_metadata(handler(*args, **kwargs), handler, args, kwargs)
+
+        wrapped.__signature__ = signature
+        return wrapped
+
     tool_definitions = [
         ("index_status", index_status, "Show index readiness, counts, versions, and resolved repository metadata."),
         ("list_repos", list_repos_tool, "List indexed sibling repositories Coder can serve."),
@@ -1130,7 +1257,7 @@ def main() -> int:
         ("get_source_context", get_source_context_tool, "Return source chunks and previews for a target."),
     ]
     for tool_name, handler, description in tool_definitions:
-        server.register_tool(tool_name, handler, description=description)
+        server.register_tool(tool_name, _repo_safe_handler(handler), description=description)
     server.run()
     return 0
 

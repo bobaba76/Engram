@@ -9,12 +9,22 @@ from storage.duckdb_store import DuckDBStore
 from storage.kuzu_store import KuzuStore
 from services.api_impact_service import api_impact
 from services.process_service import trace_execution_flows
+from services.risk_profiles import (
+    embedded_sensitive_path_hints,
+    high_risk_path_hints,
+    high_risk_symbol_hints,
+    path_risk_hints,
+)
 from services.route_map_service import _backend_handlers, _direct_frontend_consumers, _read_text
+from services.timeout_utils import run_with_timeout
 
 
 HUNK_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,(?P<count>\d+))? @@", re.MULTILINE)
 BROAD_GRAPH_FILE_LIMIT = 20
 BROAD_PROCESS_SYMBOL_LIMIT = 80
+GRAPH_OPERATION_TIMEOUT_SECONDS = 1.5
+ROUTE_OPERATION_TIMEOUT_SECONDS = 2.0
+PROCESS_OPERATION_TIMEOUT_SECONDS = 2.0
 
 
 def _run_git(repo_root: Path, args: list[str]) -> str:
@@ -244,83 +254,12 @@ def _symbol_risk_hints(file_path: str, symbols: list[dict[str, object]]) -> list
 
 
 def _path_risk_hints(file_path: str) -> list[str]:
-    normalized = str(file_path or "").replace("\\", "/").lower()
-    name = Path(normalized).name
-    hints = []
-    if normalized.endswith((".s", ".asm", ".inc")):
-        hints.append("embedded/native assembly startup or include path")
-    if normalized.endswith((".mcp", ".mcw", ".mptags", ".scl", ".plt")):
-        hints.append("MPLAB embedded project/config path")
-    if re.match(r"p\d+[a-z0-9_]*\.h$", name) or name.startswith(("xc", "pic", "dspic")):
-        hints.append("device/vendor register header")
-    if name in {"global.h", "globals.h", "typedefs.h", "sysdefs.h"}:
-        hints.append("global embedded C contract header")
-    if any(token in name for token in ("trap", "isr", "interrupt", "vector", "reset")):
-        hints.append("interrupt/trap/startup path")
-    if any(token in name for token in ("uart", "flash", "init", "bootloader")):
-        hints.append("embedded peripheral/init/flash path")
-    if normalized.endswith((".h", ".hh", ".hpp", ".hxx")):
-        hints.append("public/native header surface")
-    if normalized.endswith((".c", ".cc", ".cpp", ".cxx")):
-        hints.append("native implementation file")
-    if normalized.endswith((".cmake", "cmakelists.txt", "makefile")) or normalized.endswith((".vcxproj", ".vcxproj.filters")):
-        hints.append("native build target/config path")
-    if normalized.endswith((".def", ".map")) or "/exports/" in normalized:
-        hints.append("native exported API/ABI surface")
-    if normalized.endswith(".cs") and any(part in normalized for part in ("/controllers/", "/endpoints/", "/minimalapi", "program.cs")):
-        hints.append("C# public route/API path")
-    if normalized.endswith(".cs") and any(token in normalized for token in ("dto", "contract", "request", "response")):
-        hints.append("C# DTO/API contract path")
-    if normalized.endswith(".cs") and any(token in normalized for token in ("startup.cs", "program.cs", "servicecollection", "dependencyinjection")):
-        hints.append("C# dependency-injection/config path")
-    if normalized.endswith(".cs") and any(part in normalized for part in ("/migrations/", "migration", "dbcontext")):
-        hints.append("C# database/schema path")
-    if normalized.endswith((".dpr", ".dpk", ".dproj", ".groupproj", ".lpi", ".lpk")):
-        hints.append("Object Pascal project/package path")
-    if normalized.endswith((".dfm", ".lfm")):
-        hints.append("Object Pascal form/resource path")
-        hints.append("Object Pascal form event wiring path")
-    if normalized.endswith((".pas", ".pp")):
-        hints.append("Object Pascal unit/source path")
-    if normalized.endswith(".inc"):
-        hints.append("Object Pascal/global include path")
-    if any(part in normalized for part in ("/auth", "/security", "/middleware")):
-        hints.append("auth/security/middleware path")
-    if any(part in normalized for part in ("/routers/", "/routes/", "/api/")):
-        hints.append("public route/API path")
-    if any(part in normalized for part in ("/repositories/", "/repository/", "/db", "migration", "schema")):
-        hints.append("database/repository path")
-    if any(part in normalized for part in ("/services/", "/core/", "/shared/", "/utils/", "/config")):
-        hints.append("shared service/core path")
-    return hints
+    return path_risk_hints(file_path)
 
 
 def _file_risk(file_path: str, changed_symbol_count: int, impacted: bool) -> str:
     hints = _path_risk_hints(file_path)
-    if changed_symbol_count >= 8 or any(
-        "auth/security" in hint
-        or "database" in hint
-        or "device/vendor register header" in hint
-        or "global embedded C contract header" in hint
-        or "interrupt/trap/startup" in hint
-        or "MPLAB embedded project/config" in hint
-        or "public/native header" in hint
-        or "native ABI/layout" in hint
-        or "native build target/config" in hint
-        or "native exported API/ABI" in hint
-        or "C# public route/API" in hint
-        or "C# DTO/API contract" in hint
-        or "C# dependency-injection/config" in hint
-        or "C# database/schema" in hint
-        or "Object Pascal project/package" in hint
-        or "Object Pascal form/resource" in hint
-        or "Object Pascal/global include" in hint
-        or "Object Pascal public unit dependency" in hint
-        or "Object Pascal project ownership" in hint
-        or "Object Pascal include dependency" in hint
-        or "Object Pascal conditional compilation" in hint
-        for hint in hints
-    ):
+    if changed_symbol_count >= 8 or high_risk_path_hints(hints):
         return "HIGH"
     if changed_symbol_count >= 3 or impacted or hints:
         return "MEDIUM"
@@ -339,7 +278,7 @@ def _risk_by_file(changed_files: list[str], changed_symbols: list[dict[str, obje
         file_symbols = symbols_by_file.get(file_path, [])
         risk_factors = [*_path_risk_hints(file_path), *_symbol_risk_hints(file_path, file_symbols)]
         file_risk = _file_risk(file_path, len(file_symbols), file_path in impacted_set)
-        if any("native ABI/layout" in factor or "native exported symbol" in factor for factor in risk_factors):
+        if high_risk_symbol_hints(risk_factors):
             file_risk = "HIGH"
         rows.append(
             {
@@ -380,10 +319,7 @@ def _risk_explanation(changed_files: list[str], changed_symbols: list[dict[str, 
     embedded_files = [
         row["file"]
         for row in risk_by_file
-        if any(
-            str(factor).startswith(("embedded", "MPLAB", "device/vendor", "global embedded", "interrupt/trap"))
-            for factor in row.get("risk_factors", [])
-        )
+        if embedded_sensitive_path_hints([str(factor) for factor in row.get("risk_factors", [])])
     ]
     if embedded_files:
         reasons.append(f"{len(embedded_files)} embedded-C sensitive file(s) changed")
@@ -425,10 +361,7 @@ def _weighted_risk(
     medium_files = [row for row in risk_by_file if row.get("risk") == "MEDIUM"]
     embedded_sensitive = [
         row for row in risk_by_file
-        if any(
-            str(factor).startswith(("embedded", "MPLAB", "device/vendor", "global embedded", "interrupt/trap"))
-            for factor in row.get("risk_factors", [])
-        )
+        if embedded_sensitive_path_hints([str(factor) for factor in row.get("risk_factors", [])])
     ]
     add(len(high_files) * 10, f"{len(high_files)} high-risk changed file(s)")
     add(len(medium_files) * 4, f"{len(medium_files)} medium-risk changed file(s)")
@@ -495,9 +428,59 @@ def _focused_followups(file_risks: list[dict[str, object]], changed_symbols: lis
     return followups[:6]
 
 
+def _process_target_priority(symbol: dict[str, object]) -> tuple[int, int, int, int, str]:
+    file_path = str(symbol.get("file_path", "") or "").replace("\\", "/").lower()
+    name = str(symbol.get("qualified_name") or symbol.get("name") or "")
+    tail = name.rsplit(".", 1)[-1].lower()
+    span = int(symbol.get("end_line", 0) or 0) - int(symbol.get("start_line", 0) or 0)
+    broad_wrapper = int(tail in {"main", "__init__"} or span > 180)
+    service_area = int(file_path.startswith("services/") and "detect_changes_service.py" not in file_path)
+    graph_area = int("impact" in file_path or "process" in file_path or "route" in file_path or "context" in file_path)
+    runtime_kind = int(str(symbol.get("kind", "") or "").lower() in {"function", "method"})
+    return (-broad_wrapper, service_area, graph_area, runtime_kind, name)
+
+
+def _indexed_process_rows(duckdb_store: DuckDBStore, targets: list[dict[str, str]], changed_routes: list[str], limit: int = 12) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in targets[:12]:
+        target = item["target"]
+        aliases = [target, target.rsplit(".", 1)[-1]]
+        for alias in aliases:
+            for process in duckdb_store.fetch_process_clusters_for_symbol(alias, limit=4):
+                name = str(process.get("name", "") or "")
+                key = (name, target)
+                if not name or key in seen:
+                    continue
+                seen.add(key)
+                route_context = [route for route in changed_routes if route.replace("/", "_").strip("_").lower() in name.lower()]
+                step_count = int(process.get("avg_step_count", 0) or process.get("step_count", 0) or 0)
+                rows.append({
+                    "name": name,
+                    "target": target,
+                    "entry_symbol": process.get("canonical_entry_symbol", ""),
+                    "module": process.get("module_tags", []),
+                    "steps": step_count,
+                    "step_details": [],
+                    "changed_symbol": target,
+                    "changed_symbols": [target],
+                    "changed_routes": route_context,
+                    "risk": "MEDIUM" if step_count >= 4 else "LOW",
+                    "risk_reasons": ["indexed process cluster includes changed symbol"],
+                })
+                if len(rows) >= limit:
+                    return rows
+    return rows
+
+
 def _process_change_summary(duckdb_store: DuckDBStore, kuzu_store: KuzuStore, changed_symbols: list[dict[str, object]], changed_routes: list[str], warnings: list[str] | None = None) -> dict[str, object]:
     targets: list[dict[str, str]] = []
-    for symbol in changed_symbols[:8]:
+    ranked_symbols = sorted(
+        [symbol for symbol in changed_symbols if isinstance(symbol, dict)],
+        key=_process_target_priority,
+        reverse=True,
+    )
+    for symbol in ranked_symbols[:10]:
         if not isinstance(symbol, dict):
             continue
         target = str(symbol.get("qualified_name") or symbol.get("name") or "")
@@ -518,11 +501,23 @@ def _process_change_summary(duckdb_store: DuckDBStore, kuzu_store: KuzuStore, ch
         unique_targets.append(item)
     affected_processes = []
     risk_by_process = []
-    if len(unique_targets) > 6 and warnings is not None:
-        warnings.append("Process tracing was capped to the first 6 changed symbols to keep change detection responsive.")
-    for item in unique_targets[:6]:
-        try:
-            traced = trace_execution_flows(
+    indexed_rows = _indexed_process_rows(duckdb_store, unique_targets, changed_routes, limit=12)
+    affected_processes.extend(indexed_rows)
+    for row in indexed_rows:
+        risk_by_process.append({
+            "name": row.get("name", ""),
+            "risk": row.get("risk", "LOW"),
+            "changed_symbol": row.get("changed_symbol", ""),
+            "steps": row.get("steps", 0),
+        })
+    if indexed_rows:
+        return {
+            "affected_processes": affected_processes[:12],
+            "risk_by_process": risk_by_process[:12],
+        }
+    for item in unique_targets[:3]:
+        traced = run_with_timeout(
+            lambda item=item: trace_execution_flows(
                 duckdb_store,
                 kuzu_store,
                 target=item["target"],
@@ -531,8 +526,13 @@ def _process_change_summary(duckdb_store: DuckDBStore, kuzu_store: KuzuStore, ch
                 max_depth=4,
                 max_flows=4,
                 changed_symbols=[item["target"]],
-            )
-        except Exception:
+            ),
+            timeout_seconds=PROCESS_OPERATION_TIMEOUT_SECONDS,
+            default={},
+            warnings=warnings,
+            label=f"Process tracing for {item['target']}",
+        )
+        if not traced:
             continue
         flows = traced.get("flows", []) if isinstance(traced, dict) else []
         for flow in flows[:4] if isinstance(flows, list) else []:
@@ -619,10 +619,14 @@ def _route_change_summary(repo_root: Path, duckdb_store: DuckDBStore, changed_fi
             for route in direct_wrapper_routes.values():
                 if route and route not in candidate_routes:
                     candidate_routes.append(route)
-    for route_name in candidate_routes[:12]:
-        try:
-            contract = api_impact(repo_root, duckdb_store, route=route_name, kuzu_store=kuzu_store)
-        except Exception:
+    for route_name in candidate_routes[:8]:
+        contract = run_with_timeout(
+            lambda route_name=route_name: api_impact(repo_root, duckdb_store, route=route_name, kuzu_store=kuzu_store),
+            timeout_seconds=ROUTE_OPERATION_TIMEOUT_SECONDS,
+            default={},
+            label=f"Route impact for {route_name}",
+        )
+        if not contract:
             continue
         for route_row in contract.get("routes", []) if isinstance(contract, dict) else []:
             if not isinstance(route_row, dict):
@@ -742,7 +746,13 @@ def detect_changes(
             f"Graph blast-radius traversal skipped for {len(changed_files)} changed files; narrow the scope or target a file/symbol for full graph impact."
         )
     else:
-        impacted_files = sorted(kuzu_store.get_impacted_files(changed_files)) if changed_files else []
+        impacted_files = sorted(run_with_timeout(
+            lambda: kuzu_store.get_impacted_files(changed_files),
+            timeout_seconds=GRAPH_OPERATION_TIMEOUT_SECONDS,
+            default=set(),
+            warnings=warnings,
+            label="Graph blast-radius traversal",
+        )) if changed_files else []
     impacted_symbols: list[dict[str, object]] = []
     seen_symbols: set[tuple[str, str]] = set()
     for file_path in impacted_files[:25]:

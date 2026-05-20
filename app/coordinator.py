@@ -67,8 +67,8 @@ def _review_group_key(file_path: str) -> str:
     if len(parts) >= 2:
         return "/".join(parts[:2])
     return file_path
- 
- 
+
+
 class Coordinator:
     def __init__(self, settings: RuntimeConfig) -> None:
         self.settings = settings
@@ -117,6 +117,7 @@ class Coordinator:
                 grouped_prepared_jobs.append(items[index:index + group_size])
         completed = 0
         analyses: list[ReviewAgentAnalysis] = []
+        analysis_records: list[dict[str, object]] = []
         max_workers = max(min(self.settings.max_concurrent_llm_reviews, len(grouped_prepared_jobs)), 1)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_group = {
@@ -134,13 +135,17 @@ class Coordinator:
                     record = asdict(analysis)
                     record["output_json"] = json.dumps(record["output_json"])
                     record["input_context_json"] = json.dumps(record["input_context_json"])
-                    self.duckdb.reviews.insert_agent_analysis(record)
+                    analysis_records.append(record)
                 completed += 1
                 group = future_to_group[future]
                 if self._should_log_index(completed, len(grouped_prepared_jobs)):
                     self._log_progress(
-                        f"agent analysis progress: {completed}/{len(grouped_prepared_jobs)} groups, {len(analyses)} analyses persisted ({', '.join(job.file_path for job, _, _ in group[:2])})"
+                        f"agent analysis progress: {completed}/{len(grouped_prepared_jobs)} groups, {len(analyses)} analyses prepared ({', '.join(job.file_path for job, _, _ in group[:2])})"
                     )
+        if analysis_records:
+            self._log_progress(f"agent analysis bulk write started: {len(analysis_records)} analyses")
+            self.duckdb.reviews.insert_agent_analyses(analysis_records)
+            self._log_progress("agent analysis bulk write completed")
         return analyses
 
     def _should_run_legacy_review_jobs(self, analysis_provider_used: str) -> bool:

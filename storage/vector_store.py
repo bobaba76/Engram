@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -48,8 +49,10 @@ class VectorStore:
         self.data_path = data_path
         self.data_path.mkdir(parents=True, exist_ok=True)
         self.cache_path = self.data_path / "embedding_cache.json"
+        self.cache_db_path = self.data_path / "embedding_cache.sqlite"
         self.items: list[dict[str, Any]] | None = []
         self.embedding_cache: dict[str, list[float]] = {}
+        self.cache_db: sqlite3.Connection | None = None
         self.db = lancedb.connect(str(self.data_path)) if lancedb is not None else None
         self.table = None
         if self.db is not None:
@@ -57,8 +60,68 @@ class VectorStore:
             table_names = set(self.db.table_names())
             if "chunks" in table_names:
                 self.table = self.db.open_table("chunks")
-        if self.cache_path.exists():
-            self.embedding_cache = json.loads(self.cache_path.read_text(encoding="utf-8"))
+        self._open_embedding_cache()
+
+    def close(self) -> None:
+        if self.cache_db is not None:
+            self.cache_db.close()
+            self.cache_db = None
+
+    def _open_embedding_cache(self) -> None:
+        try:
+            self.cache_db = sqlite3.connect(str(self.cache_db_path))
+            self.cache_db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS embedding_cache (
+                    content_hash TEXT PRIMARY KEY,
+                    vector_json TEXT NOT NULL
+                )
+                """
+            )
+            self.cache_db.commit()
+            self._migrate_legacy_embedding_cache()
+        except sqlite3.Error:
+            self.cache_db = None
+            if self.cache_path.exists():
+                try:
+                    self.embedding_cache = json.loads(self.cache_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    self.embedding_cache = {}
+
+    def _migrate_legacy_embedding_cache(self) -> None:
+        if self.cache_db is None or not self.cache_path.exists():
+            return
+        try:
+            legacy = json.loads(self.cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(legacy, dict):
+            return
+        rows = [
+            (str(content_hash), json.dumps(vector))
+            for content_hash, vector in legacy.items()
+            if isinstance(vector, list)
+        ]
+        if rows:
+            self.cache_db.executemany(
+                "INSERT OR IGNORE INTO embedding_cache(content_hash, vector_json) VALUES (?, ?)",
+                rows,
+            )
+            self.cache_db.commit()
+        try:
+            self.cache_path.unlink(missing_ok=True)
+        except OSError:
+            return
+
+    def _clear_embedding_cache(self) -> None:
+        self.embedding_cache = {}
+        if self.cache_db is not None:
+            try:
+                self.cache_db.execute("DELETE FROM embedding_cache")
+                self.cache_db.commit()
+            except sqlite3.Error:
+                pass
+        self.cache_path.unlink(missing_ok=True)
 
     def reset(self) -> None:
         if self.items is not None:
@@ -68,10 +131,30 @@ class VectorStore:
             if "chunks" in table_names:
                 self.db.drop_table("chunks")
             self.table = None
-        self.embedding_cache = {}
-        self.cache_path.unlink(missing_ok=True)
+        self._clear_embedding_cache()
 
     def get_cached_vectors(self, content_hashes: list[str]) -> dict[str, list[float]]:
+        if self.cache_db is not None and content_hashes:
+            cached: dict[str, list[float]] = {}
+            unique_hashes = list(dict.fromkeys(content_hashes))
+            for start in range(0, len(unique_hashes), 500):
+                batch = unique_hashes[start:start + 500]
+                placeholders = ", ".join("?" for _ in batch)
+                try:
+                    rows = self.cache_db.execute(
+                        f"SELECT content_hash, vector_json FROM embedding_cache WHERE content_hash IN ({placeholders})",
+                        batch,
+                    ).fetchall()
+                except sqlite3.Error:
+                    return {}
+                for content_hash, vector_json in rows:
+                    try:
+                        vector = json.loads(vector_json)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(vector, list):
+                        cached[str(content_hash)] = vector
+            return cached
         return {
             content_hash: self.embedding_cache[content_hash]
             for content_hash in content_hashes
@@ -79,12 +162,34 @@ class VectorStore:
         }
 
     def cache_embedding(self, content_hash: str, vector: list[float]) -> None:
+        if self.cache_db is not None:
+            try:
+                self.cache_db.execute(
+                    "INSERT OR IGNORE INTO embedding_cache(content_hash, vector_json) VALUES (?, ?)",
+                    (content_hash, json.dumps(vector)),
+                )
+                self.cache_db.commit()
+            except sqlite3.Error:
+                pass
+            return
         if content_hash in self.embedding_cache:
             return
         self.embedding_cache[content_hash] = vector
         self.cache_path.write_text(json.dumps(self.embedding_cache), encoding="utf-8")
 
     def cache_embeddings(self, items: dict[str, list[float]]) -> None:
+        if self.cache_db is not None:
+            rows = [(content_hash, json.dumps(vector)) for content_hash, vector in items.items()]
+            if rows:
+                try:
+                    self.cache_db.executemany(
+                        "INSERT OR IGNORE INTO embedding_cache(content_hash, vector_json) VALUES (?, ?)",
+                        rows,
+                    )
+                    self.cache_db.commit()
+                except sqlite3.Error:
+                    pass
+            return
         updated = False
         for content_hash, vector in items.items():
             if content_hash in self.embedding_cache:
@@ -132,8 +237,7 @@ class VectorStore:
                     raise
                 self.db.drop_table("chunks")
                 self.table = self.db.create_table("chunks", data=[row], mode="overwrite")
-                self.embedding_cache = {}
-                self.cache_path.unlink(missing_ok=True)
+                self._clear_embedding_cache()
 
     def add_items(self, items: list[dict[str, Any]]) -> None:
         if not items:
@@ -153,8 +257,7 @@ class VectorStore:
                     raise
                 self.db.drop_table("chunks")
                 self.table = self.db.create_table("chunks", data=rows, mode="overwrite")
-                self.embedding_cache = {}
-                self.cache_path.unlink(missing_ok=True)
+                self._clear_embedding_cache()
 
     def search(self, task: str, limit: int = 5, embedding: list[float] | None = None) -> list[dict[str, Any]]:
         if self.db is not None and self.table is not None and embedding is not None:

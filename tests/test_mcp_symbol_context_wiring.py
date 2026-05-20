@@ -21,5 +21,24 @@ def test_reindex_project_defaults_to_background_and_registers_status_tool() -> N
 
     assert "def reindex_project_tool(project_root: str = \"\", run_mode: str = INCREMENTAL, background: bool = True)" in source
     assert "def _reindex_job_root(job_id: str) -> Path:" in source
+    assert "def _reindex_job_state_path(job_id: str) -> Path:" in source
+    assert "def _persist_reindex_job(job: dict[str, Any]) -> None:" in source
+    assert "def _load_reindex_job(job_id: str) -> dict[str, Any] | None:" in source
+    assert "def _read_log_tail(path: Path" in source
+    assert "_persist_reindex_job(reindex_jobs[job_id])" in source
+    assert "job = _load_reindex_job(job_id)" in source
+    assert 'for key in ("kuzu_store", "duckdb_store", "vector_store")' in source
     assert "subprocess.Popen" in source
     assert "(\"reindex_status\", reindex_status_tool" in source
+
+
+def test_mcp_repo_aware_tools_echo_repo_metadata_and_warn_on_fallback() -> None:
+    source = Path("scripts/run_mcp.py").read_text(encoding="utf-8")
+
+    assert "def _add_repo_metadata(payload: Any, handler: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:" in source
+    assert "payload.setdefault(\"repo_root\", str(resolved_repo_root))" in source
+    assert "payload.setdefault(\"repo_name\", resolved_repo_root.name)" in source
+    assert "\"mode\": selection_mode" in source
+    assert "No repo argument provided; used selected repo" in source
+    assert "server.register_tool(tool_name, _repo_safe_handler(handler), description=description)" in source
+    assert "wrapped.__signature__ = signature" in source

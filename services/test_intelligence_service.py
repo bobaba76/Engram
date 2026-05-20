@@ -322,7 +322,32 @@ def _mapped_tests_for_seed(duckdb_store: DuckDBStore, seed_values: list[str]) ->
     return list(unique.values())
 
 
-def find_tests_for_target(duckdb_store: DuckDBStore, target: str, limit: int = 10) -> dict[str, object]:
+def _call_graph_tests(duckdb_store: DuckDBStore, kuzu_store: KuzuStore | None, target_symbols: list[str]) -> list[dict[str, object]]:
+    if kuzu_store is None:
+        return []
+    mapped: dict[str, dict[str, object]] = {}
+    for target_symbol in target_symbols[:8]:
+        for edge in kuzu_store.edges_for_target(target_symbol, relation="CALLS", limit=80):
+            caller = str(edge.get("source", "") or "")
+            if not caller:
+                continue
+            for row in duckdb_store.fetch_symbols_for_target(caller, limit=3):
+                file_path = str(row.get("file_path", "") or "")
+                if not _is_test_path(file_path):
+                    continue
+                mapped[file_path] = {
+                    "file_path": file_path,
+                    "name": row.get("name", Path(file_path).stem),
+                    "qualified_name": row.get("qualified_name", row.get("name", Path(file_path).stem)),
+                    "kind": row.get("kind", "test"),
+                    "score": 12,
+                    "token_overlap": 3,
+                    "why_relevant": f"test calls {target_symbol}",
+                }
+    return list(mapped.values())
+
+
+def find_tests_for_target(duckdb_store: DuckDBStore, target: str, limit: int = 10, kuzu_store: KuzuStore | None = None) -> dict[str, object]:
     candidates = resolve_candidates(duckdb_store, target=target, limit=5)
     target_files = []
     target_symbols = []
@@ -345,12 +370,13 @@ def find_tests_for_target(duckdb_store: DuckDBStore, target: str, limit: int = 1
         if _is_test_path(path):
             test_symbols.append({"file_path": path, "name": Path(path).name, "qualified_name": Path(path).stem, "kind": "test_file"})
     mapped_tests = _mapped_tests_for_seed(duckdb_store, [target, *target_files, *target_symbols])
+    graph_tests = _call_graph_tests(duckdb_store, kuzu_store, target_symbols)
     csharp_project_tests = _csharp_project_tests(duckdb_store, target_files, target_symbols)
     csharp_tests = [] if csharp_project_tests else _csharp_convention_tests(duckdb_store, target_files, target_symbols)
     native_tests = _native_convention_tests(duckdb_store, target_files, target_symbols)
     ranked_tests = _keep_relevant_tests(_rank_tests(seed_tokens, test_symbols, limit=limit), fallback_limit=0)
     tests_by_file: dict[str, dict[str, object]] = {}
-    for item in [*mapped_tests, *csharp_project_tests, *csharp_tests, *native_tests, *ranked_tests]:
+    for item in [*graph_tests, *mapped_tests, *csharp_project_tests, *csharp_tests, *native_tests, *ranked_tests]:
         file_path = str(item.get("file_path", "") or item.get("file", "") or "")
         if file_path and file_path not in tests_by_file:
             tests_by_file[file_path] = item

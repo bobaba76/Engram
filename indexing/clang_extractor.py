@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 from typing import Iterable
 
 from indexing.native_build_context import expand_object_like_macros, extract_macro_definitions, load_native_build_context, resolve_include_targets
@@ -40,6 +43,7 @@ _INTERESTING_CURSOR_KINDS = {
     "MACRO_DEFINITION",
 }
 _REFERENCED_CURSOR_KINDS = {"CALL_EXPR", "DECL_REF_EXPR", "MEMBER_REF_EXPR"}
+CLANG_SUBPROCESS_TIMEOUT_SECONDS = float(os.environ.get("CODER_CLANG_SUBPROCESS_TIMEOUT_SECONDS", "10") or "10")
 
 
 def _kind_name(cursor) -> str:
@@ -234,7 +238,32 @@ def _cursor_symbols(cursor, file_path: Path, build_context: dict[str, object], i
     return symbols
 
 
-def extract_clang_symbols(file_path: Path) -> list[SymbolRecord]:
+def _symbol_to_dict(symbol: SymbolRecord) -> dict[str, object]:
+    return {
+        "name": symbol.name,
+        "qualified_name": symbol.qualified_name,
+        "kind": symbol.kind,
+        "start_line": symbol.start_line,
+        "end_line": symbol.end_line,
+        "signature": symbol.signature,
+        "metadata": symbol.metadata,
+    }
+
+
+def _symbol_from_dict(payload: dict[str, object]) -> SymbolRecord:
+    metadata = payload.get("metadata", {})
+    return SymbolRecord(
+        name=str(payload.get("name", "") or ""),
+        qualified_name=str(payload.get("qualified_name", "") or ""),
+        kind=str(payload.get("kind", "") or ""),
+        start_line=int(payload.get("start_line", 1) or 1),
+        end_line=int(payload.get("end_line", payload.get("start_line", 1)) or 1),
+        signature=str(payload.get("signature", "") or ""),
+        metadata=metadata if isinstance(metadata, dict) else {},
+    )
+
+
+def _extract_clang_symbols_in_process(file_path: Path) -> list[SymbolRecord]:
     status = clang_runtime_status()
     if not status.get("available") or status.get("error"):
         return []
@@ -258,3 +287,37 @@ def extract_clang_symbols(file_path: Path) -> list[SymbolRecord]:
         seen.add(key)
         deduped.append(symbol)
     return deduped
+
+
+def extract_clang_symbols(file_path: Path) -> list[SymbolRecord]:
+    if os.environ.get("CODER_CLANG_IN_PROCESS", "").strip().lower() in {"1", "true", "yes"}:
+        return _extract_clang_symbols_in_process(file_path)
+    command = [
+        sys.executable,
+        "-m",
+        "indexing.clang_worker",
+        str(file_path.resolve()),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=CLANG_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if completed.returncode != 0:
+        return []
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return []
+    symbols = payload.get("symbols", []) if isinstance(payload, dict) else []
+    if not isinstance(symbols, list):
+        return []
+    return [_symbol_from_dict(item) for item in symbols if isinstance(item, dict)]

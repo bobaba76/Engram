@@ -431,6 +431,37 @@ class ReviewRepository:
             ],
         )
 
+    def insert_agent_analyses(self, records: list[dict[str, Any]]) -> None:
+        if not records:
+            return
+        rows = [
+            [
+                record["analysis_id"],
+                record["job_id"],
+                record["run_id"],
+                record["file_path"],
+                record["agent_type"],
+                record["provider_name"],
+                record["model_name"],
+                record["prompt_version"],
+                record["summary"],
+                record["output_json"],
+                record["input_context_json"],
+                record["status"],
+                record["created_at"],
+            ]
+            for record in records
+        ]
+        self.store.executemany(
+            """
+            INSERT OR REPLACE INTO review_agent_analyses(
+                analysis_id, job_id, run_id, file_path, agent_type, provider_name, model_name,
+                prompt_version, summary, output_json, input_context_json, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
     def upsert_finding(self, record: dict[str, Any]) -> None:
         self.store.execute(
             """

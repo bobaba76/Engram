@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from storage.duckdb_store import DuckDBStore
 from storage.kuzu_store import KuzuStore
+from services.graph_edge_utils import edges_for_source_limited, edges_for_target_limited
 from services.symbol_resolution_service import ambiguity_status, resolve_candidates
 
 
@@ -50,7 +51,7 @@ def _entry_priority(duckdb_store: DuckDBStore, symbol_name: str, requested_file_
 
 
 def _entry_candidates(duckdb_store: DuckDBStore, kuzu_store: KuzuStore, target: str, requested_file_path: str = "") -> list[str]:
-    callers = [str(edge.get("source", "")) for edge in kuzu_store.edges_for_target(target, relation="CALLS") if str(edge.get("source", ""))]
+    callers = [str(edge.get("source", "")) for edge in edges_for_target_limited(kuzu_store, target, relation="CALLS", limit=64) if str(edge.get("source", ""))]
     if not callers:
         return [target]
     ranked = sorted(set(callers), key=lambda item: _entry_priority(duckdb_store, item, requested_file_path=requested_file_path), reverse=True)
@@ -118,7 +119,7 @@ def _select_flows(duckdb_store: DuckDBStore, flows: list[list[str]], max_flows: 
 def _flow_edges(kuzu_store: KuzuStore, current: str) -> list[dict[str, object]]:
     edges: list[dict[str, object]] = []
     for relation in ("CALLS", "USES_SERVICE", "INJECTS"):
-        edges.extend(kuzu_store.edges_for_source(current, relation=relation))
+        edges.extend(edges_for_source_limited(kuzu_store, current, relation=relation, limit=64))
     return edges
 
 

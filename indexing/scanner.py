@@ -113,10 +113,25 @@ EXCLUDED_PATH_PARTS = {
     "build",
 }
 
+SAMPLE_BYTES = 20_000
+HASH_CHUNK_BYTES = 1024 * 1024
+DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024
+
 
 def _split_env_patterns(name: str) -> tuple[str, ...]:
     raw_value = os.environ.get(name, "")
     return tuple(part.strip() for part in raw_value.split(",") if part.strip())
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+    return max(0, value)
 
 
 def _load_gitignore_patterns(repo_root: Path) -> list[str]:
@@ -179,13 +194,31 @@ def _should_exclude_file(path: Path, payload: bytes) -> bool:
     return _looks_minified(path, payload)
 
 
+def _read_sample(path: Path, limit: int = SAMPLE_BYTES) -> bytes:
+    with path.open("rb") as handle:
+        return handle.read(limit)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(HASH_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def scan_repo(repo_root: Path, excluded_dirs: Iterable[str] = (), progress_callback: Callable[[str], None] | None = None) -> list[FileRecord]:
     excluded = {part for part in excluded_dirs if part}
     configured_includes = _split_env_patterns("CODER_SCAN_INCLUDE_PATTERNS")
     configured_excludes = (*_split_env_patterns("CODER_SCAN_EXCLUDE_PATTERNS"), *_load_gitignore_patterns(repo_root))
+    max_file_bytes = _env_int("CODER_SCAN_MAX_FILE_BYTES", DEFAULT_MAX_FILE_BYTES)
     records: list[FileRecord] = []
     visited_dirs = 0
     candidate_files = 0
+    skipped_large_files = 0
     for root, dir_names, file_names in os.walk(repo_root):
         visited_dirs += 1
         root_path = Path(root)
@@ -214,16 +247,19 @@ def scan_repo(repo_root: Path, excluded_dirs: Iterable[str] = (), progress_callb
                 continue
             if configured_includes and not _is_ignored(path, repo_root, configured_includes):
                 continue
-            payload = path.read_bytes()
-            if _should_exclude_file(path, payload):
-                continue
             stat = path.stat()
+            if max_file_bytes and stat.st_size > max_file_bytes:
+                skipped_large_files += 1
+                continue
+            sample = _read_sample(path)
+            if _should_exclude_file(path, sample):
+                continue
             records.append(
                 FileRecord(
                     path=str(path.relative_to(repo_root)).replace("\\", "/"),
                     language=language,
                     size_bytes=stat.st_size,
-                    sha256=hashlib.sha256(payload).hexdigest(),
+                    sha256=_sha256_file(path),
                     modified_time=stat.st_mtime,
                 )
             )
@@ -232,4 +268,8 @@ def scan_repo(repo_root: Path, excluded_dirs: Iterable[str] = (), progress_callb
     records.sort(key=lambda record: record.path)
     if progress_callback is not None:
         progress_callback(f"scan progress: {visited_dirs} directories visited, {candidate_files} files checked, {len(records)} indexable")
+        if skipped_large_files:
+            progress_callback(
+                f"scan skipped {skipped_large_files} files larger than CODER_SCAN_MAX_FILE_BYTES={max_file_bytes}"
+            )
     return records

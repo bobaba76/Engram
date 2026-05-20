@@ -5,10 +5,20 @@ from typing import TYPE_CHECKING
 
 from services.route_map_service import route_map
 from services.process_service import trace_execution_flows
+from services.timeout_utils import run_with_timeout
+from services.graph_edge_utils import edges_for_source_limited, edges_for_target_limited
 
 if TYPE_CHECKING:
     from storage.duckdb_store import DuckDBStore
     from storage.kuzu_store import KuzuStore
+
+
+MAX_GRAPH_FETCHERS = 16
+MAX_READER_SYMBOLS_PER_ROUTE = 24
+MAX_FIELD_READER_EDGES_PER_SYMBOL = 64
+MAX_FIELD_READERS_PER_ROUTE = 200
+GRAPH_CONTEXT_TIMEOUT_SECONDS = 1.5
+HANDLER_PROCESS_TIMEOUT_SECONDS = 1.5
 
 
 def _nested_missing_paths(nested_consumer_paths: list[str], response_keys: list[str], nested_response_keys: dict[str, list[str]]) -> list[str]:
@@ -24,6 +34,21 @@ def _nested_missing_paths(nested_consumer_paths: list[str], response_keys: list[
         if child and known_children and child not in known_children:
             missing.append(path)
     return missing
+
+
+def _augment_nested_shape_from_consumers(response_keys: list[str], nested_response_keys: dict[str, list[str]], nested_consumer_paths: list[str]) -> dict[str, list[str]]:
+    augmented = {str(parent): list(values) for parent, values in nested_response_keys.items()}
+    for path in nested_consumer_paths:
+        parent, _, child = str(path or "").partition(".")
+        top_level_parent = parent[:-2] if parent.endswith("[]") else parent
+        if not parent or not child or top_level_parent not in response_keys:
+            continue
+        if parent in augmented:
+            continue
+        existing = set(augmented.get(parent, []))
+        existing.add(child)
+        augmented[parent] = sorted(existing)
+    return augmented
 
 
 def _shape_status(missing_keys: list[str], nested_missing_paths: list[str]) -> str:
@@ -131,7 +156,7 @@ def _symbol_file(duckdb_store: DuckDBStore, symbol_name: str) -> str:
 def _graph_contract_context(duckdb_store: DuckDBStore, kuzu_store: KuzuStore | None, route: str) -> dict[str, object]:
     if kuzu_store is None:
         return {"fetchers": [], "field_readers": [], "field_reads": [], "field_to_readers": {}}
-    fetch_edges = kuzu_store.edges_for_target(_route_node(route), relation="FETCHES")
+    fetch_edges = edges_for_target_limited(kuzu_store, _route_node(route), relation="FETCHES", limit=MAX_GRAPH_FETCHERS)
     fetchers = []
     for edge in fetch_edges:
         source = str(edge.get("source", "") or "")
@@ -141,13 +166,15 @@ def _graph_contract_context(duckdb_store: DuckDBStore, kuzu_store: KuzuStore | N
             continue
         file_path = _symbol_file(duckdb_store, source)
         fetchers.append({"symbol": source, "file_path": file_path, "route": route})
+        if len(fetchers) >= MAX_GRAPH_FETCHERS:
+            break
     field_readers = []
     field_to_readers: dict[str, list[str]] = {}
     seen_reader_edges: set[tuple[str, str]] = set()
     for fetcher in fetchers:
         source = str(fetcher.get("symbol", "") or "")
         file_path = str(fetcher.get("file_path", "") or "")
-        candidate_edges = kuzu_store.edges_for_source(source, relation="READS_FIELD")
+        candidate_edges = edges_for_source_limited(kuzu_store, source, relation="READS_FIELD", limit=MAX_FIELD_READER_EDGES_PER_SYMBOL)
         for edge in candidate_edges:
             target = str(edge.get("target", "") or "")
             if not target.startswith("field:"):
@@ -159,6 +186,10 @@ def _graph_contract_context(duckdb_store: DuckDBStore, kuzu_store: KuzuStore | N
             seen_reader_edges.add(key)
             field_readers.append({"symbol": source, "file_path": file_path, "field": field_path})
             field_to_readers.setdefault(field_path, []).append(source)
+            if len(field_readers) >= MAX_FIELD_READERS_PER_ROUTE:
+                break
+        if len(field_readers) >= MAX_FIELD_READERS_PER_ROUTE:
+            break
     # Components often read fields after calling an API wrapper, so include readers
     # from files already associated with this route via text/wrapper analysis later.
     return {
@@ -230,8 +261,8 @@ def _augment_field_readers_from_consumers(duckdb_store: DuckDBStore, kuzu_store:
                 name = str(row.get("name", "") or "")
                 if name == function_name and qualified:
                     symbols.append(qualified)
-        for candidate in symbols[:12]:
-            for edge in kuzu_store.edges_for_source(candidate, relation="READS_FIELD"):
+        for candidate in symbols[:MAX_READER_SYMBOLS_PER_ROUTE]:
+            for edge in edges_for_source_limited(kuzu_store, candidate, relation="READS_FIELD", limit=MAX_FIELD_READER_EDGES_PER_SYMBOL):
                 target = str(edge.get("target", "") or "")
                 if not target.startswith("field:"):
                     continue
@@ -244,6 +275,12 @@ def _augment_field_readers_from_consumers(duckdb_store: DuckDBStore, kuzu_store:
                 field_to_readers.setdefault(field_path, [])
                 if candidate not in field_to_readers[field_path]:
                     field_to_readers[field_path].append(candidate)
+                if len(field_readers) >= MAX_FIELD_READERS_PER_ROUTE:
+                    break
+            if len(field_readers) >= MAX_FIELD_READERS_PER_ROUTE:
+                break
+        if len(field_readers) >= MAX_FIELD_READERS_PER_ROUTE:
+            break
     return {
         **graph_context,
         "field_readers": field_readers,
@@ -258,10 +295,31 @@ def api_impact(repo_root: Path, duckdb_store: DuckDBStore, route: str = "", kuzu
     for item in mapping.get("routes", []):
         handlers = item.get("handlers", []) if isinstance(item, dict) else []
         consumers = item.get("consumers", []) if isinstance(item, dict) else []
-        graph_contract = _graph_contract_context(duckdb_store, kuzu_store, str(item.get("route", "") or route))
+        graph_warnings: list[str] = []
+        graph_contract = run_with_timeout(
+            lambda: _graph_contract_context(duckdb_store, kuzu_store, str(item.get("route", "") or route)),
+            timeout_seconds=GRAPH_CONTEXT_TIMEOUT_SECONDS,
+            default={"fetchers": [], "field_readers": [], "field_reads": [], "field_to_readers": {}, "partial": True},
+            label="Graph contract expansion",
+        )
+        if graph_contract.get("partial"):
+            graph_warnings.append("Graph contract expansion timed out; returned route/text analysis only.")
         consumers = _merge_graph_consumers(consumers, graph_contract, duckdb_store)
-        graph_contract = _augment_field_readers_from_consumers(duckdb_store, kuzu_store, consumers, graph_contract)
-        processes = _handler_processes(duckdb_store, kuzu_store, handlers)
+        if kuzu_store is not None:
+            graph_contract = run_with_timeout(
+                lambda: _augment_field_readers_from_consumers(duckdb_store, kuzu_store, consumers, graph_contract),
+                timeout_seconds=GRAPH_CONTEXT_TIMEOUT_SECONDS,
+                default={**graph_contract, "partial": True},
+                label="Graph field-reader expansion",
+            )
+        if graph_contract.get("partial") and "Graph contract expansion timed out; returned route/text analysis only." not in graph_warnings:
+            graph_warnings.append("Graph field-reader expansion timed out; returned route/text analysis only.")
+        processes = run_with_timeout(
+            lambda: _handler_processes(duckdb_store, kuzu_store, handlers),
+            timeout_seconds=HANDLER_PROCESS_TIMEOUT_SECONDS,
+            default=[],
+            label="Route handler process tracing",
+        )
         response_keys = sorted({key for handler in handlers for key in handler.get("response_keys", []) if key})
         nested_response_keys: dict[str, list[str]] = {}
         for handler in handlers:
@@ -271,12 +329,16 @@ def api_impact(repo_root: Path, duckdb_store: DuckDBStore, route: str = "", kuzu
             for parent, keys in nested.items():
                 nested_response_keys.setdefault(str(parent), [])
                 nested_response_keys[str(parent)].extend(str(key) for key in keys if key)
-        nested_response_keys = {parent: sorted(set(keys)) for parent, keys in nested_response_keys.items()}
         consumer_keys = sorted({key for consumer in consumers for key in consumer.get("accessed_keys", []) if key})
         nested_consumer_paths = sorted(
             {path for consumer in consumers for path in consumer.get("nested_accesses", []) if path}
             | {str(path) for path in graph_contract.get("field_reads", []) if str(path)}
         )
+        shape_inferred_from_consumers = False
+        if not response_keys and consumer_keys:
+            response_keys = consumer_keys
+            shape_inferred_from_consumers = True
+        nested_response_keys = _augment_nested_shape_from_consumers(response_keys, {parent: sorted(set(keys)) for parent, keys in nested_response_keys.items()}, nested_consumer_paths)
         missing = [key for key in consumer_keys if key not in response_keys]
         nested_missing = _nested_missing_paths(nested_consumer_paths, response_keys, nested_response_keys)
         shape_status = _shape_status(missing, nested_missing)
@@ -306,9 +368,11 @@ def api_impact(repo_root: Path, duckdb_store: DuckDBStore, route: str = "", kuzu
                     "missing_fields": missing,
                     "nested_missing_fields": nested_missing,
                     "checked_consumers": len(consumers),
+                    "inferred_from_consumers": shape_inferred_from_consumers,
                 },
                 "risk": risk,
                 "risk_factors": risk_factors,
+                "warnings": graph_warnings,
                 "blast_radius": {
                     "fetchers": graph_contract.get("fetchers", []),
                     "field_readers": graph_contract.get("field_readers", []),

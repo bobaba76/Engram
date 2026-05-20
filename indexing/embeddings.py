@@ -124,18 +124,23 @@ def embedding_cache_namespace(model_name: str, max_length: int, device: str = ""
     return f"v{EMBEDDER_VERSION}:{model_name}:maxlen={max_length}:device={normalized_device}"
 
 
-def estimate_tokens(text: str) -> int:
+def estimate_tokens(text: str, tokenizer=None) -> int:
+    if tokenizer is not None:
+        try:
+            return max(1, len(tokenizer.encode(text or "", add_special_tokens=True, truncation=False)))
+        except Exception:
+            pass
     return max(1, len(text or "") // CHARS_PER_TOKEN_ESTIMATE)
 
 
-def _token_aware_batches(texts: list[str], batch_size: int, max_batch_tokens: int) -> list[list[str]]:
+def _token_aware_batches(texts: list[str], batch_size: int, max_batch_tokens: int, tokenizer=None) -> list[list[str]]:
     batches: list[list[str]] = []
     current: list[str] = []
     current_tokens = 0
     safe_batch_size = max(int(batch_size or 1), 1)
     safe_token_limit = max(int(max_batch_tokens or 1), 1)
     for text in texts:
-        token_count = estimate_tokens(text)
+        token_count = estimate_tokens(text, tokenizer=tokenizer)
         if current and (len(current) >= safe_batch_size or current_tokens + token_count > safe_token_limit):
             batches.append(current)
             current = []
@@ -168,6 +173,7 @@ def _load_jina_model(model_name: str):
 # ---------------------------------------------------------------------------
 
 _prewarm_lock = threading.Lock()
+_embedding_model_lock = threading.Lock()
 _prewarm_started: dict[str, bool] = {}
 _prewarm_ready: dict[str, bool] = {}
 _prewarm_error: dict[str, str] = {}
@@ -231,20 +237,19 @@ def embed_texts(
         tokenizer, model = _load_jina_model(model_name)
         if tokenizer is not None and model is not None and torch is not None and torch_functional is not None:
             resolved_device = _resolve_device(device)
-            model = model.to(resolved_device)
-            embeddings_batches = []
-            for batch in _token_aware_batches(text_list, batch_size=batch_size, max_batch_tokens=max_batch_tokens):
-                encoded_input = tokenizer(batch, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
-                encoded_input = {key: value.to(resolved_device) for key, value in encoded_input.items()}
-                with torch.inference_mode():
-                    model_output = model(**encoded_input)
-                embeddings = _mean_pooling(model_output, encoded_input["attention_mask"])
-                embeddings = torch_functional.normalize(embeddings, p=2, dim=1)
-                embeddings_batches.extend(embeddings.cpu().tolist())
-                del encoded_input
-                del model_output
-                del embeddings
-                if resolved_device == "cuda":
-                    torch.cuda.empty_cache()
+            with _embedding_model_lock:
+                model = model.to(resolved_device)
+                embeddings_batches = []
+                for batch in _token_aware_batches(text_list, batch_size=batch_size, max_batch_tokens=max_batch_tokens, tokenizer=tokenizer):
+                    encoded_input = tokenizer(batch, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
+                    encoded_input = {key: value.to(resolved_device) for key, value in encoded_input.items()}
+                    with torch.inference_mode():
+                        model_output = model(**encoded_input)
+                    embeddings = _mean_pooling(model_output, encoded_input["attention_mask"])
+                    embeddings = torch_functional.normalize(embeddings, p=2, dim=1)
+                    embeddings_batches.extend(embeddings.cpu().tolist())
+                    del encoded_input
+                    del model_output
+                    del embeddings
             return embeddings_batches
     return [_fallback_embedding(text) for text in text_list]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from time import time
 from pathlib import Path
 from typing import Any
 
@@ -16,16 +17,28 @@ class DuckDBStore:
         self.database_path = database_path
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._temp_database_path: Path | None = None
+        self.read_only_snapshot_metadata: dict[str, Any] = {}
         try:
             self.connection_manager = DuckDBConnectionManager(self.database_path, read_only=read_only)
         except duckdb.IOException:
             if not read_only:
                 raise
+            copied_at = time()
+            source_mtime = self.database_path.stat().st_mtime if self.database_path.exists() else 0.0
             temp_dir = Path(tempfile.mkdtemp(prefix="coder-duckdb-ro-"))
             temp_path = temp_dir / self.database_path.name
             shutil.copy2(self.database_path, temp_path)
             self._temp_database_path = temp_path
             self.connection_manager = DuckDBConnectionManager(temp_path, read_only=True)
+            self.read_only_snapshot_metadata = {
+                "active": True,
+                "reason": "primary DuckDB file was locked; using read-only copied snapshot",
+                "source_database_path": str(self.database_path),
+                "snapshot_database_path": str(temp_path),
+                "copied_at": copied_at,
+                "source_mtime": source_mtime,
+                "stale_read_risk": True,
+            }
         if not read_only:
             self._initialize_schema()
         self.files = FileRepository(self)
