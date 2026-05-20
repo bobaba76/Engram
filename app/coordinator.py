@@ -7,6 +7,7 @@ from pathlib import Path
 from time import time
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
  
 from app.run_modes import FULL, INCREMENTAL
 from indexing.chunker import build_chunks, diff_chunk_ids, summarize_chunks
@@ -169,8 +170,8 @@ class Coordinator:
                 for row in rows
             ]
         return loaded
- 
-    def run(self, run_mode: str = INCREMENTAL) -> RunSummary:
+
+    def _initialize_run_state(self, run_mode: str) -> tuple[RunSummary, bool, dict[str, dict[str, object]]]:
         summary = RunSummary(run_id=uuid4().hex[:8], run_mode=run_mode)
         self._log_progress(f"run {summary.run_id} started for {self.settings.repo_root} ({run_mode})")
         full_rebuild = run_mode == FULL
@@ -182,7 +183,9 @@ class Coordinator:
             self.symbols_by_file = {}
         else:
             self.symbols_by_file = self._load_persisted_symbols()
- 
+        return summary, full_rebuild, existing_files
+
+    def _run_scan_stage(self, summary: RunSummary, run_mode: str) -> list:
         scan_stage = StageResult(stage_name="scan", status="running")
         self._log_progress("scan started")
         files = scan_repo(self.settings.repo_root, excluded_dirs=self.settings.scan_excluded_dirs, progress_callback=self._log_progress)
@@ -199,7 +202,9 @@ class Coordinator:
         self._log_progress(
             f"scan completed: discovered {len(files)} files after excluding {len(self.settings.scan_excluded_dirs)} directory patterns"
         )
+        return files
 
+    def _run_plan_stage(self, summary: RunSummary, files: list, existing_files: dict[str, dict[str, object]], full_rebuild: bool) -> dict[str, list[str]]:
         plan_stage = StageResult(stage_name="plan", status="running")
         self._log_progress("plan started")
         plan = plan_incremental_work(files, existing_files=existing_files)
@@ -215,7 +220,9 @@ class Coordinator:
         self._log_progress(
             f"plan completed: parse={len(plan['files_to_parse'])}, review={len(plan['files_to_review'])}, deleted={len(plan.get('deleted_files', []))}"
         )
+        return plan
 
+    def _prepare_incremental_scope(self, files: list, plan: dict[str, list[str]], full_rebuild: bool) -> dict[str, object]:
         file_map = {file_record.path: file_record for file_record in files}
         changed_files = plan["files_to_parse"]
         deleted_files = plan.get("deleted_files", [])
@@ -239,7 +246,18 @@ class Coordinator:
                 self.symbols_by_file.pop(file_path, None)
         else:
             impacted_files = set(file_map) if full_rebuild else set()
+        return {
+            "file_map": file_map,
+            "changed_files": changed_files,
+            "deleted_files": deleted_files,
+            "unchanged_files": unchanged_files,
+            "previous_chunks_by_file": previous_chunks_by_file,
+            "touched_files": touched_files,
+            "impacted_files": impacted_files,
+            "impacted_file_details": impacted_file_details,
+        }
 
+    def _run_parse_stage(self, summary: RunSummary, file_map: dict[str, Any], changed_files: list[str], unchanged_files: list[str], deleted_files: list[str]) -> int:
         parse_stage = StageResult(stage_name="parse", status="running")
         self._log_progress(f"parse started for {len(changed_files)} changed files")
         parse_stage.input_summary = {
@@ -252,8 +270,8 @@ class Coordinator:
         file_records_to_upsert = []
         for index, file_path in enumerate(changed_files, start=1):
             file_record = file_map[file_path]
-            file_path = self.settings.repo_root / file_record.path
-            symbols, parse_status = extract_symbols_with_status(file_path)
+            absolute_file_path = self.settings.repo_root / file_record.path
+            symbols, parse_status = extract_symbols_with_status(absolute_file_path)
             self.symbols_by_file[file_record.path] = symbols
             parser_name = str(parse_status.get("parser", "unknown"))
             parser_usage[parser_name] += 1
@@ -281,7 +299,9 @@ class Coordinator:
         self._log_progress(
             f"parse completed: {len(changed_files)} files, {symbol_count} symbols, parsers={dict(parser_usage)}"
         )
+        return symbol_count
 
+    def _run_graph_stage(self, summary: RunSummary, file_map: dict[str, Any], impacted_files: set[str], touched_files: list[str], impacted_file_details: dict[str, object], full_rebuild: bool) -> None:
         graph_stage = StageResult(stage_name="graph", status="running")
         graph_files = [file_map[file_path] for file_path in sorted(impacted_files) if file_path in file_map]
         self._log_progress(f"graph started for {len(graph_files)} impacted files")
@@ -308,6 +328,7 @@ class Coordinator:
         summary.stage_results.append(graph_stage)
         self._log_progress(f"graph completed: {graph_stage.output_summary['edge_count']} edges")
 
+    def _run_process_stage(self, summary: RunSummary, file_map: dict[str, Any], impacted_files: set[str], full_rebuild: bool, symbol_count: int) -> tuple[list, list, list, list]:
         process_stage = StageResult(stage_name="process", status="running")
         process_scope_files = sorted(set(file_map) if full_rebuild else impacted_files)
         process_symbols_by_file = {
@@ -370,7 +391,9 @@ class Coordinator:
         process_stage.status = "completed"
         process_stage.completed_at = time()
         summary.stage_results.append(process_stage)
+        return process_records, process_clusters, process_memberships, process_relationships
 
+    def _run_embed_stage(self, summary: RunSummary, file_map: dict[str, Any], changed_files: list[str], previous_chunks_by_file: dict[str, list[dict[str, object]]], full_rebuild: bool) -> dict[str, object]:
         embed_stage = StageResult(stage_name="embed", status="running")
         self._log_progress(f"embed started for {len(changed_files)} files")
         existing_chunk_count = self.duckdb.chunks.count()
@@ -482,7 +505,9 @@ class Coordinator:
         embed_stage.completed_at = time()
         summary.stage_results.append(embed_stage)
         self._log_progress(f"embed completed: {new_chunk_count} new chunks, {total_chunks} total chunks")
+        return {"embedding_runtime": embedding_runtime, "total_chunks": total_chunks}
 
+    def _run_review_stage(self, summary: RunSummary, plan: dict[str, list[str]]) -> None:
         review_stage = StageResult(stage_name="review", status="running")
         self._log_progress(f"review planning started for {len(plan['files_to_review'])} files")
         review_jobs = build_review_jobs(plan["files_to_review"], run_id=summary.run_id)
@@ -507,62 +532,64 @@ class Coordinator:
             review_stage.completed_at = time()
             summary.stage_results.append(review_stage)
             self._log_progress(f"review skipped for {len(review_jobs)} jobs because CODER_REVIEW_ENABLED=false")
+            return
+
+        self._log_progress(f"review started for {len(review_jobs)} jobs")
+        self._log_progress(f"review job write started for {len(review_jobs)} jobs")
+        for job in review_jobs:
+            self.duckdb.reviews.insert_job(asdict(job))
+        self._log_progress("review job write completed")
+        analysis_provider = build_review_analysis_provider(self.settings.review_analysis_provider, self.settings)
+        analysis_provider_requested = self.settings.review_analysis_provider
+        analysis_provider_used = analysis_provider.provider_name
+        analysis_model_used = analysis_provider.model_name
+        analysis_provider_fallback = analysis_provider_requested != analysis_provider_used
+        self.latest_agent_analyses = []
+        if review_jobs:
+            self._log_progress(f"agent analysis provider: {analysis_provider_used} ({analysis_model_used})")
+        self.latest_agent_analyses = self._run_agent_analyses(review_jobs, analysis_provider)
+        run_legacy_review_jobs = self._should_run_legacy_review_jobs(analysis_provider_used)
+        if run_legacy_review_jobs:
+            review_results = self._run_review_jobs(review_jobs)
         else:
-            self._log_progress(f"review started for {len(review_jobs)} jobs")
-            self._log_progress(f"review job write started for {len(review_jobs)} jobs")
-            for job in review_jobs:
-                self.duckdb.reviews.insert_job(asdict(job))
-            self._log_progress("review job write completed")
-            analysis_provider = build_review_analysis_provider(self.settings.review_analysis_provider, self.settings)
-            analysis_provider_requested = self.settings.review_analysis_provider
-            analysis_provider_used = analysis_provider.provider_name
-            analysis_model_used = analysis_provider.model_name
-            analysis_provider_fallback = analysis_provider_requested != analysis_provider_used
-            self.latest_agent_analyses = []
-            if review_jobs:
-                self._log_progress(f"agent analysis provider: {analysis_provider_used} ({analysis_model_used})")
-            self.latest_agent_analyses = self._run_agent_analyses(review_jobs, analysis_provider)
-            run_legacy_review_jobs = self._should_run_legacy_review_jobs(analysis_provider_used)
-            if run_legacy_review_jobs:
-                review_results = self._run_review_jobs(review_jobs)
-            else:
-                review_results = []
-                self._log_progress("legacy heuristic review skipped because grouped LLM review is active")
-            review_results.extend(synthesize_findings_from_agent_analyses(self.latest_agent_analyses, review_jobs))
-            self._log_progress(f"review result merge started for {len(review_results)} results")
-            self.latest_observations, self.latest_findings = merge_findings(review_results)
-            self._log_progress(f"review persistence started: {len(self.latest_observations)} observations, {len(self.latest_findings)} findings")
-            for observation in self.latest_observations:
-                self.duckdb.reviews.insert_observation(asdict(observation))
-            for finding in self.latest_findings:
-                record = asdict(finding)
-                existing = self.duckdb.reviews.fetch_finding_by_fingerprint(record["fingerprint"])
-                if existing is not None:
-                    record["finding_id"] = existing["finding_id"]
-                    record["first_seen_at"] = existing["first_seen_at"]
-                    record["occurrence_count"] = existing["occurrence_count"] + record["occurrence_count"]
-                record["source_review_types"] = json.dumps(record["source_review_types"])
-                self.duckdb.reviews.upsert_finding(record)
-            review_stage.output_summary = {
-                "job_count": len(review_jobs),
-                "reviewed_files": len(plan["files_to_review"]),
-                "enabled": True,
-                "analysis_provider_requested": analysis_provider_requested,
-                "analysis_provider_used": analysis_provider_used,
-                "analysis_model": analysis_model_used,
-                "analysis_provider_fallback": analysis_provider_fallback,
-                "legacy_heuristic_review_enabled": run_legacy_review_jobs,
-                "agent_analysis_count": len(self.latest_agent_analyses),
-                "observation_count": len(self.latest_observations),
-                "finding_count": len(self.latest_findings),
-            }
-            review_stage.status = "completed"
-            review_stage.completed_at = time()
-            summary.stage_results.append(review_stage)
-            self._log_progress(
-                f"review completed: jobs={len(review_jobs)}, analyses={len(self.latest_agent_analyses)}, findings={len(self.latest_findings)}"
-            )
- 
+            review_results = []
+            self._log_progress("legacy heuristic review skipped because grouped LLM review is active")
+        review_results.extend(synthesize_findings_from_agent_analyses(self.latest_agent_analyses, review_jobs))
+        self._log_progress(f"review result merge started for {len(review_results)} results")
+        self.latest_observations, self.latest_findings = merge_findings(review_results)
+        self._log_progress(f"review persistence started: {len(self.latest_observations)} observations, {len(self.latest_findings)} findings")
+        for observation in self.latest_observations:
+            self.duckdb.reviews.insert_observation(asdict(observation))
+        for finding in self.latest_findings:
+            record = asdict(finding)
+            existing = self.duckdb.reviews.fetch_finding_by_fingerprint(record["fingerprint"])
+            if existing is not None:
+                record["finding_id"] = existing["finding_id"]
+                record["first_seen_at"] = existing["first_seen_at"]
+                record["occurrence_count"] = existing["occurrence_count"] + record["occurrence_count"]
+            record["source_review_types"] = json.dumps(record["source_review_types"])
+            self.duckdb.reviews.upsert_finding(record)
+        review_stage.output_summary = {
+            "job_count": len(review_jobs),
+            "reviewed_files": len(plan["files_to_review"]),
+            "enabled": True,
+            "analysis_provider_requested": analysis_provider_requested,
+            "analysis_provider_used": analysis_provider_used,
+            "analysis_model": analysis_model_used,
+            "analysis_provider_fallback": analysis_provider_fallback,
+            "legacy_heuristic_review_enabled": run_legacy_review_jobs,
+            "agent_analysis_count": len(self.latest_agent_analyses),
+            "observation_count": len(self.latest_observations),
+            "finding_count": len(self.latest_findings),
+        }
+        review_stage.status = "completed"
+        review_stage.completed_at = time()
+        summary.stage_results.append(review_stage)
+        self._log_progress(
+            f"review completed: jobs={len(review_jobs)}, analyses={len(self.latest_agent_analyses)}, findings={len(self.latest_findings)}"
+        )
+
+    def _finalize_run(self, summary: RunSummary, files: list, symbol_count: int, total_chunks: int, process_records: list, process_clusters: list, embedding_runtime: dict[str, object]) -> RunSummary:
         self._log_progress("manifest write started")
         manifest = {
             "status": "ready",
@@ -663,6 +690,51 @@ class Coordinator:
         summary.promoted = True
         self._log_progress(f"run {summary.run_id} completed")
         return summary
+ 
+    def run(self, run_mode: str = INCREMENTAL) -> RunSummary:
+        summary, full_rebuild, existing_files = self._initialize_run_state(run_mode)
+        files = self._run_scan_stage(summary, run_mode)
+        plan = self._run_plan_stage(summary, files, existing_files, full_rebuild)
+        scope = self._prepare_incremental_scope(files, plan, full_rebuild)
+        symbol_count = self._run_parse_stage(
+            summary,
+            scope["file_map"],
+            scope["changed_files"],
+            scope["unchanged_files"],
+            scope["deleted_files"],
+        )
+        self._run_graph_stage(
+            summary,
+            scope["file_map"],
+            scope["impacted_files"],
+            scope["touched_files"],
+            scope["impacted_file_details"],
+            full_rebuild,
+        )
+        process_records, process_clusters, _process_memberships, _process_relationships = self._run_process_stage(
+            summary,
+            scope["file_map"],
+            scope["impacted_files"],
+            full_rebuild,
+            symbol_count,
+        )
+        embed_result = self._run_embed_stage(
+            summary,
+            scope["file_map"],
+            scope["changed_files"],
+            scope["previous_chunks_by_file"],
+            full_rebuild,
+        )
+        self._run_review_stage(summary, plan)
+        return self._finalize_run(
+            summary,
+            files,
+            symbol_count,
+            int(embed_result["total_chunks"]),
+            process_records,
+            process_clusters,
+            dict(embed_result["embedding_runtime"]),
+        )
  
     def _run_review_jobs(self, review_jobs: list) -> list[ReviewResult]:
         policy = ReviewExecutionPolicy(
