@@ -255,7 +255,6 @@ class ChunkRepository:
                OR lower(symbol_name) LIKE lower(?)
                OR lower(qualified_name) LIKE lower(?)
                OR lower(file_path) LIKE lower(?)
-               OR lower(content) LIKE lower(?)
                OR file_path IN (
                    SELECT file_path FROM symbols
                    WHERE name = ?
@@ -277,7 +276,6 @@ class ChunkRepository:
                 target,
                 target,
                 target,
-                pattern,
                 pattern,
                 pattern,
                 pattern,
