@@ -16,16 +16,19 @@ from mcp_server.resolvers import resolve_tool_target
 from services.api_impact_service import api_impact
 from services.app_context_service import app_context
 from services.change_report_service import change_impact_report
+from services.code_analysis_service import detect_circular_dependencies, detect_dead_code
+from services.code_quality_service import detect_duplicate_code, test_coverage_gaps
+from services.data_flow_service import trace_data_flow
 from services.detect_changes_service import detect_changes
 from services.dependency_service import get_dependencies
 from services.feature_context_service import feature_context
 from services.field_impact_service import field_impact
 from services.file_summary_service import get_file_summary
 from services.graph_query_service import execute_graph_query
-from services.graph_service import get_callers_and_callees, get_graph_neighborhood_with_options
+from services.graph_service import get_callers_and_callees, get_file_dependencies, get_graph_neighborhood_with_options
 from services.impact_service import analyze_impact
 from services.index_health_service import index_health
-from services.index_status_service import get_index_status, get_recent_runs, get_run_metrics
+from services.index_status_service import check_stale_index, get_index_status, get_recent_runs, get_run_metrics
 from services.investigation_service import (
     broad_lexical_search_terms,
     investigate_codebase,
@@ -33,6 +36,7 @@ from services.investigation_service import (
 )
 from services.process_catalog_service import get_symbol_process_participation, list_processes
 from services.process_service import trace_execution_flows
+from services.post_change_review_service import post_change_review
 from services.rename_service import preview_rename
 from services.repo_registry_service import list_indexed_repos, resolve_indexed_repo
 from services.review_history_service import get_review_history
@@ -143,10 +147,11 @@ def unified_context_tool(
     file_path: str = "",
     kind: str = "",
     symbol_uid: str = "",
+    view: str = "",
     repo: str = "",
 ) -> dict[str, object]:
     context = session.get_repo_context(repo)
-    return get_unified_context(
+    result = get_unified_context(
         context["duckdb_store"],
         session.get_kuzu_store(repo),
         target=target,
@@ -156,6 +161,9 @@ def unified_context_tool(
         kind=kind or None,
         symbol_uid=symbol_uid or None,
     )
+    if view:
+        result["_view"] = view
+    return result
 
 
 def impact_analysis_tool(
@@ -587,9 +595,12 @@ def test_impact_tool(session: MCPSession, scope: str = "unstaged", base_ref: str
     return test_impact(context["repo_root"], context["duckdb_store"], session.lazy_kuzu(repo), scope=scope, base_ref=base_ref)
 
 
-def feature_context_tool(session: MCPSession, feature: str, limit: int = 12, repo: str = "") -> dict[str, object]:
+def feature_context_tool(session: MCPSession, feature: str, limit: int = 12, view: str = "", repo: str = "") -> dict[str, object]:
     context = session.get_repo_context(repo)
-    return feature_context(context["repo_root"], context["duckdb_store"], session.get_kuzu_store(repo), feature=feature, limit=limit)
+    result = feature_context(context["repo_root"], context["duckdb_store"], session.get_kuzu_store(repo), feature=feature, limit=limit)
+    if view:
+        result["_view"] = view
+    return result
 
 
 def index_health_tool(session: MCPSession, repo: str = "") -> dict[str, object]:
@@ -597,9 +608,12 @@ def index_health_tool(session: MCPSession, repo: str = "") -> dict[str, object]:
     return index_health(context["repo_root"], context["duckdb_store"], session.get_kuzu_store(repo))
 
 
-def get_dependencies_tool(session: MCPSession, target: str, repo: str = "") -> dict[str, object]:
+def get_dependencies_tool(session: MCPSession, target: str, view: str = "", repo: str = "") -> dict[str, object]:
     resolved = _resolve_graph_target(session, target, repo)
-    return get_dependencies(session.get_kuzu_store(repo), target=resolved)
+    result = get_dependencies(session.get_kuzu_store(repo), target=resolved)
+    if view:
+        result["_view"] = view
+    return result
 
 
 def get_review_history_tool(session: MCPSession, target: str, repo: str = "") -> dict[str, object]:
@@ -617,9 +631,33 @@ def find_symbols_tool(session: MCPSession, query: str, limit: int = 10, file_pat
     return find_symbols(context["duckdb_store"], query=query, limit=limit, file_path=file_path or None, kind=kind or None, symbol_uid=symbol_uid or None)
 
 
-def get_callers_and_callees_tool(session: MCPSession, target: str, repo: str = "") -> dict[str, object]:
+def get_callers_and_callees_tool(session: MCPSession, target: str, view: str = "", include_noisy: bool = False, repo: str = "") -> dict[str, object]:
     resolved = _resolve_graph_target(session, target, repo)
-    return get_callers_and_callees(session.get_kuzu_store(repo), target=resolved)
+    result = get_callers_and_callees(session.get_kuzu_store(repo), target=resolved, include_noisy=include_noisy)
+    if view:
+        result["_view"] = view
+    return result
+
+
+def get_file_dependencies_tool(
+    session: MCPSession,
+    file_path: str,
+    relation: str = "",
+    limit: int = 50,
+    view: str = "",
+    repo: str = "",
+) -> dict[str, object]:
+    context = session.get_repo_context(repo)
+    result = get_file_dependencies(
+        context["duckdb_store"],
+        session.get_kuzu_store(repo),
+        file_path=file_path,
+        relation=relation or None,
+        limit=limit,
+    )
+    if view:
+        result["_view"] = view
+    return result
 
 
 def get_graph_neighborhood_tool(
@@ -630,10 +668,11 @@ def get_graph_neighborhood_tool(
     max_edges: int = 0,
     mode: str = "full",
     suppress_common_hubs: bool = False,
+    view: str = "",
     repo: str = "",
 ) -> dict[str, object]:
     resolved = _resolve_graph_target(session, target, repo)
-    return get_graph_neighborhood_with_options(
+    result = get_graph_neighborhood_with_options(
         session.get_kuzu_store(repo),
         target=resolved,
         depth=depth,
@@ -642,6 +681,9 @@ def get_graph_neighborhood_tool(
         mode=mode,
         suppress_common_hubs=suppress_common_hubs,
     )
+    if view:
+        result["_view"] = view
+    return result
 
 
 def get_file_summary_tool(session: MCPSession, target: str, repo: str = "") -> dict[str, object]:
@@ -649,9 +691,143 @@ def get_file_summary_tool(session: MCPSession, target: str, repo: str = "") -> d
     return get_file_summary(context["duckdb_store"], target=target)
 
 
-def get_source_context_tool(session: MCPSession, target: str, limit: int = 5, repo: str = "") -> dict[str, object]:
+def get_source_context_tool(session: MCPSession, target: str, limit: int = 5, view: str = "", repo: str = "") -> dict[str, object]:
     context = session.get_repo_context(repo)
-    return get_source_context(context["duckdb_store"], target=target, limit=limit, repo_root=context["repo_root"])
+    result = get_source_context(context["duckdb_store"], target=target, limit=limit, repo_root=context["repo_root"])
+    if view:
+        result["_view"] = view
+    return result
+
+
+def check_stale_index_tool(session: MCPSession, repo: str = "") -> dict[str, object]:
+    context = session.get_repo_context(repo)
+    return check_stale_index(context["repo_root"], context["duckdb_store"])
+
+
+def trace_data_flow_tool(
+    session: MCPSession,
+    field: str,
+    target: str = "",
+    max_depth: int = 3,
+    limit: int = 30,
+    view: str = "",
+    repo: str = "",
+) -> dict[str, object]:
+    context = session.get_repo_context(repo)
+    result = trace_data_flow(
+        context["duckdb_store"],
+        session.get_kuzu_store(repo),
+        field=field,
+        target=target,
+        max_depth=max_depth,
+        limit=limit,
+    )
+    if view:
+        result["_view"] = view
+    return result
+
+
+def post_change_review_tool(
+    session: MCPSession,
+    scope: str = "unstaged",
+    base_ref: str = "",
+    max_symbols: int = 5,
+    target: str = "",
+    include_stale_check: bool = True,
+    view: str = "",
+    repo: str = "",
+) -> dict[str, object]:
+    context = session.get_repo_context(repo)
+    result = post_change_review(
+        context["repo_root"],
+        context["duckdb_store"],
+        session.get_kuzu_store(repo),
+        scope=scope,
+        base_ref=base_ref,
+        max_symbols=max_symbols,
+        target=target,
+        include_stale_check=include_stale_check,
+    )
+    if view:
+        result["_view"] = view
+    return result
+
+
+def detect_circular_dependencies_tool(
+    session: MCPSession,
+    relation: str = "IMPORTS",
+    max_cycles: int = 20,
+    view: str = "",
+    repo: str = "",
+) -> dict[str, object]:
+    context = session.get_repo_context(repo)
+    result = detect_circular_dependencies(
+        session.get_kuzu_store(repo),
+        context["duckdb_store"],
+        relation=relation,
+        max_cycles=max_cycles,
+    )
+    if view:
+        result["_view"] = view
+    return result
+
+
+def detect_dead_code_tool(
+    session: MCPSession,
+    relation: str = "",
+    limit: int = 50,
+    view: str = "",
+    repo: str = "",
+) -> dict[str, object]:
+    context = session.get_repo_context(repo)
+    result = detect_dead_code(
+        session.get_kuzu_store(repo),
+        context["duckdb_store"],
+        relation=relation or None,
+        limit=limit,
+    )
+    if view:
+        result["_view"] = view
+    return result
+
+
+def detect_duplicate_code_tool(
+    session: MCPSession,
+    limit: int = 20,
+    similarity_threshold: float = 0.85,
+    max_chunks: int = 100,
+    view: str = "",
+    repo: str = "",
+) -> dict[str, object]:
+    context = session.get_repo_context(repo)
+    result = detect_duplicate_code(
+        context["duckdb_store"],
+        context["vector_store"],
+        limit=limit,
+        similarity_threshold=similarity_threshold,
+        max_chunks=max_chunks,
+        model_name=str(context["settings"].embedding_model),
+    )
+    if view:
+        result["_view"] = view
+    return result
+
+
+def test_coverage_gaps_tool(
+    session: MCPSession,
+    limit: int = 50,
+    view: str = "",
+    repo: str = "",
+) -> dict[str, object]:
+    context = session.get_repo_context(repo)
+    result = test_coverage_gaps(
+        context["duckdb_store"],
+        session.get_kuzu_store(repo),
+        limit=limit,
+    )
+    if view:
+        result["_view"] = view
+    return result
 
 
 # --- Tool registration table -----------------------------------------------
@@ -692,6 +868,14 @@ TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
     ("find_symbols", find_symbols_tool, "Find symbols by query, file, kind, or symbol UID. Good follow-up when resolve_target reports ambiguity."),
     ("get_callers_and_callees", get_callers_and_callees_tool, "Show direct CALLS callers and callees for a symbol target."),
     ("get_graph_neighborhood", get_graph_neighborhood_tool, "Show filtered graph neighborhood for a target."),
+    ("get_file_dependencies", get_file_dependencies_tool, "Show file-to-file dependency map for a file path. Aggregates all symbols in the file."),
     ("get_file_summary", get_file_summary_tool, "Summarize indexed symbols and chunks for a file."),
     ("get_source_context", get_source_context_tool, "Return source chunks and previews for a target."),
+    ("check_stale_index", check_stale_index_tool, "Detect files modified since the last successful index run. Returns stale file count and warning."),
+    ("trace_data_flow", trace_data_flow_tool, "Trace how a field or type propagates through the codebase via graph relations (READS_FIELD, ACCESSES, FETCHES, etc.)."),
+    ("post_change_review", post_change_review_tool, "Orchestrate a full post-change review: detect changes, impact analysis, test recommendations, and stale index check in one call."),
+    ("detect_circular_dependencies", detect_circular_dependencies_tool, "Find circular dependencies in the graph via DFS cycle detection. Default relation: IMPORTS."),
+    ("detect_dead_code", detect_dead_code_tool, "Find symbols with zero inbound dependency edges (excluding entry points). Likely dead code."),
+    ("detect_duplicate_code", detect_duplicate_code_tool, "Find duplicate or near-duplicate code across files using vector similarity search."),
+    ("test_coverage_gaps", test_coverage_gaps_tool, "Identify source files and symbols with no associated test coverage."),
 ]

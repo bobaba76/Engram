@@ -540,13 +540,35 @@ def _format_summary_lines(payload: dict[str, Any]) -> list[str]:
     return lines
 
 
+_VIEW_KEEP: dict[str, set[str]] = {
+    "compact": {"compact_summary", "status", "target", "summary_text", "confidence", "warnings", "partial", "top_files", "top_symbols", "next_tools"},
+    "callers": {"callers", "compact_summary", "status", "target", "summary_text", "confidence", "warnings"},
+    "callees": {"callees", "compact_summary", "status", "target", "summary_text", "confidence", "warnings"},
+    "dependencies": {"dependencies", "compact_summary", "status", "target", "summary_text", "confidence", "warnings"},
+    "summary": {"summary_text", "compact_summary", "status", "target"},
+}
+
+
+def _project_view(enriched: dict[str, Any], view: str) -> dict[str, Any]:
+    view_lower = str(view or "").strip().lower()
+    if view_lower in ("", "full"):
+        return enriched
+    keep = _VIEW_KEEP.get(view_lower)
+    if keep is None:
+        return enriched
+    return {key: value for key, value in enriched.items() if key in keep}
+
+
 def enrich_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"result": payload}
+    view = payload.pop("_view", "")
     payload = _strip_large_internal_fields(payload)
     enriched = _normalize_contract(payload)
     summary_lines = _format_summary_lines(enriched)
     enriched["summary_text"] = "\n".join(summary_lines) if summary_lines else ""
+    if view:
+        enriched = _project_view(enriched, view)
     return enriched
 
 

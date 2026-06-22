@@ -1,4 +1,5 @@
 from storage.kuzu_store import KuzuStore
+from storage.duckdb_store import DuckDBStore
 from services.symbol_resolution_service import graph_target_from_uid_target
 
 
@@ -319,19 +320,20 @@ def _dedupe_edges(edges: list[dict[str, object]], key_field: str = "target") -> 
     return deduped
 
 
-def get_callers_and_callees(kuzu_store: KuzuStore, target: str) -> dict[str, object]:
+def get_callers_and_callees(kuzu_store: KuzuStore, target: str, include_noisy: bool = False) -> dict[str, object]:
     resolved_target = _normalize_graph_target(target)
     categorized = _categorized_references(kuzu_store, resolved_target)
     callers = _dedupe_edges(categorized["CALLS"]["incoming"], key_field="source")
     callees = _dedupe_edges(categorized["CALLS"]["outgoing"], key_field="target")
     related_by_relation = _related_symbols_by_relation(categorized, resolved_target)
+    excluded_relations = set() if include_noisy else NOISY_RELATIONS
     relation_counts = {
         relation: {
             "incoming": int(payload.get("incoming_count", 0) or 0),
             "outgoing": int(payload.get("outgoing_count", 0) or 0),
         }
         for relation, payload in categorized.items()
-        if relation not in NOISY_RELATIONS
+        if relation not in excluded_relations
     }
     return {
         "target": resolved_target,
@@ -349,7 +351,7 @@ def get_callers_and_callees(kuzu_store: KuzuStore, target: str) -> dict[str, obj
             "relation_counts": relation_counts,
             "top_importers": categorized["IMPORTS"]["top_incoming"],
             "top_references": categorized["REFERENCES"]["top_incoming"],
-            "all_related_symbol_count": len({symbol for relation, symbols in related_by_relation.items() if relation not in NOISY_RELATIONS for symbol in symbols}),
+            "all_related_symbol_count": len({symbol for relation, symbols in related_by_relation.items() if relation not in excluded_relations for symbol in symbols}),
         },
     }
 
@@ -413,5 +415,157 @@ def get_graph_neighborhood_with_options(
             "top_neighbors": _top_neighbors(filtered_edges, resolved_target),
             "relation_breakdown": _relation_breakdown(filtered_edges),
             "warnings": warnings,
+        },
+    }
+
+
+def _symbol_to_file_map(duckdb_store: DuckDBStore, qualified_names: set[str]) -> dict[str, str]:
+    """Batch-resolve qualified_name -> file_path using DuckDB."""
+    if not qualified_names:
+        return {}
+    result: dict[str, str] = {}
+    # Process in batches to avoid SQL parameter limits
+    names_list = list(qualified_names)
+    batch_size = 50
+    for i in range(0, len(names_list), batch_size):
+        batch = names_list[i : i + batch_size]
+        placeholders = ", ".join("?" for _ in batch)
+        rows = duckdb_store.execute(
+            f"SELECT qualified_name, file_path FROM symbols WHERE qualified_name IN ({placeholders})",
+            batch,
+        ).fetchall()
+        for row in rows:
+            qn = str(row[0] or "")
+            fp = str(row[1] or "")
+            if qn and fp:
+                result[qn] = fp
+    return result
+
+
+def get_file_dependencies(
+    duckdb_store: DuckDBStore,
+    kuzu_store: KuzuStore,
+    file_path: str,
+    relation: str | None = None,
+    limit: int = 50,
+) -> dict[str, object]:
+    """Return a file-to-file dependency map for all symbols defined in *file_path*.
+
+    Aggregates inbound and outbound graph edges for every symbol in the file,
+    then maps the connected symbols back to their source files.  This answers
+    "what files depend on this file?" and "what files does this file depend on?"
+    in a single call instead of requiring per-symbol graph queries.
+    """
+    normalized_path = str(file_path or "").replace("\\", "/").strip()
+    symbols = duckdb_store.fetch_symbols_for_file(normalized_path)
+    if not symbols:
+        return {
+            "file_path": normalized_path,
+            "status": "not_found",
+            "symbol_count": 0,
+            "inbound_files": [],
+            "outbound_files": [],
+            "inbound_file_count": 0,
+            "outbound_file_count": 0,
+            "compact_summary": {
+                "file_path": normalized_path,
+                "status": "not_found",
+                "symbol_count": 0,
+            },
+        }
+
+    qualified_names = [str(sym.get("qualified_name", "") or "").strip() for sym in symbols]
+    qualified_names = [qn for qn in qualified_names if qn]
+
+    relations = [relation.upper()] if relation else list(SYMBOL_CONTEXT_RELATIONS)
+
+    inbound_edges: list[dict[str, object]] = []
+    outbound_edges: list[dict[str, object]] = []
+
+    for qn in qualified_names:
+        for rel in relations:
+            inbound_edges.extend(kuzu_store.edges_for_target(qn, relation=rel))
+            outbound_edges.extend(kuzu_store.edges_for_source(qn, relation=rel))
+
+    # Collect all connected symbol names for file-path resolution
+    connected_symbols: set[str] = set()
+    for edge in inbound_edges:
+        connected_symbols.add(str(edge.get("source", "") or ""))
+    for edge in outbound_edges:
+        connected_symbols.add(str(edge.get("target", "") or ""))
+    connected_symbols.discard("")
+    connected_symbols -= set(qualified_names)  # exclude self-references
+
+    sym_to_file = _symbol_to_file_map(duckdb_store, connected_symbols)
+
+    # Build file-level dependency maps
+    inbound_files: dict[str, list[dict[str, object]]] = {}
+    outbound_files: dict[str, list[dict[str, object]]] = {}
+
+    for edge in inbound_edges:
+        source = str(edge.get("source", "") or "")
+        source_file = sym_to_file.get(source, "")
+        if not source_file or source_file == normalized_path:
+            continue
+        entry = inbound_files.setdefault(source_file, [])
+        entry.append({
+            "symbol": source,
+            "relation": str(edge.get("relation", "") or ""),
+            "target_symbol": str(edge.get("target", "") or ""),
+        })
+
+    for edge in outbound_edges:
+        target = str(edge.get("target", "") or "")
+        target_file = sym_to_file.get(target, "")
+        if not target_file or target_file == normalized_path:
+            continue
+        entry = outbound_files.setdefault(target_file, [])
+        entry.append({
+            "symbol": str(edge.get("source", "") or ""),
+            "relation": str(edge.get("relation", "") or ""),
+            "target_symbol": target,
+        })
+
+    # Sort by edge count descending
+    inbound_list = sorted(
+        [{"file_path": fp, "edge_count": len(edges), "edges": edges[:5]} for fp, edges in inbound_files.items()],
+        key=lambda item: item["edge_count"],
+        reverse=True,
+    )[:limit]
+    outbound_list = sorted(
+        [{"file_path": fp, "edge_count": len(edges), "edges": edges[:5]} for fp, edges in outbound_files.items()],
+        key=lambda item: item["edge_count"],
+        reverse=True,
+    )[:limit]
+
+    # Relation breakdown
+    relation_counts: dict[str, dict[str, int]] = {}
+    for edge in inbound_edges + outbound_edges:
+        rel = str(edge.get("relation", "UNKNOWN") or "UNKNOWN")
+        entry = relation_counts.setdefault(rel, {"inbound": 0, "outbound": 0})
+        if edge in inbound_edges:
+            entry["inbound"] += 1
+        else:
+            entry["outbound"] += 1
+
+    return {
+        "file_path": normalized_path,
+        "status": "ok",
+        "symbol_count": len(qualified_names),
+        "inbound_files": inbound_list,
+        "outbound_files": outbound_list,
+        "inbound_file_count": len(inbound_files),
+        "outbound_file_count": len(outbound_files),
+        "relation_counts": dict(sorted(relation_counts.items())),
+        "unresolved_symbols": sorted(connected_symbols - set(sym_to_file.keys()))[:20],
+        "compact_summary": {
+            "file_path": normalized_path,
+            "status": "ok",
+            "symbol_count": len(qualified_names),
+            "inbound_file_count": len(inbound_files),
+            "outbound_file_count": len(outbound_files),
+            "top_inbound_files": [item["file_path"] for item in inbound_list[:8]],
+            "top_outbound_files": [item["file_path"] for item in outbound_list[:8]],
+            "relation_counts": dict(sorted(relation_counts.items())),
         },
     }

@@ -7,6 +7,7 @@ import re
 from typing import TYPE_CHECKING
 
 from services.app_context_service import app_context
+from services.search_ranking import score_path_relevance
 from services.symbol_resolution_service import resolve_candidates
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,100 @@ def _feature_file_roles(file_path: str) -> list[str]:
     if not roles:
         roles.append("supporting")
     return roles
+
+
+def _rerank_feature_files(
+    feature: str,
+    files: list[dict[str, object]],
+    app_file_count: int,
+) -> list[dict[str, object]]:
+    """Re-rank feature_context files using a hybrid score.
+
+    Blends three signals:
+    1. Keyword overlap — how well the filename/path matches feature query tokens.
+    2. Path proximity — files in the same directory as high-scoring matches get a boost.
+    3. Source diversity — files found by multiple search sources get a boost.
+
+    App_context files get a base score from their original graph-ranking position so
+    that graph centrality is still respected, but keyword-matched fallback files can
+    overtake them when the filename strongly matches the query.
+    """
+    query_tokens = {
+        token
+        for token in re.split(r"[^a-zA-Z0-9]+", feature.lower())
+        if token and token not in FEATURE_STOPWORDS and len(token) >= 3
+    }
+
+    # Phase 1: compute base scores
+    scored: list[tuple[float, dict[str, object]]] = []
+    for index, item in enumerate(files if isinstance(files, list) else []):
+        if not isinstance(item, dict):
+            continue
+        file_path = str(item.get("file_path", "") or "")
+        normalized = file_path.replace("\\", "/").lower()
+
+        # Base score: app_context files get a decaying position score so earlier
+        # graph-ranked files score higher.  Non-app files start at 0.
+        match_sources = item.get("match_sources", [])
+        if not isinstance(match_sources, list):
+            match_sources = []
+        is_app = "app_context" in match_sources
+        base_score = max(0.0, (app_file_count - index) * 0.03) if is_app else 0.0
+
+        # Keyword overlap: filename tokens vs query tokens
+        path_name = normalized.rsplit("/", 1)[-1] if "/" in normalized else normalized
+        path_tokens = {t for t in re.split(r"[^a-zA-Z0-9]+", path_name) if t and len(t) >= 2}
+        filename_overlap = query_tokens & path_tokens
+        # Also check substring matches — compound filenames like "ProductColumns.tsx"
+        # produce a single token "productcolumns" that won't match "column" or "products"
+        # via exact token matching, but should still get credit.
+        for qt in query_tokens:
+            if qt in filename_overlap:
+                continue
+            if any(qt in pt for pt in path_tokens):
+                filename_overlap.add(qt)
+        keyword_score = min(len(filename_overlap) * 0.25, 0.60)
+
+        # Full path overlap (catches directory names like "products")
+        full_path_tokens = {t for t in re.split(r"[^a-zA-Z0-9]+", normalized) if t and len(t) >= 2}
+        path_overlap = query_tokens & full_path_tokens
+        for qt in query_tokens:
+            if qt in path_overlap:
+                continue
+            if any(qt in pt for pt in full_path_tokens):
+                path_overlap.add(qt)
+        path_keyword_score = min(len(path_overlap) * 0.06, 0.24)
+
+        # Use the existing score_path_relevance for subtree/filename matching
+        existing_path_score, _ = score_path_relevance(feature, file_path)
+        # Clamp to avoid double-counting with our keyword score
+        existing_path_score = min(existing_path_score, 0.4)
+
+        # Source diversity: files found by multiple sources are more likely relevant
+        source_count = len(match_sources)
+        diversity_score = min(source_count * 0.05, 0.15)
+
+        total = base_score + keyword_score + path_keyword_score + existing_path_score + diversity_score
+        scored.append((total, item))
+
+    # Phase 2: path proximity boost
+    # Find directories of top-scoring files and boost files in the same directory
+    top_dirs: set[str] = set()
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    for score, item in scored[:5]:
+        fp = str(item.get("file_path", "") or "").replace("\\", "/").lower()
+        if "/" in fp:
+            top_dirs.add(fp.rsplit("/", 1)[0])
+
+    final_scored: list[tuple[float, dict[str, object]]] = []
+    for score, item in scored:
+        fp = str(item.get("file_path", "") or "").replace("\\", "/").lower()
+        parent = fp.rsplit("/", 1)[0] if "/" in fp else ""
+        proximity_boost = 0.08 if parent in top_dirs else 0.0
+        final_scored.append((score + proximity_boost, item))
+
+    final_scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in final_scored]
 
 
 def _merge_file_paths(*groups: list[str], limit: int = 24) -> list[str]:
@@ -234,7 +329,7 @@ def feature_context(
     symbol_file_paths = _symbol_feature_files(duckdb_store, feature, limit)
     chunk_file_paths = _chunk_feature_files(duckdb_store, feature, limit)
     process_file_paths, process_fallbacks = _process_feature_files(duckdb_store, feature, limit)
-    fallback_paths = _merge_file_paths(app_file_paths, symbol_file_paths, chunk_file_paths, process_file_paths, limit=limit)
+    fallback_paths = _merge_file_paths(app_file_paths, symbol_file_paths, chunk_file_paths, process_file_paths, limit=max(limit * 4, 48))
     existing_paths = set(app_file_paths)
     fallback_nodes = []
     for file_path in fallback_paths:
@@ -267,7 +362,22 @@ def feature_context(
                 ],
             }
         )
+    # Ensure app_context files have match_sources for re-ranking
+    for item in files if isinstance(files, list) else []:
+        if isinstance(item, dict) and not item.get("match_sources"):
+            fp = str(item.get("file_path", "") or "")
+            item["match_sources"] = [
+                source
+                for source, paths in (
+                    ("app_context", app_file_paths),
+                    ("symbol", symbol_file_paths),
+                    ("chunk", chunk_file_paths),
+                    ("process", process_file_paths),
+                )
+                if fp in paths
+            ]
     files = [*(files if isinstance(files, list) else []), *fallback_nodes]
+    files = _rerank_feature_files(feature, files, app_file_count=len(app_file_paths))[:limit]
     feature_files = []
     tag_counts: dict[str, int] = {}
     role_groups = {"page_files": [], "shared_ui_files": [], "backend_files": []}
