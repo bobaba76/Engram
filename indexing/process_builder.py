@@ -131,7 +131,7 @@ def _process_entrypoints(
     return candidates[:max(max_entrypoints, 1)]
 
 
-def _walk_call_paths(callees_by_source: dict[str, list[str]], start: str, max_depth: int, max_flows: int) -> list[list[str]]:
+def _walk_call_paths(callees_by_source: dict[str, list[str]], start: str, max_depth: int, max_flows: int, max_branches: int = 8) -> list[list[str]]:
     flows: list[list[str]] = []
     stack: list[tuple[str, list[str]]] = [(start, [start])]
     while stack and len(flows) < max_flows:
@@ -143,7 +143,7 @@ def _walk_call_paths(callees_by_source: dict[str, list[str]], start: str, max_de
         if not next_nodes:
             flows.append(path)
             continue
-        for node in reversed(next_nodes[:8]):
+        for node in reversed(next_nodes[:max_branches]):
             stack.append((node, [*path, node]))
     return flows
 
@@ -190,7 +190,7 @@ def _keywords(file_paths: set[str], flow: list[str]) -> list[str]:
         tail = _normalize_symbol_name(symbol)
         if len(tail) >= 4:
             values.add(tail)
-    return sorted(values)[:8]
+    return sorted(values)[:8]  # noqa: PLR2004 — intentional limit for tag count
 
 
 def _semantic_process_name(flow: list[str], module_name: str, file_paths: set[str]) -> str:
@@ -358,7 +358,7 @@ def build_process_records(
                     step_count=len(flow),
                     step_list=[{"symbol": node, "step": index + 1} for index, node in enumerate(flow)],
                     module_tags=sorted(module_tags),
-                    community_tags=sorted(module_tags),
+                    community_tags=sorted({_normalize_symbol_name(node) for node in flow if len(_normalize_symbol_name(node)) >= 4}),
                     file_paths=sorted(file_paths),
                 )
             )

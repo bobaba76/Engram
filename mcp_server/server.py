@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
+import logging
 import sys
 from functools import wraps
 from typing import Any, Callable
 
 from mcp_server.formatters import enrich_payload
 from mcp_server.tools import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -27,8 +31,20 @@ class MCPServer:
             handler_signature = inspect.signature(handler)
 
             @wraps(handler)
-            def wrapped_handler(*args: Any, **kwargs: Any) -> Any:
-                return enrich_payload(handler(*args, **kwargs))
+            async def wrapped_handler(*args: Any, **kwargs: Any) -> Any:
+                def _run() -> Any:
+                    try:
+                        return enrich_payload(handler(*args, **kwargs))
+                    except Exception as exc:
+                        logger.exception("MCP tool %s raised an exception", name)
+                        return enrich_payload({
+                            "status": "error",
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                            "summary_text": f"Tool {name!r} failed: {exc}",
+                            "highlights": [f"Tool {name!r} failed: {exc}"],
+                        })
+                return await asyncio.to_thread(_run)
 
             wrapped_handler.__signature__ = handler_signature
 

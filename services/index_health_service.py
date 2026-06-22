@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from indexing.native_build_context import summarize_native_build_context
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from storage.duckdb_store import DuckDBStore
@@ -15,6 +18,7 @@ def _count(duckdb_store: DuckDBStore, table: str) -> int:
     try:
         return int(duckdb_store.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
     except Exception:
+        logger.warning("index_health: failed to count table %s", table, exc_info=True)
         return 0
 
 
@@ -26,6 +30,7 @@ def _group_counts(duckdb_store: DuckDBStore, table: str, column: str, limit: int
         ).fetchall()
         return {str(row[0] or ""): int(row[1] or 0) for row in rows}
     except Exception:
+        logger.warning("index_health: failed to get symbol counts", exc_info=True)
         return {}
 
 
@@ -43,6 +48,7 @@ def index_health(repo_root: Path, duckdb_store: DuckDBStore, kuzu_store: KuzuSto
         try:
             graph_integrity = kuzu_store.graph_integrity_report()
         except Exception:
+            logger.warning("index_health: graph integrity check failed", exc_info=True)
             graph_integrity = {"ok": False, "error": "graph integrity check failed"}
     largest_chunks = []
     try:
@@ -66,6 +72,7 @@ def index_health(repo_root: Path, duckdb_store: DuckDBStore, kuzu_store: KuzuSto
             for row in rows
         ]
     except Exception:
+        logger.warning("index_health: failed to get largest chunks", exc_info=True)
         largest_chunks = []
     recent_runs = []
     try:
@@ -91,6 +98,7 @@ def index_health(repo_root: Path, duckdb_store: DuckDBStore, kuzu_store: KuzuSto
                 }
             )
     except Exception:
+        logger.warning("index_health: failed to get recent runs", exc_info=True)
         recent_runs = []
     warnings = []
     if file_count and chunk_count / max(file_count, 1) > 25:

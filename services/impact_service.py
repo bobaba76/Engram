@@ -9,7 +9,7 @@ from services.graph_edge_utils import edges_for_source_limited, edges_for_target
 from services.symbol_resolution_service import ambiguity_status, resolve_candidates, symbol_uid_from_target
 
 
-DEFAULT_RELATIONS = ("CALLS", "IMPORTS", "INCLUDES", "REFERENCES", "ACCESSES", "FETCHES", "READS_FIELD", "HAS_METHOD", "HAS_PROPERTY", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS", "INJECTS", "USES_SERVICE")
+DEFAULT_RELATIONS = ("CALLS", "INCLUDES", "REFERENCES", "ACCESSES", "FETCHES", "READS_FIELD", "HAS_METHOD", "HAS_PROPERTY", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS", "INJECTS", "USES_SERVICE")
 RELATION_WEIGHTS = {
     "CALLS": 1.0,
     "IMPORTS": 0.18,

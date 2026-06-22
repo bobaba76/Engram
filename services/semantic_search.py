@@ -1,3 +1,5 @@
+import logging
+
 from storage.vector_store import VectorStore
 from storage.duckdb_store import DuckDBStore
 from storage.kuzu_store import KuzuStore
@@ -5,6 +7,8 @@ from indexing.embedding_providers import EmbeddingRequest, build_embedding_provi
 from services.rerank_service import rerank_with_diversity
 from services.search_ranking import compact_result_payload, rerank_search_results
 from services.symbol_resolution_service import resolve_candidates
+
+logger = logging.getLogger(__name__)
 
 
 def _task_variants(task: str, limit: int = 6) -> list[str]:
@@ -29,7 +33,7 @@ def _task_variants(task: str, limit: int = 6) -> list[str]:
                 if len(variants) >= limit:
                     return variants
     except Exception:
-        pass
+        logger.warning("semantic_search: query rewrite failed for task %r", normalized, exc_info=True)
     return variants[:limit]
 
 
@@ -358,7 +362,11 @@ def semantic_code_search(
         if include_vector:
             assert provider is not None
             assert request is not None
-            embedding = provider.embed([variant], request=request)[0]
+            try:
+                embedding = provider.embed([variant], request=request)[0]
+            except Exception as exc:
+                logger.warning("semantic_code_search: vector embedding failed for variant %r: %s", variant, exc)
+                continue
             raw_results = vector_store.search(task=variant, limit=max(limit * 4, 20), embedding=embedding)
             vector_results.extend(
                 {

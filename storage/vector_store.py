@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 try:
     import lancedb
@@ -50,13 +53,11 @@ class VectorStore:
         self.data_path.mkdir(parents=True, exist_ok=True)
         self.cache_path = self.data_path / "embedding_cache.json"
         self.cache_db_path = self.data_path / "embedding_cache.sqlite"
-        self.items: list[dict[str, Any]] | None = []
         self.embedding_cache: dict[str, list[float]] = {}
         self.cache_db: sqlite3.Connection | None = None
         self.db = lancedb.connect(str(self.data_path)) if lancedb is not None else None
         self.table = None
         if self.db is not None:
-            self.items = None
             table_names = set(self.db.table_names())
             if "chunks" in table_names:
                 self.table = self.db.open_table("chunks")
@@ -120,12 +121,10 @@ class VectorStore:
                 self.cache_db.execute("DELETE FROM embedding_cache")
                 self.cache_db.commit()
             except sqlite3.Error:
-                pass
+                logger.warning("vector_store: failed to clear embedding cache", exc_info=True)
         self.cache_path.unlink(missing_ok=True)
 
     def reset(self) -> None:
-        if self.items is not None:
-            self.items = []
         if self.db is not None:
             table_names = set(self.db.table_names())
             if "chunks" in table_names:
@@ -146,11 +145,13 @@ class VectorStore:
                         batch,
                     ).fetchall()
                 except sqlite3.Error:
+                    logger.warning("vector_store: failed to read embedding cache batch", exc_info=True)
                     return {}
                 for content_hash, vector_json in rows:
                     try:
                         vector = json.loads(vector_json)
                     except json.JSONDecodeError:
+                        logger.debug("vector_store: corrupted cache entry for hash %s", content_hash, exc_info=True)
                         continue
                     if isinstance(vector, list):
                         cached[str(content_hash)] = vector
@@ -170,7 +171,7 @@ class VectorStore:
                 )
                 self.cache_db.commit()
             except sqlite3.Error:
-                pass
+                logger.warning("vector_store: failed to store embedding in cache for hash %s", content_hash, exc_info=True)
             return
         if content_hash in self.embedding_cache:
             return
@@ -188,7 +189,7 @@ class VectorStore:
                     )
                     self.cache_db.commit()
                 except sqlite3.Error:
-                    pass
+                    logger.warning("vector_store: failed to bulk store embeddings in cache", exc_info=True)
             return
         updated = False
         for content_hash, vector in items.items():
@@ -203,8 +204,6 @@ class VectorStore:
         if not file_paths:
             return
         file_path_set = set(file_paths)
-        if self.items is not None:
-            self.items = [item for item in self.items if item.get("file_path") not in file_path_set]
         if self.table is None:
             return
         for predicate in _batched_file_path_predicates(sorted(file_path_set)):
@@ -214,19 +213,22 @@ class VectorStore:
         if not chunk_ids:
             return
         chunk_id_set = set(chunk_ids)
-        if self.items is not None:
-            self.items = [item for item in self.items if item.get("chunk_id") not in chunk_id_set]
         if self.table is None:
             return
         for predicate in _batched_chunk_id_predicates(sorted(chunk_id_set)):
             self.table.delete(predicate)
 
     def add_item(self, item: dict[str, Any]) -> None:
-        if self.items is not None:
-            self.items.append(item)
         if self.db is None:
             return
         row = dict(item)
+        vector = row.get("vector")
+        if isinstance(vector, list) and len(vector) <= 64:
+            logger.warning(
+                "vector_store: inserting suspiciously small embedding (dim=%d) — "
+                "this may be a deterministic fallback; semantic search quality will degrade",
+                len(vector),
+            )
         if self.table is None:
             self.table = self.db.create_table("chunks", data=[row], mode="overwrite")
         else:
@@ -242,11 +244,19 @@ class VectorStore:
     def add_items(self, items: list[dict[str, Any]]) -> None:
         if not items:
             return
-        if self.items is not None:
-            self.items.extend(items)
         if self.db is None:
             return
         rows = [dict(item) for item in items]
+        for row in rows:
+            vector = row.get("vector")
+            if isinstance(vector, list) and len(vector) <= 64:
+                logger.warning(
+                    "vector_store: inserting suspiciously small embedding (dim=%d) for chunk %s — "
+                    "this may be a deterministic fallback; semantic search quality will degrade",
+                    len(vector),
+                    row.get("chunk_id", "?"),
+                )
+                break
         if self.table is None:
             self.table = self.db.create_table("chunks", data=rows, mode="overwrite")
         else:
@@ -263,13 +273,4 @@ class VectorStore:
         if self.db is not None and self.table is not None and embedding is not None:
             results = self.table.search(embedding).limit(limit).to_list()
             return [dict(row) for row in results]
-        if self.items is None:
-            return []
-        lowered = task.lower()
-        scored: list[tuple[int, dict[str, Any]]] = []
-        for item in self.items:
-            haystack = f"{item.get('file_path', '')} {item.get('symbol_name', '')} {item.get('content', '')}".lower()
-            score = sum(1 for token in lowered.split() if token in haystack)
-            scored.append((score, item))
-        scored.sort(key=lambda value: value[0], reverse=True)
-        return [item for _, item in scored[:limit]]
+        return []

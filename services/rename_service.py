@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 from storage.duckdb_store import DuckDBStore
 from storage.kuzu_store import KuzuStore
 from services.symbol_resolution_service import ambiguity_status, resolve_candidates
+
+logger = logging.getLogger(__name__)
 
 
 WORD_TEMPLATE = r"(?<![A-Za-z0-9_]){name}(?![A-Za-z0-9_])"
@@ -47,6 +50,7 @@ def _text_search_preview(repo_root: Path, symbol_name: str, new_name: str, file_
         try:
             source = absolute_path.read_text(encoding="utf-8")
         except Exception:
+            logger.warning("rename_service: failed to read file %s", file_path, exc_info=True)
             continue
         lines = source.splitlines()
         for line_number, line in enumerate(lines, start=1):

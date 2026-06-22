@@ -202,6 +202,9 @@ def score_path_relevance(query: str, file_path: object) -> tuple[float, list[str
         elif TEST_TOKENS & tokens:
             score += 0.08
             reasons.append("explicit test query boost")
+        elif not (TEST_TOKENS & tokens):
+            score -= 0.1
+            reasons.append("test path penalty for non-test query")
     if FRONTEND_TOKENS & tokens:
         if normalized_path.endswith((".tsx", ".jsx")):
             score += 0.3

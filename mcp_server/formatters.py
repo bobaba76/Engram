@@ -547,7 +547,6 @@ def enrich_payload(payload: dict[str, Any]) -> dict[str, Any]:
     enriched = _normalize_contract(payload)
     summary_lines = _format_summary_lines(enriched)
     enriched["summary_text"] = "\n".join(summary_lines) if summary_lines else ""
-    enriched["highlights"] = summary_lines
     return enriched
 
 

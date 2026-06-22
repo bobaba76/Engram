@@ -21,6 +21,7 @@ def _run_git(repo_root: Path, args: list[str], timeout: int) -> tuple[str, str, 
             errors="replace",
             check=False,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return "", f"git {' '.join(args)} timed out after {timeout}s", 124

@@ -1,9 +1,13 @@
 from __future__ import annotations
- 
+
+import logging
 from pathlib import Path
+from threading import local as ThreadLocal
 from typing import Any
- 
+
 import kuzu
+
+logger = logging.getLogger(__name__)
  
  
 def _escape(value: str) -> str:
@@ -19,6 +23,7 @@ def _safe_get_all(result) -> list[tuple[Any, ...]]:
     try:
         return result.get_all()
     except RuntimeError:
+        logger.debug("kuzu: _safe_get_all failed", exc_info=True)
         return []
 
 
@@ -49,6 +54,7 @@ def _result_columns(result) -> list[str]:
     try:
         return [str(name) for name in result.get_column_names()]
     except Exception:
+        logger.debug("kuzu: _result_columns failed", exc_info=True)
         return []
 
 
@@ -57,66 +63,91 @@ class KuzuStore:
         self.data_path = data_path
         self.read_only = read_only
         self.data_path.parent.mkdir(parents=True, exist_ok=True)
+        self._thread_local = ThreadLocal()
         self.database = kuzu.Database(str(self.data_path), read_only=read_only)
-        self.connection = kuzu.Connection(self.database)
         if not self.read_only:
             self._initialize_schema()
 
+    @property
+    def connection(self):
+        """Return a thread-local kuzu.Connection.
+
+        KuzuDB connections are not thread-safe.  When ``run_with_timeout``
+        runs a query in a ThreadPoolExecutor, the background thread must
+        not share the same connection as the main thread.  Creating a
+        separate connection per thread on the shared Database avoids
+        the deadlock.
+        """
+        conn = getattr(self._thread_local, "conn", None)
+        if conn is None:
+            conn = kuzu.Connection(self.database)
+            self._thread_local.conn = conn
+        return conn
+
     def close(self) -> None:
-        self.connection = None
+        self._thread_local = ThreadLocal()
         self.database = None
- 
+
+    def _safe_execute(self, query: str, parameters: dict[str, Any] | None = None):
+        """Execute a query on the thread-local KuzuDB connection.
+
+        Each thread gets its own ``kuzu.Connection`` on the shared
+        ``kuzu.Database``, preventing concurrent-access deadlocks when
+        ``run_with_timeout`` runs queries in a ThreadPoolExecutor.
+        """
+        return self.connection.execute(query, parameters or {})
+
     def _initialize_schema(self) -> None:
         try:
-            self.connection.execute("CREATE NODE TABLE File(path STRING, PRIMARY KEY(path))")
+            self._safe_execute("CREATE NODE TABLE File(path STRING, PRIMARY KEY(path))")
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
         try:
-            self.connection.execute(
+            self._safe_execute(
                 "CREATE NODE TABLE Symbol(qualified_name STRING, file_path STRING, kind STRING, start_line INT64, end_line INT64, PRIMARY KEY(qualified_name))"
             )
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
         try:
-            self.connection.execute("CREATE REL TABLE DEFINES(FROM File TO Symbol)")
+            self._safe_execute("CREATE REL TABLE DEFINES(FROM File TO Symbol)")
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
         try:
-            self.connection.execute("CREATE REL TABLE IMPORTS(FROM Symbol TO Symbol)")
+            self._safe_execute("CREATE REL TABLE IMPORTS(FROM Symbol TO Symbol)")
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
         try:
-            self.connection.execute("CREATE REL TABLE CALLS(FROM Symbol TO Symbol)")
+            self._safe_execute("CREATE REL TABLE CALLS(FROM Symbol TO Symbol)")
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
         try:
-            self.connection.execute("CREATE REL TABLE REFERENCES(FROM Symbol TO Symbol)")
+            self._safe_execute("CREATE REL TABLE REFERENCES(FROM Symbol TO Symbol)")
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
         try:
-            self.connection.execute("CREATE REL TABLE DECLARES(FROM Symbol TO Symbol)")
+            self._safe_execute("CREATE REL TABLE DECLARES(FROM Symbol TO Symbol)")
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
         try:
-            self.connection.execute("CREATE REL TABLE ASSOCIATED_WITH(FROM Symbol TO Symbol)")
+            self._safe_execute("CREATE REL TABLE ASSOCIATED_WITH(FROM Symbol TO Symbol)")
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
         try:
-            self.connection.execute("CREATE REL TABLE ACCESSES(FROM Symbol TO Symbol)")
+            self._safe_execute("CREATE REL TABLE ACCESSES(FROM Symbol TO Symbol)")
         except RuntimeError as exc:
             if not _is_already_exists_error(exc):
                 raise
         for relation in ("INCLUDES", "DECLARES_IN_HEADER", "DEFINES_IMPLEMENTATION", "INJECTS", "USES_SERVICE", "FETCHES", "READS_FIELD", "HAS_METHOD", "HAS_PROPERTY", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS"):
             try:
-                self.connection.execute(f"CREATE REL TABLE {relation}(FROM Symbol TO Symbol)")
+                self._safe_execute(f"CREATE REL TABLE {relation}(FROM Symbol TO Symbol)")
             except RuntimeError as exc:
                 if not _is_already_exists_error(exc):
                     raise
@@ -127,44 +158,44 @@ class KuzuStore:
             "MATCH (s:Symbol) DETACH DELETE s",
         ):
             try:
-                self.connection.execute(query)
+                self._safe_execute(query)
             except RuntimeError:
-                pass
- 
+                logger.debug("kuzu: reset_index_data failed for query: %s", query, exc_info=True)
+
     def delete_index_data_for_files(self, file_paths: list[str]) -> None:
         if not file_paths:
             return
         for file_path in file_paths:
             try:
-                self.connection.execute(
+                self._safe_execute(
                     "MATCH (f:File {path: $file_path}) DETACH DELETE f",
                     {"file_path": file_path},
                 )
             except RuntimeError:
-                pass
+                logger.debug("kuzu: delete file node failed for %s", file_path, exc_info=True)
             try:
-                self.connection.execute(
+                self._safe_execute(
                     "MATCH (s:Symbol {file_path: $file_path}) DETACH DELETE s",
                     {"file_path": file_path},
                 )
             except RuntimeError:
-                pass
+                logger.debug("kuzu: delete symbol node failed for %s", file_path, exc_info=True)
  
     def ensure_file(self, path: str) -> None:
-        result = self.connection.execute(
+        result = self._safe_execute(
             "MATCH (f:File {path: $path}) RETURN f.path LIMIT 1",
             {"path": path},
         )
         if result.get_num_tuples() == 0:
-            self.connection.execute("CREATE (f:File {path: $path})", {"path": path})
+            self._safe_execute("CREATE (f:File {path: $path})", {"path": path})
  
     def ensure_symbol(self, qualified_name: str, file_path: str, kind: str, start_line: int, end_line: int) -> None:
-        result = self.connection.execute(
+        result = self._safe_execute(
             "MATCH (s:Symbol {qualified_name: $qualified_name}) RETURN s.qualified_name LIMIT 1",
             {"qualified_name": qualified_name},
         )
         if result.get_num_tuples() == 0:
-            self.connection.execute(
+            self._safe_execute(
                 """
                 CREATE (s:Symbol {
                     qualified_name: $qualified_name,
@@ -189,10 +220,14 @@ class KuzuStore:
         else:
             query = f"MATCH (source:Symbol {{qualified_name: $source}}), (target:Symbol {{qualified_name: $target}}) CREATE (source)-[:{relation}]->(target)"
         try:
-            self.connection.execute(query, {"source": source, "target": target})
-        except RuntimeError:
-            pass
- 
+            self._safe_execute(query, {"source": source, "target": target})
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if "already exists" in msg or "duplicate" in msg:
+                logger.debug("kuzu: duplicate edge skipped %s -[%s]-> %s", source, relation, target)
+            else:
+                logger.warning("kuzu: add_edge failed for %s -[%s]-> %s", source, relation, target, exc_info=True)
+
     def _relation_queries(self, relation: str, limit: int | None = None) -> tuple[str, str]:
         limit_clause = f" LIMIT {int(limit)}" if limit is not None and int(limit) > 0 else ""
         if relation == "DEFINES":
@@ -216,7 +251,7 @@ class KuzuStore:
         limit_clause = f" LIMIT {int(limit)}" if limit is not None and int(limit) > 0 else ""
         try:
             rows = _safe_get_all(
-                self.connection.execute(
+                self._safe_execute(
                     f"""
                     MATCH (s:Symbol)
                     WHERE s.file_path = $file_path
@@ -246,7 +281,7 @@ class KuzuStore:
         limit_clause = f" LIMIT {int(limit)}" if limit is not None and int(limit) > 0 else ""
         try:
             rows = _safe_get_all(
-                self.connection.execute(
+                self._safe_execute(
                     f"""
                     MATCH (source:Symbol)-[:{relation}]->(target:Symbol)
                     WHERE target.file_path = $file_path
@@ -276,7 +311,7 @@ class KuzuStore:
         limit_clause = f" LIMIT {int(limit)}" if limit is not None and int(limit) > 0 else ""
         try:
             rows = _safe_get_all(
-                self.connection.execute(
+                self._safe_execute(
                     f"""
                     MATCH (source:Symbol)-[:{relation}]->(target:Symbol)
                     WHERE target.qualified_name = $target
@@ -307,7 +342,7 @@ class KuzuStore:
             *[f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) RETURN COUNT(*)" for relation in SYMBOL_RELATIONS],
         ):
             try:
-                rows = _safe_get_all(self.connection.execute(query))
+                rows = _safe_get_all(self._safe_execute(query))
             except RuntimeError:
                 rows = []
             if rows:
@@ -336,7 +371,7 @@ class KuzuStore:
             file_breakdown: dict[str, list[str]] = {}
             for relation_name, query in relation_queries.items():
                 try:
-                    rows = _safe_get_all(self.connection.execute(query, {"file_path": file_path}))
+                    rows = _safe_get_all(self._safe_execute(query, {"file_path": file_path}))
                 except RuntimeError:
                     rows = []
                 related_files = sorted({str(row[0]) for row in rows if row and row[0]})
@@ -357,7 +392,7 @@ class KuzuStore:
             **{relation: f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name" for relation in SYMBOL_RELATIONS},
         }.items():
             try:
-                rows = self.connection.execute(query).get_all()
+                rows = self._safe_execute(query).get_all()
             except RuntimeError:
                 rows = []
             edges.extend(
@@ -368,13 +403,13 @@ class KuzuStore:
 
     def graph_integrity_report(self) -> dict[str, Any]:
         try:
-            file_rows = _safe_get_all(self.connection.execute("MATCH (f:File) RETURN f.path"))
+            file_rows = _safe_get_all(self._safe_execute("MATCH (f:File) RETURN f.path"))
         except RuntimeError:
             file_rows = []
         file_paths = {str(row[0]) for row in file_rows if row and row[0]}
         try:
             symbol_rows = _safe_get_all(
-                self.connection.execute("MATCH (s:Symbol) RETURN s.qualified_name, s.file_path")
+                self._safe_execute("MATCH (s:Symbol) RETURN s.qualified_name, s.file_path")
             )
         except RuntimeError:
             symbol_rows = []
@@ -385,7 +420,7 @@ class KuzuStore:
         ]
         try:
             define_rows = _safe_get_all(
-                self.connection.execute("MATCH (f:File)-[:DEFINES]->(s:Symbol) RETURN f.path, s.qualified_name")
+                self._safe_execute("MATCH (f:File)-[:DEFINES]->(s:Symbol) RETURN f.path, s.qualified_name")
             )
         except RuntimeError:
             define_rows = []
@@ -421,7 +456,7 @@ class KuzuStore:
         if query is None:
             return []
         try:
-            rows = self.connection.execute(query).get_all()
+            rows = self._safe_execute(query).get_all()
         except RuntimeError:
             rows = []
         return [
@@ -435,7 +470,7 @@ class KuzuStore:
         for relation_name in relations:
             _, target_query = self._relation_queries(relation_name, limit=limit)
             try:
-                rows = _safe_get_all(self.connection.execute(target_query, {"value": target}))
+                rows = _safe_get_all(self._safe_execute(target_query, {"value": target}))
             except RuntimeError:
                 rows = []
             edges.extend(self._rows_to_edges(rows))
@@ -447,7 +482,7 @@ class KuzuStore:
         for relation_name in relations:
             source_query, _ = self._relation_queries(relation_name, limit=limit)
             try:
-                rows = _safe_get_all(self.connection.execute(source_query, {"value": source}))
+                rows = _safe_get_all(self._safe_execute(source_query, {"value": source}))
             except RuntimeError:
                 rows = []
             edges.extend(self._rows_to_edges(rows))
@@ -480,7 +515,7 @@ class KuzuStore:
         return {"target": target, "depth": depth, "nodes": sorted(seen), "edges": collected}
 
     def execute_query(self, query: str, parameters: dict[str, Any] | None = None) -> dict[str, Any]:
-        result = self.connection.execute(query, parameters or {})
+        result = self._safe_execute(query, parameters or {})
         columns = _result_columns(result)
         rows = _safe_get_all(result)
         mapped_rows: list[dict[str, Any]] = []

@@ -34,8 +34,14 @@ def _annotation_to_schema(annotation: Any) -> dict[str, Any]:
         return {"type": "object"}
     if origin is Union:
         non_none = [arg for arg in args if arg is not type(None)]
+        has_none = len(non_none) != len(args)
         if len(non_none) == 1:
-            return _annotation_to_schema(non_none[0])
+            inner = _annotation_to_schema(non_none[0])
+            if has_none:
+                inner = {**inner, "nullable": True}
+            return inner
+        if has_none and len(non_none) > 1:
+            return {"anyOf": [_annotation_to_schema(arg) for arg in non_none], "nullable": True}
     if str(annotation).startswith("typing.Literal"):
         return {"type": "string", "enum": list(args)}
     return {"type": "string"}

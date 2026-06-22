@@ -303,11 +303,27 @@ def _related_symbols_by_relation(categories: dict[str, dict[str, object]], targe
     return related
 
 
+NOISY_RELATIONS = {"IMPORTS"}
+
+
+def _dedupe_edges(edges: list[dict[str, object]], key_field: str = "target") -> list[dict[str, object]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, object]] = []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        key = str(edge.get(key_field, ""))
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(edge)
+    return deduped
+
+
 def get_callers_and_callees(kuzu_store: KuzuStore, target: str) -> dict[str, object]:
     resolved_target = _normalize_graph_target(target)
     categorized = _categorized_references(kuzu_store, resolved_target)
-    callers = categorized["CALLS"]["incoming"]
-    callees = categorized["CALLS"]["outgoing"]
+    callers = _dedupe_edges(categorized["CALLS"]["incoming"], key_field="source")
+    callees = _dedupe_edges(categorized["CALLS"]["outgoing"], key_field="target")
     related_by_relation = _related_symbols_by_relation(categorized, resolved_target)
     relation_counts = {
         relation: {
@@ -315,6 +331,7 @@ def get_callers_and_callees(kuzu_store: KuzuStore, target: str) -> dict[str, obj
             "outgoing": int(payload.get("outgoing_count", 0) or 0),
         }
         for relation, payload in categorized.items()
+        if relation not in NOISY_RELATIONS
     }
     return {
         "target": resolved_target,
@@ -332,7 +349,7 @@ def get_callers_and_callees(kuzu_store: KuzuStore, target: str) -> dict[str, obj
             "relation_counts": relation_counts,
             "top_importers": categorized["IMPORTS"]["top_incoming"],
             "top_references": categorized["REFERENCES"]["top_incoming"],
-            "all_related_symbol_count": len({symbol for symbols in related_by_relation.values() for symbol in symbols}),
+            "all_related_symbol_count": len({symbol for relation, symbols in related_by_relation.items() if relation not in NOISY_RELATIONS for symbol in symbols}),
         },
     }
 

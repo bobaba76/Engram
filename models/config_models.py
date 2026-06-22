@@ -29,7 +29,7 @@ class RuntimeConfig:
     embedding_batch_size: int = 24
     embedding_max_length: int = 512
     embedding_max_batch_tokens: int = 12000
-    embedding_device: str = "cuda"
+    embedding_device: str = "auto"
     embedding_api_key: str = ""
     embedding_base_url: str = ""
     embedding_retry_attempts: int = 3
@@ -68,3 +68,45 @@ class RuntimeConfig:
     start_mcp_after_index: bool = True
     agents_file_enabled: bool = True
     versions: VersionConfig = field(default_factory=VersionConfig)
+
+    def __post_init__(self) -> None:
+        if self.embedding_batch_size < 1:
+            raise ValueError(f"embedding_batch_size must be >= 1, got {self.embedding_batch_size}")
+        if self.embedding_max_length < 1:
+            raise ValueError(f"embedding_max_length must be >= 1, got {self.embedding_max_length}")
+        if self.embedding_max_batch_tokens < 1:
+            raise ValueError(f"embedding_max_batch_tokens must be >= 1, got {self.embedding_max_batch_tokens}")
+        if self.embedding_retry_attempts < 0:
+            raise ValueError(f"embedding_retry_attempts must be >= 0, got {self.embedding_retry_attempts}")
+        if self.embedding_max_concurrent_batches < 1:
+            raise ValueError(f"embedding_max_concurrent_batches must be >= 1, got {self.embedding_max_concurrent_batches}")
+        if self.process_max_depth < 1:
+            raise ValueError(f"process_max_depth must be >= 1, got {self.process_max_depth}")
+        if self.process_max_entrypoints < 1:
+            raise ValueError(f"process_max_entrypoints must be >= 1, got {self.process_max_entrypoints}")
+        if self.process_max_records < 1:
+            raise ValueError(f"process_max_records must be >= 1, got {self.process_max_records}")
+        if self.review_max_source_chars < 1:
+            raise ValueError(f"review_max_source_chars must be >= 1, got {self.review_max_source_chars}")
+        if self.max_review_workers < 1:
+            raise ValueError(f"max_review_workers must be >= 1, got {self.max_review_workers}")
+        if self.max_concurrent_llm_reviews < 1:
+            raise ValueError(f"max_concurrent_llm_reviews must be >= 1, got {self.max_concurrent_llm_reviews}")
+        valid_devices = {"auto", "cpu", "cuda", "mps"}
+        if self.embedding_device not in valid_devices:
+            raise ValueError(f"embedding_device must be one of {valid_devices}, got {self.embedding_device!r}")
+        valid_providers = {"local", "openai", "openai-compatible"}
+        if self.embedding_provider not in valid_providers:
+            raise ValueError(f"embedding_provider must be one of {valid_providers}, got {self.embedding_provider!r}")
+
+    def safe_dict(self) -> dict[str, object]:
+        """Return a dict representation with API keys masked."""
+        from dataclasses import asdict
+        d = asdict(self)
+        for key in ("embedding_api_key", "openrouter_api_key"):
+            val = d.get(key, "")
+            if val and isinstance(val, str) and len(val) > 4:
+                d[key] = val[:2] + "***" + val[-2:]
+            elif val:
+                d[key] = "***"
+        return d

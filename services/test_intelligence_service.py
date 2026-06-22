@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from services.detect_changes_service import detect_changes
 from services.symbol_resolution_service import resolve_candidates
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from storage.duckdb_store import DuckDBStore
@@ -163,7 +166,14 @@ def _keep_relevant_tests(rows: list[dict[str, object]], fallback_limit: int) -> 
     relevant = [
         row
         for row in rows
-        if int(row.get("token_overlap", 0) or 0) >= 2 or int(row.get("score", 0) or 0) > 3
+        if int(row.get("token_overlap", 0) or 0) >= 1 or int(row.get("score", 0) or 0) > 3
+    ]
+    # Filter out non-source files (project files, configs, etc.) — only keep actual test source files
+    source_extensions = (".py", ".cs", ".ts", ".tsx", ".js", ".jsx", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".java", ".kt", ".go", ".rs", ".rb")
+    relevant = [
+        row
+        for row in relevant
+        if str(row.get("file_path", "") or row.get("file", "") or row.get("path", "")).lower().endswith(source_extensions)
     ]
     return relevant
 
@@ -173,6 +183,7 @@ def _indexed_test_paths(duckdb_store: DuckDBStore) -> set[str]:
     try:
         file_rows = duckdb_store.files.fetch_all()
     except Exception:
+        logger.warning("test_intelligence: failed to fetch files for indexed test paths", exc_info=True)
         return paths
     for row in file_rows:
         path = str(row.get("path", "") if isinstance(row, dict) else "")
@@ -186,6 +197,7 @@ def _indexed_paths(duckdb_store: DuckDBStore) -> set[str]:
     try:
         file_rows = duckdb_store.files.fetch_all()
     except Exception:
+        logger.warning("test_intelligence: failed to fetch files for indexed paths", exc_info=True)
         return paths
     for row in file_rows:
         path = str(row.get("path", "") if isinstance(row, dict) else "")
@@ -209,6 +221,7 @@ def _project_references(duckdb_store: DuckDBStore, project_path: str) -> set[str
     try:
         symbols = duckdb_store.fetch_symbols_for_file(project_path)
     except Exception:
+        logger.warning("test_intelligence: failed to fetch symbols for project references", exc_info=True)
         return set()
     references: set[str] = set()
     for symbol in symbols:
@@ -344,6 +357,28 @@ def _call_graph_tests(duckdb_store: DuckDBStore, kuzu_store: KuzuStore | None, t
                     "token_overlap": 3,
                     "why_relevant": f"test calls {target_symbol}",
                 }
+        # Depth-2: check callers of callers (tests may call target indirectly)
+        for edge in kuzu_store.edges_for_target(target_symbol, relation="CALLS", limit=40):
+            intermediate = str(edge.get("source", "") or "")
+            if not intermediate or intermediate == target_symbol:
+                continue
+            for edge2 in kuzu_store.edges_for_target(intermediate, relation="CALLS", limit=40):
+                caller2 = str(edge2.get("source", "") or "")
+                if not caller2:
+                    continue
+                for row in duckdb_store.fetch_symbols_for_target(caller2, limit=3):
+                    file_path = str(row.get("file_path", "") or "")
+                    if not _is_test_path(file_path) or file_path in mapped:
+                        continue
+                    mapped[file_path] = {
+                        "file_path": file_path,
+                        "name": row.get("name", Path(file_path).stem),
+                        "qualified_name": row.get("qualified_name", row.get("name", Path(file_path).stem)),
+                        "kind": row.get("kind", "test"),
+                        "score": 8,
+                        "token_overlap": 2,
+                        "why_relevant": f"test indirectly calls {target_symbol} via {intermediate}",
+                    }
     return list(mapped.values())
 
 

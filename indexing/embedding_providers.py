@@ -26,6 +26,7 @@ class EmbeddingRequest:
     retry_attempts: int = 3
     retry_backoff_seconds: float = 1.0
     max_concurrent_batches: int = 4
+    allow_fallback: bool = False
 
 
 class EmbeddingProvider(Protocol):
@@ -74,6 +75,7 @@ class LocalJinaEmbeddingProvider:
             max_length=request.max_length,
             device=request.device,
             max_batch_tokens=request.max_batch_tokens,
+            allow_fallback=request.allow_fallback,
         )
 
 

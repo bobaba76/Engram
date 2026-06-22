@@ -1,18 +1,22 @@
 from __future__ import annotations
  
 import json
+import logging
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
 from time import time
 from uuid import uuid4
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import Any
+
+logger = logging.getLogger(__name__)
  
 from app.run_modes import FULL, INCREMENTAL
 from indexing.chunker import build_chunks, diff_chunk_ids, summarize_chunks
 from indexing.embedder import embed_chunks
 from indexing.embedding_providers import EmbeddingRequest, embedding_runtime_info
+from indexing.embeddings import prewarm_jina_model, wait_for_model
 from indexing.graph_builder import build_graph
 from indexing.process_builder import build_process_graph_records
 from indexing.planner import plan_incremental_work
@@ -40,6 +44,15 @@ from storage.manifest_store import ManifestStore
 from storage.vector_store import VectorStore
  
  
+def _parse_file_worker(file_path: Path) -> tuple[str, list[dict[str, object]], dict[str, object]]:
+    """Module-level worker for ProcessPoolExecutor — must be picklable."""
+    from indexing.symbol_extractor import extract_symbols_with_status
+    from dataclasses import asdict
+    symbols, parse_status = extract_symbols_with_status(file_path)
+    symbol_dicts = [asdict(s) for s in symbols]
+    return str(file_path), symbol_dicts, parse_status
+
+
 def _build_repo_profile(files) -> dict[str, object]:
     top_level_dirs = sorted({Path(file_record.path).parts[0] for file_record in files if Path(file_record.path).parts})
     top_level_file_counts: dict[str, int] = {}
@@ -268,20 +281,40 @@ class Coordinator:
         parser_usage: dict[str, int] = defaultdict(int)
         clang_runtime_summary: dict[str, object] = {}
         file_records_to_upsert = []
-        for index, file_path in enumerate(changed_files, start=1):
-            file_record = file_map[file_path]
-            absolute_file_path = self.settings.repo_root / file_record.path
-            symbols, parse_status = extract_symbols_with_status(absolute_file_path)
-            self.symbols_by_file[file_record.path] = symbols
-            parser_name = str(parse_status.get("parser", "unknown"))
-            parser_usage[parser_name] += 1
-            if not clang_runtime_summary and isinstance(parse_status.get("clang"), dict):
-                clang_runtime_summary = dict(parse_status.get("clang") or {})
-            file_records_to_upsert.append(file_record)
-            if self._should_log_index(index, len(changed_files)):
-                self._log_progress(
-                    f"parse progress: {index}/{len(changed_files)} files ({file_record.path}) parser={parser_name} symbols={len(symbols)}"
-                )
+        absolute_paths = [self.settings.repo_root / file_map[fp].path for fp in changed_files]
+        max_workers = min(len(changed_files), 8) if len(changed_files) > 1 else 1
+        if max_workers > 1:
+            self._log_progress(f"parse using ProcessPoolExecutor with {max_workers} workers")
+            with ProcessPoolExecutor(max_workers=max_workers) as pool:
+                results = list(pool.map(_parse_file_worker, absolute_paths, chunksize=max(1, len(changed_files) // (max_workers * 4))))
+            for index, ((abs_path_str, symbol_dicts, parse_status), file_path) in enumerate(zip(results, changed_files), start=1):
+                file_record = file_map[file_path]
+                symbols = [SymbolRecord(**d) for d in symbol_dicts]
+                self.symbols_by_file[file_record.path] = symbols
+                parser_name = str(parse_status.get("parser", "unknown"))
+                parser_usage[parser_name] += 1
+                if not clang_runtime_summary and isinstance(parse_status.get("clang"), dict):
+                    clang_runtime_summary = dict(parse_status.get("clang") or {})
+                file_records_to_upsert.append(file_record)
+                if self._should_log_index(index, len(changed_files)):
+                    self._log_progress(
+                        f"parse progress: {index}/{len(changed_files)} files ({file_record.path}) parser={parser_name} symbols={len(symbols)}"
+                    )
+        else:
+            for index, file_path in enumerate(changed_files, start=1):
+                file_record = file_map[file_path]
+                absolute_file_path = self.settings.repo_root / file_record.path
+                symbols, parse_status = extract_symbols_with_status(absolute_file_path)
+                self.symbols_by_file[file_record.path] = symbols
+                parser_name = str(parse_status.get("parser", "unknown"))
+                parser_usage[parser_name] += 1
+                if not clang_runtime_summary and isinstance(parse_status.get("clang"), dict):
+                    clang_runtime_summary = dict(parse_status.get("clang") or {})
+                file_records_to_upsert.append(file_record)
+                if self._should_log_index(index, len(changed_files)):
+                    self._log_progress(
+                        f"parse progress: {index}/{len(changed_files)} files ({file_record.path}) parser={parser_name} symbols={len(symbols)}"
+                    )
         if file_records_to_upsert:
             persisted = persist_parse_records(self.duckdb, file_records_to_upsert, self.symbols_by_file)
             self._log_progress(f"parse DB write completed: {persisted['files']} files, {persisted['symbols']} symbols")
@@ -415,6 +448,13 @@ class Coordinator:
             max_concurrent_batches=self.settings.embedding_max_concurrent_batches,
         )
         embedding_runtime = embedding_runtime_info(embedding_request)
+        requested_device = str(embedding_runtime.get('requested_device', ''))
+        resolved_device = str(embedding_runtime.get('resolved_device', ''))
+        if requested_device and requested_device != resolved_device and resolved_device == 'cpu':
+            logger.warning(
+                'GPU fallback: requested device %s but resolved to %s — embeddings will be slower',
+                requested_device, resolved_device,
+            )
         self._log_progress(
             f"embedding runtime: backend={embedding_runtime['backend']} requested={embedding_runtime['requested_device']} resolved={embedding_runtime['resolved_device']}"
         )
@@ -422,6 +462,7 @@ class Coordinator:
         reused_embedding_count = 0
         new_embedding_count = 0
         chunk_module_count = 0
+        skipped_unchanged_chunks = 0
         chunk_omitted_content_count = 0
         chunk_duplicate_content_count = 0
         aggregate_chunk_kind_counts: dict[str, int] = defaultdict(int)
@@ -432,8 +473,21 @@ class Coordinator:
             chunk_summary = summarize_chunks(chunks)
             new_chunk_count += len(chunks)
             if not full_rebuild:
-                chunk_diff = diff_chunk_ids(previous_chunks_by_file.get(file_record.path, []), chunks)
+                previous_chunks = previous_chunks_by_file.get(file_record.path, [])
+                chunk_diff = diff_chunk_ids(previous_chunks, chunks)
                 stale_chunk_ids.extend(sorted(chunk_diff["stale"]))
+                previous_content_hashes = {
+                    str(prev.get("chunk_id", "")): str(prev.get("content_hash", ""))
+                    for prev in previous_chunks
+                    if str(prev.get("chunk_id", ""))
+                }
+                changed_chunks = [
+                    chunk for chunk in chunks
+                    if chunk.chunk_id not in previous_content_hashes
+                    or chunk.content_hash != previous_content_hashes.get(chunk.chunk_id, "")
+                ]
+                skipped_unchanged_chunks += len(chunks) - len(changed_chunks)
+                chunks = changed_chunks
             chunk_module_count += int(chunk_summary.get("module_chunk_count", 0))
             chunk_omitted_content_count += int(chunk_summary.get("omitted_content_chunk_count", 0))
             chunk_duplicate_content_count += int(chunk_summary.get("duplicate_content_chunk_count", 0))
@@ -457,6 +511,21 @@ class Coordinator:
             persist_chunk_records(self.duckdb, chunks_to_embed)
         if chunks_to_embed:
             vector_started_at = time()
+            model_name = self.settings.embedding_model
+            if model_name.startswith("jinaai/"):
+                prewarm_jina_model(model_name, device=self.settings.embedding_device)
+                if not wait_for_model(model_name, timeout=60.0):
+                    load_error = ""
+                    try:
+                        from indexing.embeddings import get_model_load_error
+                        load_error = get_model_load_error(model_name)
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                        f"Embedding model {model_name!r} failed to load"
+                        + (f": {load_error}" if load_error else " within 60s timeout")
+                        + ". Vector embeddings cannot be generated without the model."
+                    )
             self._log_progress(f"embedding vectors started for {len(chunks_to_embed)} chunks")
             embed_result = embed_chunks(
                 self.vector_store,
@@ -489,6 +558,7 @@ class Coordinator:
             "chunk_kind_counts": dict(aggregate_chunk_kind_counts),
             "reused_embeddings": reused_embedding_count,
             "new_embeddings": new_embedding_count,
+            "skipped_unchanged_chunks": skipped_unchanged_chunks,
             "embedding_cache_hits": int(embed_result.get("cache_hit_count", 0)),
             "embedding_cache_misses": int(embed_result.get("cache_miss_count", 0)),
             "embedding_duplicate_content_reuse": int(embed_result.get("duplicate_content_reuse_count", 0)),

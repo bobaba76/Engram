@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 
 from models.entity_models import SymbolRecord
+
+logger = logging.getLogger(__name__)
 
 try:
     from tree_sitter import Parser
@@ -62,4 +65,5 @@ def tree_sitter_parser(language_name: str):
             parser.language = language
         return parser
     except Exception:
+        logger.warning("tree_sitter_parser: failed to create parser for language %s", language_name, exc_info=True)
         return None

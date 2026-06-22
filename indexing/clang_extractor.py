@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -8,6 +9,8 @@ import sys
 from typing import Iterable
 
 from indexing.native_build_context import expand_object_like_macros, extract_macro_definitions, load_native_build_context, resolve_include_targets
+
+logger = logging.getLogger(__name__)
 from models.entity_models import SymbolRecord
 
 try:
@@ -192,6 +195,7 @@ def _cursor_symbols(cursor, file_path: Path, build_context: dict[str, object], i
                 if Path(str(cursor_file.name)).resolve() != file_path.resolve():
                     return []
             except Exception:
+                logger.warning("clang_extractor: file path comparison failed for %s", file_path, exc_info=True)
                 return []
     kind_name = _kind_name(cursor)
     if kind_name in _INTERESTING_CURSOR_KINDS:
@@ -276,6 +280,7 @@ def _extract_clang_symbols_in_process(file_path: Path) -> list[SymbolRecord]:
         index = cindex.Index.create()
         translation_unit = index.parse(str(file_path), args=args)
     except Exception:
+        logger.warning("clang_extractor: clang failed to parse %s", file_path, exc_info=True)
         return []
     symbols = _cursor_symbols(translation_unit.cursor, file_path, build_context, imports, macros)
     deduped: list[SymbolRecord] = []
@@ -308,6 +313,7 @@ def extract_clang_symbols(file_path: Path) -> list[SymbolRecord]:
             errors="replace",
             check=False,
             timeout=CLANG_SUBPROCESS_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
         )
     except (subprocess.TimeoutExpired, OSError):
         return []

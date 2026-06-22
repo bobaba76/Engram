@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from config.settings import DEFAULT_SCAN_EXCLUDED_DIRS
+
+logger = logging.getLogger(__name__)
 from indexing.scanner import scan_repo
 from services.route_parsing import BACKEND_HANDLER_PATTERN, JSON_RESPONSE_PATTERN, consumer_keys, csharp_model_shapes, enclosing_function_name, frontend_route_usages, function_call_pattern, iter_backend_route_decorators, iter_backend_route_mappings, iter_csharp_route_handlers, iter_express_route_handlers, iter_nestjs_route_handlers, iter_spring_route_handlers, nested_response_keys, normalize_route, pydantic_model_shapes, response_keys, response_model_name, returned_payload_source, route_matches
 
@@ -16,6 +19,7 @@ def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except Exception:
+        logger.warning("route_map: failed to read file %s", path, exc_info=True)
         return ""
 
 

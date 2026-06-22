@@ -38,6 +38,7 @@ def _run_git(repo_root: Path, args: list[str]) -> str:
             errors="replace",
             check=False,
             timeout=15,
+            stdin=subprocess.DEVNULL,
         )
     except (subprocess.TimeoutExpired, OSError):
         return ""

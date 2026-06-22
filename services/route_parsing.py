@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import re
 
 from indexing.parsers.common import node_text, tree_sitter_parser
+
+logger = logging.getLogger(__name__)
 
 
 BACKEND_ROUTE_DECORATOR_PATTERN = re.compile(
@@ -467,6 +470,7 @@ def frontend_route_usages(source: str, language: str = "tsx") -> list[dict[str, 
                 if usage is not None:
                     usages.append(usage)
         except Exception:
+            logger.warning("route_parsing: failed to parse route from AST node", exc_info=True)
             usages = []
     if usages:
         return usages

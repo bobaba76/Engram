@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shlex
 from functools import lru_cache
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 _MPLAB_PROJECT_EXTENSIONS = (".mcp", ".mcw", ".mptags", ".scl", ".plt")
@@ -49,6 +52,7 @@ def _compile_commands_map(root: str) -> dict[str, dict[str, object]]:
     try:
         payload = json.loads(compile_commands.read_text(encoding="utf-8", errors="ignore"))
     except Exception:
+        logger.warning("native_build_context: failed to parse compile_commands.json", exc_info=True)
         return {}
     mapped: dict[str, dict[str, object]] = {}
     for item in payload if isinstance(payload, list) else []:

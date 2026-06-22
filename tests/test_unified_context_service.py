@@ -47,6 +47,6 @@ def test_unified_context_exposes_categorized_graph_references(monkeypatch) -> No
     payload = get_unified_context(_Duck(), _Kuzu(), "loadProduct")
 
     assert payload["relation_counts"]["CALLS"] == {"incoming": 1, "outgoing": 1}
-    assert payload["relation_counts"]["IMPORTS"] == {"incoming": 1, "outgoing": 0}
+    assert "IMPORTS" not in payload["relation_counts"]
     assert payload["categorized_references"]["CALLS"]["incoming_count"] == 1
     assert payload["compact_summary"]["relation_counts"]["CALLS"] == {"incoming": 1, "outgoing": 1}

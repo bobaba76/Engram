@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import threading
 from functools import lru_cache
 from typing import Iterable
+
+logger = logging.getLogger(__name__)
 
 EMBEDDER_VERSION = "2"
 CHARS_PER_TOKEN_ESTIMATE = 4
@@ -12,6 +15,14 @@ torch = None
 torch_functional = None
 AutoModel = None
 AutoTokenizer = None
+
+
+class EmbeddingNotReadyError(RuntimeError):
+    """Raised when the embedding model is not loaded and silent fallback is disabled."""
+
+
+class EmbeddingLoadError(RuntimeError):
+    """Raised when the embedding model fails to load."""
 
 
 @lru_cache(maxsize=1)
@@ -129,7 +140,7 @@ def estimate_tokens(text: str, tokenizer=None) -> int:
         try:
             return max(1, len(tokenizer.encode(text or "", add_special_tokens=True, truncation=False)))
         except Exception:
-            pass
+            logger.warning("estimate_tokens: tokenizer.encode failed, falling back to char-based estimate", exc_info=True)
     return max(1, len(text or "") // CHARS_PER_TOKEN_ESTIMATE)
 
 
@@ -153,18 +164,39 @@ def _token_aware_batches(texts: list[str], batch_size: int, max_batch_tokens: in
 
 
 @lru_cache(maxsize=2)
-def _load_jina_model(model_name: str):
+def _load_jina_model(model_name: str, use_half_precision: bool = True):
     if not _load_embedding_dependencies():
         return None, None
     if AutoTokenizer is None or AutoModel is None or torch is None:
         return None, None
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        model = AutoModel.from_pretrained(model_name, trust_remote_code=True, attn_implementation="eager")
+        dtype = torch.float16 if use_half_precision and _supports_half_precision() else torch.float32
+        model = AutoModel.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            attn_implementation="eager",
+            torch_dtype=dtype,
+        )
         model.eval()
+        logger.info("_load_jina_model: loaded %s with dtype=%s", model_name, dtype)
         return tokenizer, model
     except Exception:
+        logger.warning("_load_jina_model: failed to load model %s", model_name, exc_info=True)
         return None, None
+
+
+def _supports_half_precision() -> bool:
+    """Check if the current device supports float16."""
+    if torch is None:
+        return False
+    try:
+        return torch.cuda.is_available() or (
+            getattr(torch.backends, "mps", None) is not None
+            and torch.backends.mps.is_available()
+        )
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -193,16 +225,14 @@ def prewarm_jina_model(model_name: str, device: str = "cpu") -> None:
 
     def _load() -> None:
         try:
-            _load_jina_model(model_name)
-            # Also move the model to the resolved device so the first real
-            # inference call doesn't pay that cost either.
-            if torch is not None:
+            tokenizer, model = _load_jina_model(model_name)
+            if model is not None and torch is not None:
                 resolved = _resolve_device(device)
-                tokenizer, model = _load_jina_model(model_name)
-                if model is not None:
-                    model.to(resolved)
+                model.to(resolved)
             with _prewarm_lock:
-                _prewarm_ready[model_name] = True
+                _prewarm_ready[model_name] = model is not None
+                if model is None:
+                    _prewarm_error[model_name] = "model loaded as None — check dependencies"
         except Exception as exc:  # noqa: BLE001
             with _prewarm_lock:
                 _prewarm_error[model_name] = str(exc)
@@ -210,6 +240,25 @@ def prewarm_jina_model(model_name: str, device: str = "cpu") -> None:
 
     thread = threading.Thread(target=_load, daemon=True, name=f"coder-prewarm-{model_name}")
     thread.start()
+
+
+def wait_for_model(model_name: str, timeout: float = 30.0) -> bool:
+    """Block until the model is ready or *timeout* seconds elapse.
+
+    Returns True if the model is ready, False if it timed out or failed.
+    Call ``get_model_load_error(model_name)`` to check for a load failure.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with _prewarm_lock:
+            if _prewarm_ready.get(model_name):
+                return True
+            if model_name in _prewarm_error:
+                return False
+        time.sleep(0.1)
+    return is_model_ready(model_name)
 
 
 def is_model_ready(model_name: str) -> bool:
@@ -231,7 +280,14 @@ def embed_texts(
     max_length: int = 512,
     device: str = "cpu",
     max_batch_tokens: int = 12000,
+    allow_fallback: bool = False,
 ) -> list[list[float]]:
+    """Embed texts using the Jina model.
+
+    By default, raises ``EmbeddingNotReadyError`` if the model is not loaded
+    instead of silently returning hash-based fallback embeddings.
+    Set ``allow_fallback=True`` to get the old behavior (useful for offline tests).
+    """
     text_list = list(texts)
     if model_name.startswith("jinaai/"):
         tokenizer, model = _load_jina_model(model_name)
@@ -252,4 +308,16 @@ def embed_texts(
                     del model_output
                     del embeddings
             return embeddings_batches
+        if not allow_fallback:
+            raise EmbeddingNotReadyError(
+                f"Embedding model {model_name!r} is not loaded. "
+                f"Call prewarm_jina_model() and wait_for_model() before embedding. "
+                f"Set allow_fallback=True to use deterministic hash embeddings."
+            )
+    if not allow_fallback:
+        raise EmbeddingNotReadyError(
+            f"No embedding backend available for model {model_name!r}. "
+            f"Set allow_fallback=True to use deterministic hash embeddings."
+        )
+    logger.warning("embed_texts: using deterministic fallback embeddings for %d texts (model=%s)", len(text_list), model_name)
     return [_fallback_embedding(text) for text in text_list]

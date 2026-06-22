@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 import re
 from typing import TYPE_CHECKING
 
 from services.app_context_service import app_context
 from services.symbol_resolution_service import resolve_candidates
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from storage.duckdb_store import DuckDBStore
@@ -91,7 +94,15 @@ def _feature_query_terms(feature: str, limit: int = 5) -> list[str]:
 def _symbol_feature_files(duckdb_store: DuckDBStore, feature: str, limit: int) -> list[str]:
     files = []
     seen: set[str] = set()
-    for term in _feature_query_terms(feature, limit=4):
+    terms = _feature_query_terms(feature, limit=4)
+    # Also search with individual tokens — phrases like "embedding model loading"
+    # rarely match symbol names, but individual tokens like "embedding" or "prewarm" do.
+    tokens = [
+        token
+        for token in re.split(r"[^a-zA-Z0-9]+", feature.lower())
+        if token and token not in FEATURE_STOPWORDS and len(token) >= 3
+    ]
+    for term in [*terms, *tokens]:
         for item in resolve_candidates(duckdb_store, target=term, limit=max(limit * 2, 12)):
             symbol = item.get("symbol", {}) if isinstance(item, dict) else {}
             file_path = str(symbol.get("file_path", "") or "")
@@ -108,18 +119,25 @@ def _chunk_feature_files(duckdb_store: DuckDBStore, feature: str, limit: int) ->
     scores: dict[str, int] = {}
     fetch_for_target = getattr(duckdb_store.chunks, "fetch_for_target", None)
     search_chunks_content = getattr(duckdb_store, "search_chunks_content", None)
-    for index, term in enumerate(_feature_query_terms(feature, limit=5)):
+    terms = _feature_query_terms(feature, limit=5)
+    # Also search with individual tokens for better chunk content matching
+    tokens = [
+        token
+        for token in re.split(r"[^a-zA-Z0-9]+", feature.lower())
+        if token and token not in FEATURE_STOPWORDS and len(token) >= 3
+    ]
+    for index, term in enumerate([*terms, *tokens]):
         rows = []
         if callable(fetch_for_target):
             try:
                 rows.extend(fetch_for_target(term, limit=max(limit * 2, 12)))
             except Exception:
-                pass
+                logger.warning("feature_context: fetch_for_target failed for term %r", term, exc_info=True)
         if callable(search_chunks_content):
             try:
                 rows.extend(search_chunks_content(term, limit=max(limit * 2, 12)))
             except Exception:
-                pass
+                logger.warning("feature_context: search_chunks_content failed for term %r", term, exc_info=True)
         for row in rows:
             file_path = str(row.get("file_path", "") or "")
             if not file_path:

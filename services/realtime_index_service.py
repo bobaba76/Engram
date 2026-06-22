@@ -1,4 +1,4 @@
-from __future__ import annotations
+nfrom __future__ import annotations
 
 import subprocess
 import sys
@@ -161,6 +161,7 @@ class PollingRealtimeIndexer:
                 encoding="utf-8",
                 errors="replace",
                 check=False,
+                stdin=subprocess.DEVNULL,
             )
             self.stats.reindex_count += 1
             self.stats.last_reindex_return_code = completed.returncode

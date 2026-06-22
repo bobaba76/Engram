@@ -45,7 +45,7 @@ def test_get_callers_and_callees_returns_categorized_references() -> None:
     assert payload["callees"] == [
         {"source": "services.products.loadProduct", "relation": "CALLS", "target": "repositories.products.fetchProduct"}
     ]
-    assert payload["relation_counts"]["IMPORTS"] == {"incoming": 1, "outgoing": 0}
+    assert "IMPORTS" not in payload["relation_counts"]
     assert payload["relation_counts"]["REFERENCES"] == {"incoming": 1, "outgoing": 0}
     assert payload["relation_counts"]["ASSOCIATED_WITH"] == {"incoming": 0, "outgoing": 1}
     assert payload["related_symbols_by_relation"]["CALLS"] == ["repositories.products.fetchProduct", "ui.ProductView"]
