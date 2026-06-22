@@ -46,6 +46,32 @@ from services.test_intelligence_service import find_tests_for_target, suggest_te
 from services.unified_context_service import get_unified_context
 
 
+def _resolve_graph_target(session: MCPSession, target: str, repo: str = "") -> str:
+    """Resolve a short target name to a qualified_name for graph queries.
+
+    Graph nodes are stored by qualified_name (e.g. "products.ProductsTableShell.ProductsTableShell"),
+    but users often pass a short name (e.g. "ProductsTableShell").  This helper uses DuckDB symbol
+    resolution to find the qualified_name.  If the target is already a UID or cannot be resolved,
+    it is returned unchanged so existing behaviour is preserved.
+    """
+    from services.symbol_resolution_service import resolve_candidates, symbol_uid_from_target
+
+    resolved_uid = symbol_uid_from_target(target)
+    lookup = str(target or "").strip()
+    if resolved_uid and resolved_uid == lookup:
+        lookup = ""
+    if not lookup and not resolved_uid:
+        return str(target or "").strip()
+    context = session.get_repo_context(repo)
+    candidates = resolve_candidates(context["duckdb_store"], target=lookup, symbol_uid_value=resolved_uid, limit=1)
+    if candidates:
+        symbol = candidates[0].get("symbol", {}) if isinstance(candidates[0], dict) else {}
+        qn = str(symbol.get("qualified_name", "") or "").strip()
+        if qn:
+            return qn
+    return str(target or "").strip()
+
+
 def index_status(session: MCPSession, repo: str = "") -> dict[str, object]:
     context = session.get_repo_context(repo)
     return get_index_status(context["manifest"])
@@ -572,7 +598,8 @@ def index_health_tool(session: MCPSession, repo: str = "") -> dict[str, object]:
 
 
 def get_dependencies_tool(session: MCPSession, target: str, repo: str = "") -> dict[str, object]:
-    return get_dependencies(session.get_kuzu_store(repo), target=target)
+    resolved = _resolve_graph_target(session, target, repo)
+    return get_dependencies(session.get_kuzu_store(repo), target=resolved)
 
 
 def get_review_history_tool(session: MCPSession, target: str, repo: str = "") -> dict[str, object]:
@@ -591,7 +618,8 @@ def find_symbols_tool(session: MCPSession, query: str, limit: int = 10, file_pat
 
 
 def get_callers_and_callees_tool(session: MCPSession, target: str, repo: str = "") -> dict[str, object]:
-    return get_callers_and_callees(session.get_kuzu_store(repo), target=target)
+    resolved = _resolve_graph_target(session, target, repo)
+    return get_callers_and_callees(session.get_kuzu_store(repo), target=resolved)
 
 
 def get_graph_neighborhood_tool(
@@ -604,9 +632,10 @@ def get_graph_neighborhood_tool(
     suppress_common_hubs: bool = False,
     repo: str = "",
 ) -> dict[str, object]:
+    resolved = _resolve_graph_target(session, target, repo)
     return get_graph_neighborhood_with_options(
         session.get_kuzu_store(repo),
-        target=target,
+        target=resolved,
         depth=depth,
         relation=relation or None,
         max_edges=max_edges or None,

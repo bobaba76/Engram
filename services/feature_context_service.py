@@ -102,15 +102,49 @@ def _symbol_feature_files(duckdb_store: DuckDBStore, feature: str, limit: int) -
         for token in re.split(r"[^a-zA-Z0-9]+", feature.lower())
         if token and token not in FEATURE_STOPWORDS and len(token) >= 3
     ]
-    for term in [*terms, *tokens]:
-        for item in resolve_candidates(duckdb_store, target=term, limit=max(limit * 2, 12)):
+    # Interleave individual tokens with phrase terms so each token gets at least
+    # one search round before the file limit is reached.  Without this, a
+    # high-frequency token like "products" can fill the limit before a
+    # highly-relevant but lower-frequency token like "column" is ever searched.
+    interleaved: list[str] = []
+    max_len = max(len(tokens), len(terms))
+    for i in range(max_len):
+        if i < len(tokens):
+            interleaved.append(tokens[i])
+        if i < len(terms):
+            interleaved.append(terms[i])
+    # Round-robin: give each search term a chance to contribute files per round
+    # so high-frequency tokens like "products" don't starve relevant but
+    # lower-frequency tokens like "column" (which matches ProductColumns.tsx).
+    file_cap = max(limit * 2, 12)
+    per_term_results: list[list[str]] = []
+    for term in interleaved:
+        term_files: list[str] = []
+        for item in resolve_candidates(duckdb_store, target=term, limit=limit):
             symbol = item.get("symbol", {}) if isinstance(item, dict) else {}
             file_path = str(symbol.get("file_path", "") or "")
             if file_path and file_path not in seen:
                 seen.add(file_path)
-                files.append(file_path)
-            if len(files) >= max(limit * 2, 12):
-                return files
+                term_files.append(file_path)
+        per_term_results.append(term_files)
+    # Round-robin merge: take 2 files from each term per round
+    round_idx = 0
+    while len(files) < file_cap:
+        added_this_round = False
+        for term_files in per_term_results:
+            start = round_idx * 2
+            end = start + 2
+            for file_path in term_files[start:end]:
+                if file_path not in files:
+                    files.append(file_path)
+                    added_this_round = True
+                    if len(files) >= file_cap:
+                        break
+            if len(files) >= file_cap:
+                break
+        if not added_this_round:
+            break
+        round_idx += 1
     return files
 
 
