@@ -165,12 +165,13 @@ def main() -> int:
     except Exception:
         logger.debug("Startup prewarm failed", exc_info=True)
 
-    # Auto-start realtime indexing for the default repo
-    try:
-        session.start_realtime_indexing(poll_interval=3.0, debounce=5.0)
-        logger.info("Realtime indexing auto-started for %s", session.default_repo_root)
-    except Exception:
-        logger.debug("Realtime indexing auto-start failed", exc_info=True)
+    # Auto-start realtime indexing if CODER_AUTO_REINDEX=1
+    if os.environ.get("CODER_AUTO_REINDEX", "").strip() in ("1", "true", "yes"):
+        try:
+            session.start_realtime_indexing(poll_interval=3.0, debounce=5.0)
+            logger.info("Realtime indexing auto-started for %s", session.default_repo_root)
+        except Exception:
+            logger.debug("Realtime indexing auto-start failed", exc_info=True)
 
     for tool_name, handler, description in TOOL_DEFINITIONS:
         server.register_tool(tool_name, _make_repo_safe_handler(session, handler), description=description)
