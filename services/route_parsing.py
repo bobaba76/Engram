@@ -470,7 +470,7 @@ def frontend_route_usages(source: str, language: str = "tsx") -> list[dict[str, 
                 if usage is not None:
                     usages.append(usage)
         except Exception:
-            logger.warning("route_parsing: failed to parse route from AST node", exc_info=True)
+            logger.debug("route_parsing: failed to parse route from AST node")
             usages = []
     if usages:
         return usages

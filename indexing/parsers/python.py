@@ -46,6 +46,103 @@ def _python_symbol_kind(node: ast.AST, parents: list[str]) -> str:
     return "function"
 
 
+def _format_annotation(node: ast.AST | None) -> str:
+    """Format a type annotation node as a string."""
+    if node is None:
+        return ""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _format_annotation(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    if isinstance(node, ast.Subscript):
+        base = _format_annotation(node.value)
+        slc = _format_annotation(node.slice)
+        return f"{base}[{slc}]" if base else f"[{slc}]"
+    if isinstance(node, ast.Tuple):
+        parts = [_format_annotation(elt) for elt in node.elts]
+        return ", ".join(p for p in parts if p)
+    if isinstance(node, ast.Constant):
+        return repr(node.value) if node.value is not None else "None"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left = _format_annotation(node.left)
+        right = _format_annotation(node.right)
+        return f"{left} | {right}" if left and right else left or right
+    if isinstance(node, ast.List):
+        parts = [_format_annotation(elt) for elt in node.elts]
+        return f"[{', '.join(parts)}]"
+    if isinstance(node, ast.Dict):
+        keys = [_format_annotation(k) for k in node.keys]
+        vals = [_format_annotation(v) for v in node.values]
+        return f"{{{', '.join(f'{k}: {v}' for k, v in zip(keys, vals) if k and v)}}}"
+    return ""
+
+
+def _extract_type_hints(node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, object]:
+    """Extract type hints from a function definition.
+
+    Returns a dict with:
+    - params: list of {name, type, default} for each parameter
+    - return_type: the return annotation
+    - signature_with_types: a formatted signature string
+    """
+    params: list[dict[str, str]] = []
+    args = node.args
+
+    def _process_arg(arg: ast.arg, default: ast.AST | None = None) -> dict[str, str]:
+        return {
+            "name": arg.arg,
+            "type": _format_annotation(arg.annotation),
+            "default": _format_annotation(default) if default else "",
+        }
+
+    defaults = list(args.defaults)
+    pos_defaults_offset = len(args.args) - len(defaults)
+
+    for i, arg in enumerate(args.args):
+        default = defaults[i - pos_defaults_offset] if i >= pos_defaults_offset else None
+        params.append(_process_arg(arg, default))
+
+    if args.vararg:
+        params.append({
+            "name": f"*{args.vararg.arg}",
+            "type": _format_annotation(args.vararg.annotation),
+            "default": "",
+        })
+
+    for i, arg in enumerate(args.kwonlyargs):
+        default = args.kw_defaults[i] if i < len(args.kw_defaults) else None
+        params.append(_process_arg(arg, default))
+
+    if args.kwarg:
+        params.append({
+            "name": f"**{args.kwarg.arg}",
+            "type": _format_annotation(args.kwarg.annotation),
+            "default": "",
+        })
+
+    return_type = _format_annotation(node.returns) if node.returns else ""
+
+    param_strs = []
+    for p in params:
+        s = p["name"]
+        if p["type"]:
+            s += f": {p['type']}"
+        if p["default"]:
+            s += f" = {p['default']}"
+        param_strs.append(s)
+
+    signature_with_types = f"({', '.join(param_strs)})"
+    if return_type:
+        signature_with_types += f" -> {return_type}"
+
+    return {
+        "params": params,
+        "return_type": return_type,
+        "signature_with_types": signature_with_types,
+    }
+
+
 def extract_symbols(file_path: Path) -> list[SymbolRecord]:
     source = file_path.read_text(encoding="utf-8-sig")
     tree = ast.parse(source)
@@ -91,6 +188,8 @@ def extract_symbols(file_path: Path) -> list[SymbolRecord]:
                 }
             )
             extends = _python_base_names(node) if isinstance(node, ast.ClassDef) else []
+            type_hints = _extract_type_hints(node) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else {}
+            typed_sig = str(type_hints.get("signature_with_types", "")) if type_hints else ""
             symbols.append(
                 SymbolRecord(
                     name=node.name,
@@ -98,7 +197,7 @@ def extract_symbols(file_path: Path) -> list[SymbolRecord]:
                     kind=_python_symbol_kind(node, parents),
                     start_line=node.lineno,
                     end_line=end_line,
-                    signature=qualified_name,
+                    signature=typed_sig or qualified_name,
                     metadata={
                         "parser": "ast",
                         "imports": sorted(file_imports),
@@ -109,6 +208,7 @@ def extract_symbols(file_path: Path) -> list[SymbolRecord]:
                         "implements": [],
                         "parent_chain": parents,
                         "import_aliases": import_aliases,
+                        "type_hints": type_hints,
                     },
                 )
             )

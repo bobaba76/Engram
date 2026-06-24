@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stellar Forge — Procedural Galaxy</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #000; font-family: 'Segoe UI', system-ui, sans-serif; color: #fff; }
+  canvas { display: block; }
+
+  #ui {
+    position: fixed; top: 0; left: 0; width: 100%; pointer-events: none; z-index: 10;
+    padding: 24px 32px; display: flex; justify-content: space-between; align-items: flex-start;
+  }
+  #title { pointer-events: none; }
+  #title h1 {
+    font-size: 28px; font-weight: 300; letter-spacing: 6px; text-transform: uppercase;
+    background: linear-gradient(90deg, #6bf, #a4f, #f4a, #6bf);
+    background-size: 300% 100%; -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; animation: shimmer 6s linear infinite;
+  }
+  #title p { font-size: 12px; opacity: 0.4; letter-spacing: 3px; margin-top: 4px; }
+  @keyframes shimmer { 0% { background-position: 0% 50%; } 100% { background-position: 300% 50%; } }
+
+  #controls {
+    pointer-events: auto; background: rgba(10,12,20,0.55); backdrop-filter: blur(16px);
+    border: 1px solid rgba(100,120,200,0.15); border-radius: 14px; padding: 20px;
+    width: 280px; display: flex; flex-direction: column; gap: 16px;
+  }
+  #controls h2 { font-size: 11px; letter-spacing: 3px; opacity: 0.5; text-transform: uppercase; }
+  .ctrl-row { display: flex; flex-direction: column; gap: 6px; }
+  .ctrl-row label { font-size: 11px; opacity: 0.6; display: flex; justify-content: space-between; }
+  .ctrl-row label span { opacity: 0.9; font-weight: 600; }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 4px;
+    background: rgba(255,255,255,0.1); border-radius: 2px; outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 14px; height: 14px;
+    border-radius: 50%; background: #8af; cursor: pointer;
+    box-shadow: 0 0 10px rgba(100,180,255,0.6); transition: transform 0.15s;
+  }
+  input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.3); }
+  input[type=range]::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%; background: #8af; cursor: pointer; border: none;
+    box-shadow: 0 0 10px rgba(100,180,255,0.6);
+  }
+  .btn {
+    pointer-events: auto; padding: 10px 16px; border: 1px solid rgba(100,180,255,0.3);
+    background: rgba(100,180,255,0.08); color: #cdf; border-radius: 8px; cursor: pointer;
+    font-size: 12px; letter-spacing: 1px; transition: all 0.2s;
+  }
+  .btn:hover { background: rgba(100,180,255,0.2); border-color: rgba(100,180,255,0.6); }
+
+  #hint {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    font-size: 11px; opacity: 0.3; letter-spacing: 2px; pointer-events: none; z-index: 10;
+  }
+  #loader {
+    position: fixed; inset: 0; background: #000; z-index: 100; display: flex;
+    align-items: center; justify-content: center; flex-direction: column; gap: 16px;
+    transition: opacity 1.5s; font-size: 12px; letter-spacing: 4px; opacity: 0.5;
+  }
+  #loader.hide { opacity: 0; pointer-events: none; }
+  .spinner {
+    width: 40px; height: 40px; border: 2px solid rgba(100,180,255,0.1);
+    border-top-color: #8af; border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div id="loader"><div class="spinner"></div><div>FORGING STARS…</div></div>
+
+<div id="ui">
+  <div id="title">
+    <h1>Stellar Forge</h1>
+    <p>Procedural Galaxy · WebGL2 · Custom GLSL</p>
+  </div>
+  <div id="controls">
+    <h2>Galaxy Parameters</h2>
+    <div class="ctrl-row">
+      <label>Stars <span id="v-count">20k</span></label>
+      <input type="range" id="r-count" min="5000" max="60000" step="5000" value="20000">
+    </div>
+    <div class="ctrl-row">
+      <label>Galaxy Radius <span id="v-radius">5.0</span></label>
+      <input type="range" id="r-radius" min="1" max="15" step="0.5" value="5">
+    </div>
+    <div class="ctrl-row">
+      <label>Spin <span id="v-spin">1.2</span></label>
+      <input type="range" id="r-spin" min="-3" max="3" step="0.1" value="1.2">
+    </div>
+    <div class="ctrl-row">
+      <label>Branches <span id="v-branches">4</span></label>
+      <input type="range" id="r-branches" min="2" max="12" step="1" value="4">
+    </div>
+    <div class="ctrl-row">
+      <label>Randomness <span id="v-rand">0.5</span></label>
+      <input type="range" id="r-rand" min="0" max="2" step="0.05" value="0.5">
+    </div>
+    <div class="ctrl-row">
+      <label>Bloom <span id="v-bloom">0.4</span></label>
+      <input type="range" id="r-bloom" min="0" max="1.5" step="0.1" value="0.4">
+    </div>
+    <div class="ctrl-row">
+      <label>Auto-Rotate <span id="v-auto">ON</span></label>
+      <input type="range" id="r-auto" min="0" max="1" step="1" value="1">
+    </div>
+    <button class="btn" id="btn-regen">Regenerate Galaxy</button>
+  </div>
+</div>
+
+<div id="hint">DRAG TO ORBIT · SCROLL TO ZOOM · RIGHT-DRAG TO PAN</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+// ─── Scene Setup ───────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x050510, 0.015);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 6, 12);
+
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.04;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.3;
+controls.minDistance = 2;
+controls.maxDistance = 60;
+
+// ─── Galaxy Parameters ─────────────────────────────────────────
+const params = {
+  count: 20000, radius: 5, spin: 1.2, branches: 4, randomness: 0.5,
+  randomnessPower: 3, bloomStrength: 0.4, autoRotate: true,
+  insideColor: '#ff6030', outsideColor: '#1b3984',
+};
+
+// ─── Custom Galaxy Shader ──────────────────────────────────────
+const galaxyVertexShader = `
+  uniform float uTime;
+  uniform float uSize;
+  uniform float uRadius;
+  uniform float uSpin;
+
+  attribute float aScale;
+  attribute vec3 aColor;
+  attribute float aRandomness;
+
+  varying vec3 vColor;
+  varying float vDist;
+
+  void main() {
+    vec3 pos = position;
+
+    // Spiral rotation based on distance from center
+    float dist = length(pos.xz);
+    float angle = atan(pos.x, pos.z);
+    float spiralAngle = angle + dist * uSpin * 0.15 + uTime * 0.05;
+    pos.x = cos(spiralAngle) * dist;
+    pos.z = sin(spiralAngle) * dist;
+
+    // Subtle vertical wobble
+    pos.y += sin(dist * 2.0 + uTime) * 0.02 * aScale;
+
+    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+
+    gl_PointSize = uSize * aScale * (150.0 / -mvPosition.z);
+    gl_PointSize = max(gl_PointSize, 0.5);
+
+    vColor = aColor;
+    vDist = dist / uRadius;
+  }
+`;
+
+const galaxyFragmentShader = `
+  varying vec3 vColor;
+  varying float vDist;
+
+  void main() {
+    vec2 uv = gl_PointCoord - 0.5;
+    float d = length(uv);
+    if (d > 0.5) discard;
+
+    float strength = 1.0 - d * 2.0;
+    strength = pow(strength, 3.0);
+
+    vec3 color = vColor * strength;
+
+    gl_FragColor = vec4(color, strength);
+  }
+`;
+
+// ─── Galaxy Generation ─────────────────────────────────────────
+let galaxyGeometry, galaxyMaterial, galaxyPoints;
+
+function generateGalaxy() {
+  if (galaxyPoints) {
+    scene.remove(galaxyPoints);
+    galaxyGeometry.dispose();
+    galaxyMaterial.dispose();
+  }
+
+  galaxyGeometry = new THREE.BufferGeometry();
+  const count = params.count;
+  const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  const scales = new Float32Array(count);
+  const randomness = new Float32Array(count);
+
+  const insideColor = new THREE.Color(params.insideColor);
+  const outsideColor = new THREE.Color(params.outsideColor);
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+
+    // Distribute stars in spiral branches
+    const radius = Math.pow(Math.random(), 1.5) * params.radius;
+    const branchAngle = ((i % params.branches) / params.branches) * Math.PI * 2;
+    const spinAngle = radius * params.spin;
+
+    const randomX = Math.pow(Math.random(), params.randomnessPower) * (Math.random() < 0.5 ? 1 : -1) * params.randomness * radius;
+    const randomY = Math.pow(Math.random(), params.randomnessPower) * (Math.random() < 0.5 ? 1 : -1) * params.randomness * radius * 0.3;
+    const randomZ = Math.pow(Math.random(), params.randomnessPower) * (Math.random() < 0.5 ? 1 : -1) * params.randomness * radius;
+
+    positions[i3]     = Math.cos(branchAngle + spinAngle) * radius + randomX;
+    positions[i3 + 1] = randomY;
+    positions[i3 + 2] = Math.sin(branchAngle + spinAngle) * radius + randomZ;
+
+    // Color gradient from inside to outside
+    const mixedColor = insideColor.clone();
+    mixedColor.lerp(outsideColor, radius / params.radius);
+
+    // Add some random color variation
+    const colorJitter = 0.15;
+    colors[i3]     = Math.min(1, mixedColor.r + (Math.random() - 0.5) * colorJitter);
+    colors[i3 + 1] = Math.min(1, mixedColor.g + (Math.random() - 0.5) * colorJitter);
+    colors[i3 + 2] = Math.min(1, mixedColor.b + (Math.random() - 0.5) * colorJitter);
+
+    // Varied star sizes
+    scales[i] = Math.random() * 1.5 + 0.3;
+    randomness[i] = Math.random();
+  }
+
+  galaxyGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  galaxyGeometry.setAttribute('aColor', new THREE.BufferAttribute(colors, 3));
+  galaxyGeometry.setAttribute('aScale', new THREE.BufferAttribute(scales, 1));
+  galaxyGeometry.setAttribute('aRandomness', new THREE.BufferAttribute(randomness, 1));
+
+  galaxyMaterial = new THREE.ShaderMaterial({
+    vertexShader: galaxyVertexShader,
+    fragmentShader: galaxyFragmentShader,
+    uniforms: {
+      uTime: { value: 0 },
+      uSize: { value: 4.0 },
+      uRadius: { value: params.radius },
+      uSpin: { value: params.spin },
+    },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexColors: false,
+  });
+
+  galaxyPoints = new THREE.Points(galaxyGeometry, galaxyMaterial);
+  scene.add(galaxyPoints);
+}
+
+// ─── Background Star Field ─────────────────────────────────────
+function createBackgroundStars() {
+  const geo = new THREE.BufferGeometry();
+  const count = 2000;
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const siz = new Float32Array(count);
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+    // Spherical distribution far away
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(Math.random() * 2 - 1);
+    const r = 40 + Math.random() * 60;
+
+    pos[i3]     = r * Math.sin(phi) * Math.cos(theta);
+    pos[i3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+    pos[i3 + 2] = r * Math.cos(phi);
+
+    const c = new THREE.Color();
+    const hue = 0.55 + Math.random() * 0.15;
+    c.setHSL(hue, 0.5, 0.5 + Math.random() * 0.5);
+    col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
+    siz[i] = Math.random() * 2 + 0.5;
+  }
+
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.setAttribute('size', new THREE.BufferAttribute(siz, 1));
+
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: `
+      attribute float size;
+      varying vec3 vColor;
+      uniform float uTime;
+      void main() {
+        vColor = color;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mv;
+        float twinkle = sin(uTime * 2.0 + position.x * 10.0) * 0.3 + 0.7;
+        gl_PointSize = size * twinkle * (100.0 / -mv.z);
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      void main() {
+        vec2 uv = gl_PointCoord - 0.5;
+        float d = length(uv);
+        if (d > 0.5) discard;
+        float a = pow(1.0 - d * 2.0, 2.0);
+        gl_FragColor = vec4(vColor, a);
+      }
+    `,
+    uniforms: { uTime: { value: 0 } },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexColors: true,
+  });
+
+  const stars = new THREE.Points(geo, mat);
+  scene.add(stars);
+  return mat;
+}
+
+// ─── Nebula Cloud (Volumetric-ish) ─────────────────────────────
+function createNebula() {
+  const geo = new THREE.BufferGeometry();
+  const count = 2000;
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const siz = new Float32Array(count);
+
+  const c1 = new THREE.Color('#ff3060');
+  const c2 = new THREE.Color('#3060ff');
+  const c3 = new THREE.Color('#a040ff');
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+    const r = Math.pow(Math.random(), 0.5) * params.radius * 1.5;
+    const theta = Math.random() * Math.PI * 2;
+    const y = (Math.random() - 0.5) * 0.8;
+
+    pos[i3]     = Math.cos(theta) * r;
+    pos[i3 + 1] = y;
+    pos[i3 + 2] = Math.sin(theta) * r;
+
+    const t = r / (params.radius * 1.5);
+    const c = c1.clone().lerp(c2, t).lerp(c3, Math.random() * 0.3);
+    col[i3] = c.r * 0.3; col[i3 + 1] = c.g * 0.3; col[i3 + 2] = c.b * 0.3;
+    siz[i] = Math.random() * 8 + 3;
+  }
+
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.setAttribute('size', new THREE.BufferAttribute(siz, 1));
+
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: `
+      attribute float size;
+      varying vec3 vColor;
+      uniform float uTime;
+      void main() {
+        vColor = color;
+        vec3 p = position;
+        p.x += sin(uTime * 0.3 + p.z * 0.5) * 0.1;
+        p.z += cos(uTime * 0.2 + p.x * 0.5) * 0.1;
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        gl_Position = projectionMatrix * mv;
+        gl_PointSize = size * (50.0 / -mv.z);
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      void main() {
+        vec2 uv = gl_PointCoord - 0.5;
+        float d = length(uv);
+        if (d > 0.5) discard;
+        float a = pow(1.0 - d * 2.0, 4.0) * 0.04;
+        gl_FragColor = vec4(vColor, a);
+      }
+    `,
+    uniforms: { uTime: { value: 0 } },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexColors: true,
+  });
+
+  const nebula = new THREE.Points(geo, mat);
+  scene.add(nebula);
+  return mat;
+}
+
+// ─── Central Black Hole / Core Glow ────────────────────────────
+function createCoreGlow() {
+  const geo = new THREE.SphereGeometry(0.15, 32, 32);
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: `
+      varying vec3 vNormal;
+      varying vec3 vPos;
+      void main() {
+        vNormal = normalize(normalMatrix * normal);
+        vPos = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      varying vec3 vNormal;
+      varying vec3 vPos;
+      void main() {
+        float fresnel = pow(1.0 - dot(vNormal, vec3(0,0,1)), 2.0);
+        vec3 color = mix(vec3(1.0, 0.8, 0.4), vec3(1.0, 0.3, 0.1), fresnel);
+        color *= 0.8 + sin(uTime * 3.0) * 0.1;
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `,
+    uniforms: { uTime: { value: 0 } },
+  });
+  const core = new THREE.Mesh(geo, mat);
+  scene.add(core);
+  return mat;
+}
+
+// ─── Post-Processing ───────────────────────────────────────────
+const composer = new EffectComposer(renderer);
+composer.setPixelRatio(1);
+composer.addPass(new RenderPass(scene, camera));
+
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(innerWidth, innerHeight),
+  params.bloomStrength, 0.2, 0.9
+);
+composer.addPass(bloomPass);
+
+// ─── Init ──────────────────────────────────────────────────────
+generateGalaxy();
+const bgStarMat = createBackgroundStars();
+const nebulaMat = createNebula();
+const coreMat = createCoreGlow();
+
+// ─── UI Bindings ───────────────────────────────────────────────
+const ui = {
+  count: document.getElementById('r-count'),
+  radius: document.getElementById('r-radius'),
+  spin: document.getElementById('r-spin'),
+  branches: document.getElementById('r-branches'),
+  rand: document.getElementById('r-rand'),
+  bloom: document.getElementById('r-bloom'),
+  auto: document.getElementById('r-auto'),
+  regen: document.getElementById('btn-regen'),
+};
+
+function fmt(id, val, suffix = '') {
+  document.getElementById(id).textContent = val + suffix;
+}
+
+ui.count.oninput = () => { params.count = +ui.count.value; fmt('v-count', (params.count/1000).toFixed(0) + 'k'); };
+ui.radius.oninput = () => { params.radius = +ui.radius.value; fmt('v-radius', params.radius.toFixed(1)); };
+ui.spin.oninput = () => { params.spin = +ui.spin.value; fmt('v-spin', params.spin.toFixed(1)); };
+ui.branches.oninput = () => { params.branches = +ui.branches.value; fmt('v-branches', params.branches); };
+ui.rand.oninput = () => { params.randomness = +ui.rand.value; fmt('v-rand', params.randomness.toFixed(2)); };
+ui.bloom.oninput = () => { params.bloomStrength = +ui.bloom.value; bloomPass.strength = params.bloomStrength; fmt('v-bloom', params.bloomStrength.toFixed(1)); };
+ui.auto.oninput = () => { params.autoRotate = !!+ui.auto.value; controls.autoRotate = params.autoRotate; fmt('v-auto', params.autoRotate ? 'ON' : 'OFF'); };
+ui.regen.onclick = () => { generateGalaxy(); };
+
+// ─── Resize ────────────────────────────────────────────────────
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
+
+// ─── Animation Loop ────────────────────────────────────────────
+const clock = new THREE.Clock();
+let frame = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const elapsed = clock.getElapsedTime();
+  frame++;
+
+  // Update shader uniforms
+  if (galaxyMaterial) {
+    galaxyMaterial.uniforms.uTime.value = elapsed;
+    galaxyMaterial.uniforms.uRadius.value = params.radius;
+    galaxyMaterial.uniforms.uSpin.value = params.spin;
+  }
+  bgStarMat.uniforms.uTime.value = elapsed;
+  nebulaMat.uniforms.uTime.value = elapsed;
+  coreMat.uniforms.uTime.value = elapsed;
+
+  controls.update();
+  composer.render();
+}
+
+// Hide loader and start
+setTimeout(() => {
+  document.getElementById('loader').classList.add('hide');
+  animate();
+}, 800);
+</script>
+</body>
+</html>

@@ -42,9 +42,14 @@ def detect_duplicate_code(
             },
         }
 
-    # Fetch all chunks from DuckDB to get content for embedding
-    all_chunks = duckdb_store.fetch_all("chunks")
-    if not all_chunks:
+    # Fetch a limited sample of chunks directly from SQL (avoid loading entire table)
+    sample_size = min(max_chunks, 100)
+    rows = duckdb_store.execute(
+        "SELECT chunk_id, file_path, start_line, end_line, content "
+        "FROM chunks WHERE LENGTH(content) > 20 "
+        f"ORDER BY random() LIMIT {int(sample_size)}"
+    ).fetchall()
+    if not rows:
         return {
             "status": "ok",
             "duplicate_pair_count": 0,
@@ -55,20 +60,21 @@ def detect_duplicate_code(
             },
         }
 
-    # Sample chunks to process (avoid O(n²) blowup)
-    import random
-    sample_size = min(len(all_chunks), max_chunks)
-    sampled = random.sample(all_chunks, sample_size) if len(all_chunks) > sample_size else all_chunks
-
-    # Embed sampled chunks
+    # Build chunk metadata from sampled rows
     texts = []
     chunk_meta = []
-    for chunk in sampled:
-        content = str(chunk.get("content", "") or chunk.get("text", "") or "")
+    for row in rows:
+        content = str(row[4] or "")
         if not content.strip() or len(content.strip()) < 20:
             continue
-        texts.append(content[:512])  # Truncate to avoid token limit
-        chunk_meta.append(chunk)
+        texts.append(content[:512])
+        chunk_meta.append({
+            "chunk_id": str(row[0] or ""),
+            "file_path": str(row[1] or ""),
+            "start_line": row[2],
+            "end_line": row[3],
+            "content": content,
+        })
 
     if not texts:
         return {
@@ -97,12 +103,18 @@ def detect_duplicate_code(
         }
 
     # For each embedded chunk, search the vector store for similar chunks
+    import time as _time
+    _search_start = _time.time()
+    _SEARCH_BUDGET_SECONDS = 15
     duplicate_pairs: list[dict[str, object]] = []
     seen_pairs: set[tuple[str, str]] = set()
 
     for i, (embedding, chunk) in enumerate(zip(embeddings, chunk_meta)):
         if embedding is None or len(embedding) == 0:
             continue
+        if _time.time() - _search_start > _SEARCH_BUDGET_SECONDS:
+            logger.warning("detect_duplicate_code: search budget exceeded after %d chunks", i)
+            break
         chunk_id = str(chunk.get("chunk_id", "") or chunk.get("id", "") or f"chunk_{i}")
         chunk_file = str(chunk.get("file_path", "") or "")
         chunk_start = chunk.get("start_line")
@@ -182,12 +194,16 @@ def test_coverage_gaps(
     duckdb_store: DuckDBStore,
     kuzu_store: KuzuStore | None = None,
     limit: int = 50,
+    file_pattern: str = "",
 ) -> dict[str, object]:
     """Identify symbols and files with no associated test coverage.
 
     Cross-references all non-test symbols against test files to find
     untested code. Uses naming conventions and graph edges to map
     tests to source files.
+
+    If *file_pattern* is given (e.g. ``"*.py"``, ``"backend/**"``), only symbols
+    whose file path matches the pattern are included in the results.
     """
     all_symbols = duckdb_store.fetch_all("symbols")
     all_files = duckdb_store.files.fetch_all()
@@ -205,12 +221,18 @@ def test_coverage_gaps(
         }
 
     # Separate test files from source files
+    import fnmatch
+    pattern = str(file_pattern or "").strip().lower()
     test_files: set[str] = set()
     source_files: set[str] = set()
     for file_row in all_files:
         path = str(file_row.get("path", "") or "")
         if not path:
             continue
+        if pattern:
+            normalized = path.replace("\\", "/").lower()
+            if not (fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(normalized, f"*/{pattern}")):
+                continue
         if _is_test_path(path):
             test_files.add(path)
         else:
@@ -275,6 +297,10 @@ def test_coverage_gaps(
         fp = str(sym.get("file_path", "") or "")
         if not qn or not fp:
             continue
+        if pattern:
+            normalized = fp.replace("\\", "/").lower()
+            if not (fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(normalized, f"*/{pattern}")):
+                continue
         if _is_test_path(fp):
             continue
         if qn in tested_symbols:

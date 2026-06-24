@@ -143,15 +143,25 @@ def detect_dead_code(
     duckdb_store: DuckDBStore,
     relation: str = "",
     limit: int = 50,
+    file_pattern: str = "",
 ) -> dict[str, object]:
     """Detect potentially dead code — symbols with zero inbound dependency edges.
 
     A symbol is considered "dead" if no other symbol CALLS, REFERENCES, IMPORTS,
     or otherwise depends on it (excluding entry points like main, exports, routes).
+
+    If *file_pattern* is given (e.g. ``"*.py"``, ``"backend/**"``), only symbols
+    whose file path matches the pattern are included in the results.
     """
-    # Fetch all symbols from DuckDB
-    all_symbols = duckdb_store.fetch_all("symbols")
-    if not all_symbols:
+    # Fetch only needed columns from symbols table (avoid loading full metadata)
+    import time as _time
+    import fnmatch
+    _start = _time.time()
+    pattern = str(file_pattern or "").strip().lower()
+    rows = duckdb_store.execute(
+        "SELECT qualified_name, name, kind, file_path, start_line FROM symbols"
+    ).fetchall()
+    if not rows:
         return {
             "status": "ok",
             "dead_symbol_count": 0,
@@ -166,10 +176,22 @@ def detect_dead_code(
 
     # Build a set of all qualified names
     all_qualified: dict[str, dict[str, object]] = {}
-    for sym in all_symbols:
-        qn = str(sym.get("qualified_name", "") or "").strip()
-        if qn:
-            all_qualified[qn] = sym
+    for row in rows:
+        qn = str(row[0] or "").strip()
+        if not qn:
+            continue
+        file_path = str(row[3] or "")
+        if pattern:
+            normalized = file_path.replace("\\", "/").lower()
+            if not (fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(normalized, f"*/{pattern}")):
+                continue
+        all_qualified[qn] = {
+            "qualified_name": qn,
+            "name": str(row[1] or ""),
+            "kind": str(row[2] or ""),
+            "file_path": file_path,
+            "start_line": row[4],
+        }
 
     # Collect all symbols that ARE referenced (have inbound edges)
     referenced: set[str] = set()
@@ -179,12 +201,17 @@ def detect_dead_code(
         "METHOD_OVERRIDES", "METHOD_IMPLEMENTS",
     ]
 
+    _EDGE_LIMIT_PER_RELATION = 10000
     for rel in relations_to_check:
         edges = kuzu_store.edges_for_relation(rel)
-        for edge in edges:
+        for i, edge in enumerate(edges):
+            if i >= _EDGE_LIMIT_PER_RELATION:
+                break
             tgt = str(edge.get("target", "") or "")
             if tgt:
                 referenced.add(tgt)
+        if _time.time() - _start > 30:
+            break
 
     # Dead symbols: in all_qualified but not in referenced, and not an entry point
     dead_symbols: list[dict[str, object]] = []

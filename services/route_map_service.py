@@ -19,7 +19,7 @@ def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except Exception:
-        logger.warning("route_map: failed to read file %s", path, exc_info=True)
+        logger.debug("route_map: failed to read file %s", path)
         return ""
 
 

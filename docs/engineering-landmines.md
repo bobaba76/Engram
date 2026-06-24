@@ -11,7 +11,7 @@ Treat these as incremental hardening items, not proof that the current system is
 ### 1. Stateful MCP repository selection
 
 Status:
-First-pass safety guard implemented. Repo-aware MCP tools now add `repo_root`, `repo_name`, and `repo_selection` metadata to responses. If a tool has a `repo` parameter but the caller omits it, the response warns that Coder used the selected repo fallback. `select_repo` also returns explicit requested/resolved repo metadata. A deeper stateless rewrite is still optional future hardening.
+Fully implemented. `MCPSession.selected_repo_root` is now a read-only property backed by an immutable `_default_repo_root` field set at startup. `select_repo` no longer mutates session state — it resolves the requested repo and returns its manifest with an explicit warning to pass the `repo` argument on subsequent tool calls. All tool handlers and helpers (`get_repo_context`, `detect_changes_from_cache`, `git_changed_files`, `change_preflight`, `fast_repo_root_for_tool`) now use `default_repo_root` instead of the mutable `selected_repo_root`. The `_make_repo_safe_handler` wrapper in `run_mcp.py` uses `default_repo_root` and emits a "default_repo_fallback" warning when no explicit `repo` argument is provided.
 
 Concern:
 `scripts/run_mcp.py` keeps an active selected repository in process state. In long-running MCP processes, two clients or chats can accidentally affect each other if one changes the selected repo.

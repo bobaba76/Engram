@@ -97,6 +97,42 @@ class KuzuStore:
         """
         return self.connection.execute(query, parameters or {})
 
+    _available_relations_cache: dict[str, frozenset[str]] = {}
+
+    def available_relations(self) -> frozenset[str]:
+        """Return the set of relation table names that exist in this Kuzu database.
+
+        Cached per database path to avoid repeated schema introspection.
+        """
+        cache_key = str(self.data_path) if hasattr(self, "data_path") else "default"
+        cached = KuzuStore._available_relations_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        available: set[str] = set()
+        try:
+            result = self._safe_execute("CALL show_tables() RETURN *")
+            rows = _safe_get_all(result)
+            for row in rows:
+                if row and len(row) >= 1:
+                    table_name = str(row[0]).upper()
+                    available.add(table_name)
+        except RuntimeError:
+            # Fallback: probe each known relation
+            for rel in SYMBOL_RELATIONS:
+                try:
+                    self._safe_execute(f"MATCH (s1:Symbol)-[:{rel}]->(s2:Symbol) RETURN COUNT(*) LIMIT 1")
+                    available.add(rel)
+                except RuntimeError:
+                    pass
+        result_set = frozenset(available)
+        KuzuStore._available_relations_cache[cache_key] = result_set
+        return result_set
+
+    def _existing_symbol_relations(self) -> tuple[str, ...]:
+        """Return only SYMBOL_RELATIONS that exist as tables in this database."""
+        available = self.available_relations()
+        return tuple(rel for rel in SYMBOL_RELATIONS if rel in available)
+
     def _initialize_schema(self) -> None:
         try:
             self._safe_execute("CREATE NODE TABLE File(path STRING, PRIMARY KEY(path))")
@@ -262,6 +298,7 @@ class KuzuStore:
                 )
             )
         except RuntimeError:
+            logger.debug("kuzu: read query failed")
             rows = []
         return [
             {
@@ -292,6 +329,7 @@ class KuzuStore:
                 )
             )
         except RuntimeError:
+            logger.debug("kuzu: read query failed")
             rows = []
         return [
             {
@@ -322,6 +360,7 @@ class KuzuStore:
                 )
             )
         except RuntimeError:
+            logger.debug("kuzu: read query failed")
             rows = []
         return [
             {
@@ -339,11 +378,12 @@ class KuzuStore:
         total = 0
         for query in (
             "MATCH (f:File)-[:DEFINES]->(s:Symbol) RETURN COUNT(*)",
-            *[f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) RETURN COUNT(*)" for relation in SYMBOL_RELATIONS],
+            *[f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) RETURN COUNT(*)" for relation in self._existing_symbol_relations()],
         ):
             try:
                 rows = _safe_get_all(self._safe_execute(query))
             except RuntimeError:
+                logger.debug("kuzu: count_edges query failed")
                 rows = []
             if rows:
                 total += int(rows[0][0])
@@ -363,7 +403,7 @@ class KuzuStore:
             }
         relation_queries = {
             relation: f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) WHERE s2.file_path = $file_path RETURN DISTINCT s1.file_path"
-            for relation in SYMBOL_RELATIONS
+            for relation in self._existing_symbol_relations()
         }
         by_touched_file: dict[str, dict[str, list[str]]] = {}
         relation_totals: dict[str, set[str]] = {name: set() for name in relation_queries}
@@ -373,6 +413,7 @@ class KuzuStore:
                 try:
                     rows = _safe_get_all(self._safe_execute(query, {"file_path": file_path}))
                 except RuntimeError:
+                    logger.debug("kuzu: get_impacted_file_details query failed for %s", relation_name)
                     rows = []
                 related_files = sorted({str(row[0]) for row in rows if row and row[0]})
                 file_breakdown[relation_name] = related_files
@@ -389,11 +430,12 @@ class KuzuStore:
         edges: list[dict[str, Any]] = []
         for relation, query in {
             "DEFINES": "MATCH (f:File)-[:DEFINES]->(s:Symbol) RETURN f.path, s.qualified_name",
-            **{relation: f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name" for relation in SYMBOL_RELATIONS},
+            **{relation: f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name" for relation in self._existing_symbol_relations()},
         }.items():
             try:
                 rows = self._safe_execute(query).get_all()
             except RuntimeError:
+                logger.debug("kuzu: all_edges query failed for %s", relation)
                 rows = []
             edges.extend(
                 {"source": row[0], "relation": relation, "target": row[1]}
@@ -405,6 +447,7 @@ class KuzuStore:
         try:
             file_rows = _safe_get_all(self._safe_execute("MATCH (f:File) RETURN f.path"))
         except RuntimeError:
+            logger.warning("kuzu: file query failed in graph_integrity_report", exc_info=True)
             file_rows = []
         file_paths = {str(row[0]) for row in file_rows if row and row[0]}
         try:
@@ -412,6 +455,7 @@ class KuzuStore:
                 self._safe_execute("MATCH (s:Symbol) RETURN s.qualified_name, s.file_path")
             )
         except RuntimeError:
+            logger.warning("kuzu: symbol query failed in graph_integrity_report", exc_info=True)
             symbol_rows = []
         symbols = [
             {"qualified_name": str(row[0]), "file_path": str(row[1])}
@@ -423,6 +467,7 @@ class KuzuStore:
                 self._safe_execute("MATCH (f:File)-[:DEFINES]->(s:Symbol) RETURN f.path, s.qualified_name")
             )
         except RuntimeError:
+            logger.warning("kuzu: defines query failed in graph_integrity_report", exc_info=True)
             define_rows = []
         defines = {(str(row[0]), str(row[1])) for row in define_rows if len(row) >= 2}
         symbols_missing_file_node = [
@@ -449,7 +494,7 @@ class KuzuStore:
     def edges_for_relation(self, relation: str) -> list[dict[str, Any]]:
         queries = {
             "DEFINES": "MATCH (f:File)-[:DEFINES]->(s:Symbol) RETURN f.path, s.qualified_name",
-            **{relation: f"MATCH (s1:Symbol)-[:{relation}]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name" for relation in SYMBOL_RELATIONS},
+            **{rel: f"MATCH (s1:Symbol)-[:{rel}]->(s2:Symbol) RETURN s1.qualified_name, s2.qualified_name" for rel in self._existing_symbol_relations()},
         }
         relation_name = relation.upper()
         query = queries.get(relation_name)
@@ -458,6 +503,7 @@ class KuzuStore:
         try:
             rows = self._safe_execute(query).get_all()
         except RuntimeError:
+            logger.debug("kuzu: edges_for_relation query failed for %s", relation_name)
             rows = []
         return [
             {"source": row[0], "relation": relation_name, "target": row[1]}
@@ -465,25 +511,33 @@ class KuzuStore:
         ]
  
     def edges_for_target(self, target: str, relation: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
-        relations = [relation] if relation is not None else ["DEFINES", *SYMBOL_RELATIONS]
+        if relation is not None:
+            relations = [relation]
+        else:
+            relations = ["DEFINES", *self._existing_symbol_relations()]
         edges: list[dict[str, Any]] = []
         for relation_name in relations:
             _, target_query = self._relation_queries(relation_name, limit=limit)
             try:
                 rows = _safe_get_all(self._safe_execute(target_query, {"value": target}))
             except RuntimeError:
+                logger.debug("kuzu: edges_for_target query failed for %s", relation_name)
                 rows = []
             edges.extend(self._rows_to_edges(rows))
         return edges
  
     def edges_for_source(self, source: str, relation: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
-        relations = [relation] if relation is not None else ["DEFINES", *SYMBOL_RELATIONS]
+        if relation is not None:
+            relations = [relation]
+        else:
+            relations = ["DEFINES", *self._existing_symbol_relations()]
         edges: list[dict[str, Any]] = []
         for relation_name in relations:
             source_query, _ = self._relation_queries(relation_name, limit=limit)
             try:
                 rows = _safe_get_all(self._safe_execute(source_query, {"value": source}))
             except RuntimeError:
+                logger.debug("kuzu: edges_for_source query failed for %s", relation_name)
                 rows = []
             edges.extend(self._rows_to_edges(rows))
         return edges

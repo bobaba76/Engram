@@ -109,14 +109,14 @@ def mcp_git_changed_files(repo_root: Path, scope: str, base_ref: str = "") -> tu
     return sorted(changed_files), normalized
 
 
-def fast_repo_root_for_tool(selected_repo_root: Path, repo: str = "") -> Path:
+def fast_repo_root_for_tool(default_repo_root: Path, repo: str = "") -> Path:
     from services.repo_registry_service import resolve_indexed_repo
 
     repo_text = str(repo or "").strip()
     if not repo_text:
-        return selected_repo_root
+        return default_repo_root
     try:
-        return resolve_indexed_repo(selected_repo_root, repo_text)
+        return resolve_indexed_repo(default_repo_root, repo_text)
     except ValueError:
         pass
     explicit = Path(repo_text)
@@ -125,9 +125,9 @@ def fast_repo_root_for_tool(selected_repo_root: Path, repo: str = "") -> Path:
     sibling = (ROOT.parent / repo_text)
     if sibling.exists():
         return sibling.resolve()
-    if selected_repo_root.name.lower() == repo_text.lower():
-        return selected_repo_root
-    return selected_repo_root
+    if default_repo_root.name.lower() == repo_text.lower():
+        return default_repo_root
+    return default_repo_root
 
 
 def mcp_change_preflight_payload(repo_root: Path, scope: str, base_ref: str, changed_files: list[str], normalized_scope: str, force: bool = False) -> dict[str, object] | None:

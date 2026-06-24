@@ -33,14 +33,56 @@ from storage.vector_store import VectorStore
 
 
 class LazyKuzuStore:
+    """Lazy wrapper around KuzuStore that defers initialization until first use.
+
+    Delegates read-only methods explicitly instead of using __getattr__ proxy,
+    so typos and wrong method names produce clear AttributeErrors immediately.
+    """
+
     def __init__(self, opener):
         self._opener = opener
 
     def _store(self):
         return self._opener()
 
-    def __getattr__(self, name):
-        return getattr(self._store(), name)
+    def edges_for_target(self, target: str, relation: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._store().edges_for_target(target, relation=relation, limit=limit)
+
+    def edges_for_source(self, source: str, relation: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._store().edges_for_source(source, relation=relation, limit=limit)
+
+    def neighborhood(self, target: str, depth: int = 1) -> dict[str, Any]:
+        return self._store().neighborhood(target, depth=depth)
+
+    def execute_query(self, query: str, parameters: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._store().execute_query(query, parameters)
+
+    def graph_integrity_report(self) -> dict[str, Any]:
+        return self._store().graph_integrity_report()
+
+    def get_impacted_files(self, touched_files: list[str]) -> set[str]:
+        return self._store().get_impacted_files(touched_files)
+
+    def get_impacted_file_details(self, touched_files: list[str]) -> dict[str, Any]:
+        return self._store().get_impacted_file_details(touched_files)
+
+    def symbol_edges_for_target_file(self, file_path: str, relation: str, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._store().symbol_edges_for_target_file(file_path, relation, limit=limit)
+
+    def symbol_edges_for_target_symbol(self, target: str, relation: str, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._store().symbol_edges_for_target_symbol(target, relation, limit=limit)
+
+    def symbols_for_file(self, file_path: str, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._store().symbols_for_file(file_path, limit=limit)
+
+    def count_edges(self) -> int:
+        return self._store().count_edges()
+
+    def all_edges(self) -> list[dict[str, Any]]:
+        return self._store().all_edges()
+
+    def edges_for_relation(self, relation: str) -> list[dict[str, Any]]:
+        return self._store().edges_for_relation(relation)
 
 
 class MCPSession:
@@ -50,10 +92,23 @@ class MCPSession:
         self.settings = settings
         self.manifest = manifest
         self.resolved_by = resolved_by
-        self.selected_repo_root = settings.repo_root.resolve()
+        self._default_repo_root = settings.repo_root.resolve()
         self.repo_context_cache: dict[Path, dict[str, Any]] = {}
+        self._repo_resolution_cache: dict[str, Path] = {}
         self.reindex_jobs: dict[str, dict[str, Any]] = {}
         self._kuzu_init_lock = threading.Lock()
+        self._realtime_indexer = None
+        self._realtime_thread = None
+
+    @property
+    def default_repo_root(self) -> Path:
+        """Immutable default repo root, fixed at startup. Cannot be changed at runtime."""
+        return self._default_repo_root
+
+    @property
+    def selected_repo_root(self) -> Path:
+        """Deprecated alias for default_repo_root. Kept for backwards compatibility."""
+        return self._default_repo_root
 
     # --- Reindex job management ---------------------------------------------
 
@@ -133,9 +188,27 @@ class MCPSession:
         stderr_path = Path(str(job.get("stderr_path", "")))
         warnings: list[str] = []
         if job.get("status") == "running" and not isinstance(job.get("process"), subprocess.Popen):
-            warnings.append(
-                "Job state was restored after an MCP restart; live process polling is unavailable for this job. Check stdout/stderr tails or start a new reindex if status does not change."
-            )
+            # Try to check if the PID is still alive
+            pid = job.get("pid")
+            pid_alive = False
+            if pid and isinstance(pid, int) and pid > 0:
+                try:
+                    import os as _os
+                    _os.kill(pid, 0)
+                    pid_alive = True
+                except (ProcessLookupError, PermissionError, OSError):
+                    pid_alive = False
+            if not pid_alive:
+                job["status"] = "failed"
+                job["return_code"] = -1
+                job["finished_at"] = time.time()
+                job["error"] = "Process died (PID no longer exists); likely crashed or was killed during indexing."
+                self._persist_reindex_job(job)
+                warnings.append(job["error"])
+            else:
+                warnings.append(
+                    "Job state was restored after an MCP restart; live process polling is unavailable for this job. Check stdout/stderr tails or start a new reindex if status does not change."
+                )
         return {
             "job_id": job_id,
             "status": job.get("status", "unknown"),
@@ -146,6 +219,7 @@ class MCPSession:
             "started_at": job.get("started_at"),
             "finished_at": job.get("finished_at"),
             "return_code": job.get("return_code"),
+            "error": job.get("error", ""),
             "command": job.get("command", []),
             "stdout_tail": self._read_log_tail(stdout_path),
             "stderr_tail": self._read_log_tail(stderr_path),
@@ -229,7 +303,16 @@ class MCPSession:
     # --- Repo context management --------------------------------------------
 
     def get_repo_context(self, repo: str = "") -> dict[str, Any]:
-        repo_root = resolve_indexed_repo(self.selected_repo_root, repo or None) if str(repo or "").strip() else self.selected_repo_root
+        repo_arg = str(repo or "").strip()
+        if repo_arg:
+            cached_root = self._repo_resolution_cache.get(repo_arg.lower())
+            if cached_root is not None:
+                repo_root = cached_root
+            else:
+                repo_root = resolve_indexed_repo(self._default_repo_root, repo_arg)
+                self._repo_resolution_cache[repo_arg.lower()] = repo_root
+        else:
+            repo_root = self._default_repo_root
         cached = self.repo_context_cache.get(repo_root)
         if cached is not None:
             return cached
@@ -240,7 +323,7 @@ class MCPSession:
         context = {
             "repo_root": repo_root,
             "settings": repo_settings,
-            "duckdb_store": DuckDBStore(repo_settings.duckdb_path, read_only=True),
+            "duckdb_store": DuckDBStore(repo_settings.duckdb_path, read_only=False),
             "kuzu_store": None,
             "vector_store": VectorStore(repo_settings.lancedb_path),
             "manifest": repo_manifest,
@@ -265,7 +348,7 @@ class MCPSession:
         return LazyKuzuStore(lambda: self.get_kuzu_store(repo))
 
     def detect_changes_from_cache(self, scope: str, base_ref: str, repo: str = "") -> dict[str, object] | None:
-        repo_root = fast_repo_root_for_tool(self.selected_repo_root, repo)
+        repo_root = fast_repo_root_for_tool(self._default_repo_root, repo)
         normalized_scope = scope if scope in {"unstaged", "staged", "all", "compare"} else "unstaged"
         cached = read_git_change_cache(repo_root, normalized_scope, base_ref)
         if cached is None:
@@ -310,12 +393,87 @@ class MCPSession:
             self.manifest.clear()
             self.manifest.update(refreshed_manifest)
 
+    # --- Realtime indexing --------------------------------------------------
+
+    def start_realtime_indexing(self, poll_interval: float = 2.0, debounce: float = 1.0) -> dict[str, object]:
+        """Start a background file watcher that triggers incremental reindexing on save."""
+        if self._realtime_thread is not None and self._realtime_thread.is_alive():
+            return {
+                "status": "already_running",
+                "watched_root": str(self._default_repo_root),
+                "compact_summary": {"status": "already_running", "watched_root": str(self._default_repo_root)},
+            }
+        from services.realtime_index_service import WatchdogRealtimeIndexer
+
+        coder_root = Path(__file__).resolve().parent.parent
+        self._realtime_indexer = WatchdogRealtimeIndexer(
+            repo_root=self._default_repo_root,
+            coder_root=coder_root,
+            poll_interval_seconds=poll_interval,
+            debounce_seconds=debounce,
+            log_callback=lambda msg: None,
+        )
+        self._realtime_thread = threading.Thread(
+            target=self._realtime_indexer.run_forever,
+            daemon=True,
+            name="realtime-indexer",
+        )
+        self._realtime_thread.start()
+        return {
+            "status": "started",
+            "watched_root": str(self._default_repo_root),
+            "poll_interval": poll_interval,
+            "debounce": debounce,
+            "compact_summary": {"status": "started", "watched_root": str(self._default_repo_root)},
+        }
+
+    def stop_realtime_indexing(self) -> dict[str, object]:
+        """Stop the background file watcher."""
+        if self._realtime_indexer is None:
+            return {"status": "not_running", "compact_summary": {"status": "not_running"}}
+        stats = self._realtime_indexer.stats
+        self._realtime_indexer = None
+        self._realtime_thread = None
+        return {
+            "status": "stopped",
+            "stats": {
+                "watched_root": stats.watched_root,
+                "known_files": stats.known_files,
+                "reindex_count": stats.reindex_count,
+                "last_reindex_at": stats.last_reindex_at,
+            },
+            "compact_summary": {"status": "stopped"},
+        }
+
+    def realtime_indexing_status(self) -> dict[str, object]:
+        """Get current status of the realtime indexer."""
+        if self._realtime_indexer is None:
+            return {"status": "not_running", "compact_summary": {"status": "not_running"}}
+        stats = self._realtime_indexer.stats
+        return {
+            "status": "running" if self._realtime_thread and self._realtime_thread.is_alive() else "stopped",
+            "watched_root": stats.watched_root,
+            "watcher_backend": stats.watcher_backend,
+            "known_files": stats.known_files,
+            "pending_changes": stats.pending_changes,
+            "reindex_count": stats.reindex_count,
+            "last_reindex_at": stats.last_reindex_at,
+            "last_change_at": stats.last_change_at,
+            "changed_paths": stats.changed_paths,
+            "compact_summary": {
+                "status": "running",
+                "known_files": stats.known_files,
+                "pending": stats.pending_changes,
+                "reindex_count": stats.reindex_count,
+            },
+        }
+
     # --- Git change helpers -------------------------------------------------
 
     def git_changed_files(self, scope: str, base_ref: str, repo: str = "") -> tuple[list[str], str]:
-        repo_root = fast_repo_root_for_tool(self.selected_repo_root, repo)
+        repo_root = fast_repo_root_for_tool(self._default_repo_root, repo)
         return mcp_git_changed_files(repo_root, scope, base_ref)
 
     def change_preflight(self, scope: str, base_ref: str, changed_files: list[str], normalized_scope: str, force: bool = False) -> dict[str, object] | None:
-        repo_root = fast_repo_root_for_tool(self.selected_repo_root, "")
+        repo_root = fast_repo_root_for_tool(self._default_repo_root, "")
         return mcp_change_preflight_payload(repo_root, scope, base_ref, changed_files, normalized_scope, force=force)

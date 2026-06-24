@@ -82,34 +82,38 @@ def index_status(session: MCPSession, repo: str = "") -> dict[str, object]:
 
 
 def list_repos_tool(session: MCPSession) -> dict[str, object]:
-    payload = list_indexed_repos(session.selected_repo_root)
-    payload["selected_repo"] = str(session.selected_repo_root)
-    payload["compact_summary"]["selected_repo"] = session.selected_repo_root.name
+    payload = list_indexed_repos(session.default_repo_root)
+    payload["default_repo"] = str(session.default_repo_root)
+    payload["compact_summary"]["default_repo"] = session.default_repo_root.name
     return payload
 
 
 def select_repo_tool(session: MCPSession, repo: str) -> dict[str, object]:
-    resolved_repo_root = resolve_indexed_repo(session.selected_repo_root, repo)
-    session.selected_repo_root = resolved_repo_root
-    context = session.get_repo_context()
+    resolved_repo_root = resolve_indexed_repo(session.default_repo_root, repo)
+    context = session.get_repo_context(repo)
     return {
-        "selected_repo": str(session.selected_repo_root),
-        "repo_root": str(session.selected_repo_root),
-        "repo_name": session.selected_repo_root.name,
+        "selected_repo": str(resolved_repo_root),
+        "repo_root": str(resolved_repo_root),
+        "repo_name": resolved_repo_root.name,
         "repo_selection": {
-            "mode": "selected_repo_updated",
+            "mode": "resolved_repo_info",
             "requested_repo": repo,
-            "resolved_repo_root": str(session.selected_repo_root),
-            "resolved_repo_name": session.selected_repo_root.name,
+            "resolved_repo_root": str(resolved_repo_root),
+            "resolved_repo_name": resolved_repo_root.name,
         },
         "manifest": context["manifest"],
-        "summary_text": f"Selected repo: {session.selected_repo_root}",
-        "highlights": [f"Selected repo: {session.selected_repo_root.name}", f"Repo root: {session.selected_repo_root}"],
+        "summary_text": f"Resolved repo: {resolved_repo_root}",
+        "highlights": [f"Resolved repo: {resolved_repo_root.name}", f"Repo root: {resolved_repo_root}"],
         "compact_summary": {
-            "selected_repo": session.selected_repo_root.name,
-            "repo_root": str(session.selected_repo_root),
-            "repo_selection_mode": "selected_repo_updated",
+            "selected_repo": resolved_repo_root.name,
+            "repo_root": str(resolved_repo_root),
+            "repo_selection_mode": "resolved_repo_info",
         },
+        "warnings": [
+            "select_repo no longer changes the session default repo. "
+            "Pass the 'repo' argument explicitly on subsequent tool calls to target this repo. "
+            "The session default repo remains fixed at the startup value."
+        ],
     }
 
 
@@ -197,7 +201,7 @@ def detect_changes_tool(session: MCPSession, scope: str = "unstaged", base_ref: 
     cached_changes = session.detect_changes_from_cache(scope, base_ref, repo)
     if cached_changes is not None:
         return cached_changes
-    repo_root = fast_repo_root_for_tool(session.selected_repo_root, repo)
+    repo_root = fast_repo_root_for_tool(session.default_repo_root, repo)
     from mcp_server.git_change_cache import mcp_git_changed_files
 
     changed_files, normalized_scope = mcp_git_changed_files(repo_root, scope, base_ref)
@@ -485,7 +489,7 @@ def change_impact_report_tool(session: MCPSession, scope: str = "unstaged", base
             changes=cached_changes,
             target=target,
         )
-    repo_root = fast_repo_root_for_tool(session.selected_repo_root, repo)
+    repo_root = fast_repo_root_for_tool(session.default_repo_root, repo)
     from mcp_server.git_change_cache import mcp_git_changed_files
 
     changed_files, normalized_scope = mcp_git_changed_files(repo_root, scope, base_ref)
@@ -562,7 +566,7 @@ def suggest_tests_for_change_tool(session: MCPSession, scope: str = "unstaged", 
             base_ref=base_ref,
             changes=cached_changes,
         )
-    repo_root = fast_repo_root_for_tool(session.selected_repo_root, repo)
+    repo_root = fast_repo_root_for_tool(session.default_repo_root, repo)
     from mcp_server.git_change_cache import mcp_git_changed_files
 
     changed_files, normalized_scope = mcp_git_changed_files(repo_root, scope, base_ref)
@@ -778,6 +782,7 @@ def detect_dead_code_tool(
     limit: int = 50,
     view: str = "",
     repo: str = "",
+    file_pattern: str = "",
 ) -> dict[str, object]:
     context = session.get_repo_context(repo)
     result = detect_dead_code(
@@ -785,6 +790,7 @@ def detect_dead_code_tool(
         context["duckdb_store"],
         relation=relation or None,
         limit=limit,
+        file_pattern=file_pattern,
     )
     if view:
         result["_view"] = view
@@ -795,7 +801,7 @@ def detect_duplicate_code_tool(
     session: MCPSession,
     limit: int = 20,
     similarity_threshold: float = 0.85,
-    max_chunks: int = 100,
+    max_chunks: int = 50,
     view: str = "",
     repo: str = "",
 ) -> dict[str, object]:
@@ -818,16 +824,266 @@ def test_coverage_gaps_tool(
     limit: int = 50,
     view: str = "",
     repo: str = "",
+    file_pattern: str = "",
 ) -> dict[str, object]:
     context = session.get_repo_context(repo)
     result = test_coverage_gaps(
         context["duckdb_store"],
         session.get_kuzu_store(repo),
         limit=limit,
+        file_pattern=file_pattern,
     )
     if view:
         result["_view"] = view
     return result
+
+
+# --- Community detection tools ---------------------------------------------
+
+
+def detect_communities_tool(
+    session: MCPSession,
+    repo: str = "",
+    min_size: int = 2,
+    max_size: int = 200,
+    algorithm: str = "label_propagation",
+) -> dict[str, object]:
+    from services.community_detection_service import detect_communities
+
+    context = session.get_repo_context(repo)
+    return detect_communities(
+        context["duckdb_store"],
+        session.get_kuzu_store(repo),
+        min_size=min_size,
+        max_size=max_size,
+        algorithm=algorithm,
+    )
+
+
+def list_communities_tool(
+    session: MCPSession,
+    limit: int = 20,
+    repo: str = "",
+) -> dict[str, object]:
+    from services.community_detection_service import list_communities
+
+    context = session.get_repo_context(repo)
+    return list_communities(context["duckdb_store"], limit=limit)
+
+
+def get_community_detail_tool(
+    session: MCPSession,
+    community_id: str,
+    repo: str = "",
+) -> dict[str, object]:
+    from services.community_detection_service import get_community_detail
+
+    context = session.get_repo_context(repo)
+    return get_community_detail(context["duckdb_store"], community_id)
+
+
+def get_symbol_community_tool(
+    session: MCPSession,
+    target: str,
+    repo: str = "",
+) -> dict[str, object]:
+    from services.community_detection_service import get_symbol_community
+
+    context = session.get_repo_context(repo)
+    return get_symbol_community(context["duckdb_store"], target)
+
+
+# --- Repo group tools ------------------------------------------------------
+
+
+def group_create_tool(
+    session: MCPSession,
+    group_name: str,
+    group_path: str = "",
+) -> dict[str, object]:
+    from services.repo_group_service import create_group
+
+    context = session.get_repo_context("")
+    return create_group(context["duckdb_store"], group_name, group_path)
+
+
+def group_add_repo_tool(
+    session: MCPSession,
+    group_name: str,
+    repo_name: str,
+    hierarchy_path: str = "",
+    repo: str = "",
+) -> dict[str, object]:
+    from services.repo_group_service import add_repo_to_group
+
+    context = session.get_repo_context(repo)
+    repo_path = str(context.get("repo_root", ""))
+    return add_repo_to_group(context["duckdb_store"], group_name, repo_name, repo_path, hierarchy_path)
+
+
+def group_remove_repo_tool(
+    session: MCPSession,
+    group_name: str,
+    hierarchy_path: str,
+) -> dict[str, object]:
+    from services.repo_group_service import remove_repo_from_group
+
+    context = session.get_repo_context("")
+    return remove_repo_from_group(context["duckdb_store"], group_name, hierarchy_path)
+
+
+def group_list_tool(
+    session: MCPSession,
+) -> dict[str, object]:
+    from services.repo_group_service import list_groups
+
+    context = session.get_repo_context("")
+    return list_groups(context["duckdb_store"])
+
+
+def group_detail_tool(
+    session: MCPSession,
+    group_name: str,
+) -> dict[str, object]:
+    from services.repo_group_service import get_group_detail
+
+    context = session.get_repo_context("")
+    return get_group_detail(context["duckdb_store"], group_name)
+
+
+def group_sync_tool(
+    session: MCPSession,
+    group_name: str,
+) -> dict[str, object]:
+    from services.repo_group_service import sync_group_contracts
+
+    context = session.get_repo_context("")
+    return sync_group_contracts(context["duckdb_store"], group_name)
+
+
+def group_query_tool(
+    session: MCPSession,
+    group_name: str,
+    query: str,
+    limit: int = 20,
+) -> dict[str, object]:
+    from services.repo_group_service import query_group_flows
+
+    context = session.get_repo_context("")
+    return query_group_flows(context["duckdb_store"], group_name, query, limit=limit)
+
+
+def group_status_tool(
+    session: MCPSession,
+    group_name: str,
+) -> dict[str, object]:
+    from services.repo_group_service import group_status
+
+    context = session.get_repo_context("")
+    return group_status(context["duckdb_store"], group_name)
+
+
+# --- Realtime indexing tools -----------------------------------------------
+
+
+def start_realtime_indexing_tool(
+    session: MCPSession,
+    poll_interval: float = 2.0,
+    debounce: float = 1.0,
+) -> dict[str, object]:
+    return session.start_realtime_indexing(poll_interval=poll_interval, debounce=debounce)
+
+
+def stop_realtime_indexing_tool(session: MCPSession) -> dict[str, object]:
+    return session.stop_realtime_indexing()
+
+
+def realtime_indexing_status_tool(session: MCPSession) -> dict[str, object]:
+    return session.realtime_indexing_status()
+
+
+# --- Explain error tool ----------------------------------------------------
+
+
+def explain_error_tool(
+    session: MCPSession,
+    stack_trace: str,
+    repo: str = "",
+) -> dict[str, object]:
+    from services.explain_error_service import explain_error
+
+    context = session.get_repo_context(repo)
+    return explain_error(
+        context["duckdb_store"],
+        session.get_kuzu_store(repo),
+        stack_trace=stack_trace,
+        repo_root=context["repo_root"],
+    )
+
+
+# --- Diff context tool -----------------------------------------------------
+
+
+def diff_context_tool(
+    session: MCPSession,
+    scope: str = "unstaged",
+    base_ref: str = "",
+    changed_files: list[str] | None = None,
+    max_snippets: int = 20,
+    repo: str = "",
+) -> dict[str, object]:
+    from services.diff_context_service import diff_context
+
+    context = session.get_repo_context(repo)
+    return diff_context(
+        context["repo_root"],
+        context["duckdb_store"],
+        session.lazy_kuzu(repo),
+        changed_files=changed_files,
+        scope=scope,
+        base_ref=base_ref,
+        max_snippets=max_snippets,
+    )
+
+
+# --- Cross-repo unified graph tool -----------------------------------------
+
+
+def build_unified_graph_tool(
+    session: MCPSession,
+    group_name: str,
+    edge_limit: int = 5000,
+) -> dict[str, object]:
+    from services.repo_group_service import build_unified_graph
+
+    context = session.get_repo_context("")
+    return build_unified_graph(
+        context["duckdb_store"],
+        group_name,
+        edge_limit=edge_limit,
+    )
+
+
+# --- Similar functions tool ------------------------------------------------
+
+
+def find_similar_functions_tool(
+    session: MCPSession,
+    target: str,
+    limit: int = 10,
+    similarity_threshold: float = 0.3,
+    repo: str = "",
+) -> dict[str, object]:
+    from services.similar_functions_service import find_similar_functions
+
+    context = session.get_repo_context(repo)
+    return find_similar_functions(
+        context["duckdb_store"],
+        session.get_kuzu_store(repo),
+        target=target,
+        limit=limit,
+        similarity_threshold=similarity_threshold,
+    )
 
 
 # --- Tool registration table -----------------------------------------------
@@ -835,7 +1091,7 @@ def test_coverage_gaps_tool(
 TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
     ("index_status", index_status, "Show index readiness, counts, versions, and resolved repository metadata."),
     ("list_repos", list_repos_tool, "List indexed sibling repositories Coder can serve."),
-    ("select_repo", select_repo_tool, "Select the default repo target for this MCP session."),
+    ("select_repo", select_repo_tool, "Resolve a repo name or path to its indexed root and manifest. Does not change the session default repo — pass 'repo' explicitly on subsequent tool calls to target a different repo."),
     ("get_recent_runs", get_recent_runs_tool, "List recent persisted index runs including parsed stage summaries."),
     ("get_run_metrics", get_run_metrics_tool, "Show parsed persisted stage metrics for a specific run ID."),
     ("reindex_project", reindex_project_tool, "Start an incremental or full index refresh for a repository. Defaults to background mode to avoid MCP client timeouts."),
@@ -878,4 +1134,23 @@ TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
     ("detect_dead_code", detect_dead_code_tool, "Find symbols with zero inbound dependency edges (excluding entry points). Likely dead code."),
     ("detect_duplicate_code", detect_duplicate_code_tool, "Find duplicate or near-duplicate code across files using vector similarity search."),
     ("test_coverage_gaps", test_coverage_gaps_tool, "Identify source files and symbols with no associated test coverage."),
+    ("detect_communities", detect_communities_tool, "Detect functional communities in the symbol graph. Supports 'label_propagation' (default) or 'louvain' modularity optimization algorithm. Stores results for later queries."),
+    ("list_communities", list_communities_tool, "List detected communities from the most recent detection run."),
+    ("get_community_detail", get_community_detail_tool, "Get detailed information about a specific community including all member symbols."),
+    ("get_symbol_community", get_symbol_community_tool, "Find which functional community a symbol belongs to."),
+    ("group_create", group_create_tool, "Create a new repo group for multi-repo analysis."),
+    ("group_add_repo", group_add_repo_tool, "Add a repository to an existing repo group."),
+    ("group_remove_repo", group_remove_repo_tool, "Remove a repository from a repo group by its hierarchy path."),
+    ("group_list", group_list_tool, "List all configured repo groups and their members."),
+    ("group_detail", group_detail_tool, "Get detailed information about a specific repo group."),
+    ("group_sync", group_sync_tool, "Extract contracts from each repo in a group and find cross-repo matches."),
+    ("group_query", group_query_tool, "Search for symbols and execution flows across all repos in a group."),
+    ("group_status", group_status_tool, "Check index staleness of repos in a group."),
+    ("start_realtime_indexing", start_realtime_indexing_tool, "Start a background file watcher that triggers incremental reindexing when files change. Uses watchdog with polling fallback."),
+    ("stop_realtime_indexing", stop_realtime_indexing_tool, "Stop the background file watcher."),
+    ("realtime_indexing_status", realtime_indexing_status_tool, "Check if the realtime file watcher is running and see pending changes and reindex count."),
+    ("explain_error", explain_error_tool, "Parse a Python or TypeScript/JavaScript stack trace and return resolved symbols, source snippets, and caller chains for each frame. Paste the full traceback."),
+    ("diff_context", diff_context_tool, "Build a minimal review pack for changed files: source snippets, callers, callees, and impacted files. Uses git diff or explicit file list."),
+    ("build_unified_graph", build_unified_graph_tool, "Build a unified in-memory graph from all repos in a group. Merges Kuzu graphs and infers cross-repo edges from shared symbol names."),
+    ("find_similar_functions", find_similar_functions_tool, "Find functions with similar signatures and behavior to a target function. Scores by name token overlap, parameter count, return type, and call target overlap."),
 ]

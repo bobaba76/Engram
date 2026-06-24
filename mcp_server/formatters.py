@@ -1,5 +1,10 @@
 import json
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+_MAX_RESPONSE_BYTES = 256_000  # 256KB — guard against stdio transport overflow
 
 
 def _compact_json(value: Any) -> str:
@@ -559,6 +564,47 @@ def _project_view(enriched: dict[str, Any], view: str) -> dict[str, Any]:
     return {key: value for key, value in enriched.items() if key in keep}
 
 
+def _truncate_for_transport(payload: dict[str, Any], max_bytes: int = _MAX_RESPONSE_BYTES) -> dict[str, Any]:
+    """Truncate large list fields in the payload to keep the JSON under max_bytes."""
+    encoded = json.dumps(payload, ensure_ascii=False)
+    if len(encoded) <= max_bytes:
+        return payload
+    logger.warning("enrich_payload: response size %d bytes exceeds limit %d, truncating", len(encoded), max_bytes)
+    warnings = payload.setdefault("warnings", [])
+    if not isinstance(warnings, list):
+        warnings = []
+        payload["warnings"] = warnings
+    warnings.append(f"Response was truncated to fit transport limit ({len(encoded)} -> ~{max_bytes} bytes).")
+
+    def _shrink(value: Any, depth: int = 0) -> Any:
+        if depth > 6:
+            return value
+        if isinstance(value, list):
+            max_items = max(5, len(value) // 4)
+            if len(value) > max_items:
+                return value[:max_items]
+            return value
+        if isinstance(value, dict):
+            return {k: _shrink(v, depth + 1) for k, v in value.items()}
+        return value
+
+    truncated = _shrink(payload)
+    encoded = json.dumps(truncated, ensure_ascii=False)
+    if len(encoded) <= max_bytes:
+        return truncated
+    # Still too large — aggressively truncate all lists to 3 items
+    def _shrink_hard(value: Any, depth: int = 0) -> Any:
+        if depth > 8:
+            return value
+        if isinstance(value, list):
+            return value[:3]
+        if isinstance(value, dict):
+            return {k: _shrink_hard(v, depth + 1) for k, v in value.items()}
+        return value
+
+    return _shrink_hard(truncated)
+
+
 def enrich_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"result": payload}
@@ -569,6 +615,7 @@ def enrich_payload(payload: dict[str, Any]) -> dict[str, Any]:
     enriched["summary_text"] = "\n".join(summary_lines) if summary_lines else ""
     if view:
         enriched = _project_view(enriched, view)
+    enriched = _truncate_for_transport(enriched)
     return enriched
 
 

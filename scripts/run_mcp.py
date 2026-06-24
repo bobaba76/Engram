@@ -65,10 +65,10 @@ def _make_repo_safe_handler(session: MCPSession, handler: Any) -> Any:
         repo_arg = ""
         if bound is not None:
             repo_arg = str(bound.arguments.get("repo") or "").strip()
-        resolved_repo_root = fast_repo_root_for_tool(session.selected_repo_root, repo_arg)
+        resolved_repo_root = fast_repo_root_for_tool(session.default_repo_root, repo_arg)
         payload.setdefault("repo_root", str(resolved_repo_root))
         payload.setdefault("repo_name", resolved_repo_root.name)
-        selection_mode = "explicit_repo" if repo_arg else "selected_repo_fallback"
+        selection_mode = "explicit_repo" if repo_arg else "default_repo_fallback"
         payload.setdefault(
             "repo_selection",
             {
@@ -84,7 +84,7 @@ def _make_repo_safe_handler(session: MCPSession, handler: Any) -> Any:
             compact_summary.setdefault("repo_name", resolved_repo_root.name)
             compact_summary.setdefault("repo_selection_mode", selection_mode)
         if not repo_arg:
-            _append_warning(payload, f"No repo argument provided; used selected repo '{resolved_repo_root.name}'.")
+            _append_warning(payload, f"No repo argument provided; used default repo '{resolved_repo_root.name}'. Pass the 'repo' argument explicitly to target a different repo.")
         return payload
 
     # Build a signature without the session parameter for MCP schema generation
@@ -122,6 +122,17 @@ def _check_stale_pid(settings: Any) -> None:
 
 
 def main() -> int:
+    # Set up file logging so crashes are captured even when stdio transport dies
+    log_dir = Path(__file__).resolve().parent.parent / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(str(log_dir / "mcp_server.log"), encoding="utf-8"),
+        ],
+    )
+
     project_root, resolved_by = resolve_project_root()
     settings = load_settings(project_root)
     _check_stale_pid(settings)

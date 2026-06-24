@@ -42,6 +42,6 @@ def test_mcp_repo_aware_tools_echo_repo_metadata_and_warn_on_fallback() -> None:
     assert "payload.setdefault(\"repo_root\", str(resolved_repo_root))" in source
     assert "payload.setdefault(\"repo_name\", resolved_repo_root.name)" in source
     assert "\"mode\": selection_mode" in source
-    assert "No repo argument provided; used selected repo" in source
+    assert "No repo argument provided; used default repo" in source
     assert "server.register_tool(tool_name, _make_repo_safe_handler(session, handler), description=description)" in source
     assert "wrapped.__signature__ = signature" in source

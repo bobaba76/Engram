@@ -6,7 +6,8 @@ from storage.manifest_store import ManifestStore
 
 
 MANIFEST_RELATIVE_PATH = Path("data") / "manifests" / "current_manifest.json"
-MAX_NESTED_REPO_DEPTH = 4
+MAX_NESTED_REPO_DEPTH = 3
+MAX_PARENT_SIBLING_DEPTH = 2
 
 
 def _read_manifest(repo_root: Path) -> dict[str, object]:
@@ -54,6 +55,8 @@ def _iter_indexed_repo_roots(active_repo_root: Path):
     for child in sorted(parent.iterdir(), key=lambda item: item.name.lower()):
         if not child.is_dir() or child.resolve() == resolved_root:
             continue
+        if child.name.startswith(".") or child.name in {"data", "node_modules", "__pycache__"}:
+            continue
         manifest = _read_manifest(child)
         if not manifest:
             continue
@@ -61,7 +64,7 @@ def _iter_indexed_repo_roots(active_repo_root: Path):
         if child_root not in seen:
             seen.add(child_root)
             yield child_root
-        for nested in _iter_nested_indexed_roots(child_root):
+        for nested in _iter_nested_indexed_roots(child_root, max_depth=MAX_PARENT_SIBLING_DEPTH):
             if nested not in seen:
                 seen.add(nested)
                 yield nested
