@@ -323,13 +323,44 @@ class MCPSession:
         context = {
             "repo_root": repo_root,
             "settings": repo_settings,
-            "duckdb_store": DuckDBStore(repo_settings.duckdb_path, read_only=False),
+            "duckdb_store": DuckDBStore(repo_settings.duckdb_path, read_only=True),
             "kuzu_store": None,
             "vector_store": VectorStore(repo_settings.lancedb_path),
             "manifest": repo_manifest,
         }
+        # Lightweight stale index check: sample 20 indexed files, see how many exist on disk
+        context["stale_warnings"] = self._check_stale_index(repo_root, context["duckdb_store"])
         self.repo_context_cache[repo_root] = context
         return context
+
+    @staticmethod
+    def _check_stale_index(repo_root: Path, duckdb_store: Any) -> list[str]:
+        """Sample indexed files and check if they still exist on disk."""
+        import random as _random
+        warnings: list[str] = []
+        try:
+            rows = duckdb_store.execute(
+                "SELECT path FROM files ORDER BY random() LIMIT 20"
+            ).fetchall()
+            if not rows:
+                return warnings
+            missing = 0
+            for (fp,) in rows:
+                fp_str = str(fp or "")
+                if not fp_str:
+                    continue
+                full_path = repo_root / fp_str
+                if not full_path.exists():
+                    missing += 1
+            pct = (missing / len(rows)) * 100
+            if pct >= 30:
+                warnings.append(
+                    f"Index appears stale: {missing}/{len(rows)} sampled files "
+                    f"({pct:.0f}%) no longer exist on disk. Run a reindex to update."
+                )
+        except Exception:
+            pass
+        return warnings
 
     def get_kuzu_store(self, repo: str = "") -> KuzuStore:
         context = self.get_repo_context(repo)
@@ -412,6 +443,7 @@ class MCPSession:
             poll_interval_seconds=poll_interval,
             debounce_seconds=debounce,
             log_callback=lambda msg: None,
+            on_reindex_complete=self.close_all_repo_contexts,
         )
         self._realtime_thread = threading.Thread(
             target=self._realtime_indexer.run_forever,

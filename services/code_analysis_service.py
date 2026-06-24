@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from services.graph_service import _symbol_to_file_map
@@ -18,6 +19,25 @@ _ENTRY_POINT_PATTERNS = (
 
 _ENTRY_POINT_KINDS = {"module", "exports", "entry_point", "test_file"}
 
+# Regex patterns for detecting route handlers and Pydantic models in chunk content.
+# These cover FastAPI, Flask, Django, and Express-style decorators.
+_ROUTE_DECORATOR_RE = re.compile(
+    r"@(?:app|router|bp|blueprint)\.(?:get|post|put|delete|patch|head|options|route|api_route)\b",
+    re.IGNORECASE,
+)
+_FLASK_ROUTE_RE = re.compile(
+    r"@(?:app|bp|blueprint)\.route\b",
+    re.IGNORECASE,
+)
+_DJANGO_URL_RE = re.compile(
+    r"path\s*\(\s*[\"'](?:[\w/\-:]+)[\"']\s*,\s*(\w+)\s*[,)]",
+    re.IGNORECASE,
+)
+_PYDANTIC_MODEL_RE = re.compile(
+    r"class\s+(\w+)\s*\(.*?BaseModel\b",
+    re.IGNORECASE,
+)
+
 
 def _is_entry_point(qualified_name: str, kind: str = "") -> bool:
     name_lower = qualified_name.lower()
@@ -26,6 +46,57 @@ def _is_entry_point(qualified_name: str, kind: str = "") -> bool:
         return True
     tail = name_lower.rsplit(".", 1)[-1]
     return any(pattern in tail for pattern in _ENTRY_POINT_PATTERNS)
+
+
+def _scan_chunks_for_entry_points(duckdb_store: "DuckDBStore") -> tuple[set[str], set[str]]:
+    """Scan chunk content for route decorators and Pydantic models.
+
+    Returns a tuple of (route_handler_qualified_names, pydantic_model_qualified_names).
+    """
+    route_handlers: set[str] = set()
+    pydantic_models: set[str] = set()
+
+    try:
+        rows = duckdb_store.execute(
+            "SELECT file_path, symbol_name, start_line, content FROM chunks "
+            "WHERE content LIKE '%@app.%' OR content LIKE '%@router.%' "
+            "OR content LIKE '%@bp.%' OR content LIKE '%@blueprint.%' "
+            "OR content LIKE '%BaseModel%'"
+        ).fetchall()
+    except Exception:
+        return route_handlers, pydantic_models
+
+    # Build a lookup from (file_path, symbol_name) to qualified_name via symbols table
+    sym_rows = duckdb_store.execute(
+        "SELECT qualified_name, name, file_path, start_line FROM symbols"
+    ).fetchall()
+    # Map: (file_path_lower, name_lower) -> list of (qualified_name, start_line)
+    sym_lookup: dict[tuple[str, str], list[tuple[str, int]]] = {}
+    for qn, name, fp, line in sym_rows:
+        key = (str(fp or "").lower(), str(name or "").lower())
+        sym_lookup.setdefault(key, []).append((str(qn or ""), int(line or 0)))
+
+    for file_path, symbol_name, start_line, content in rows:
+        if not content:
+            continue
+        fp_lower = str(file_path or "").lower()
+        sym_lower = str(symbol_name or "").lower()
+
+        # Check for route decorators in the content
+        if _ROUTE_DECORATOR_RE.search(content) or _FLASK_ROUTE_RE.search(content):
+            # The symbol_name in the chunk is the function being decorated
+            candidates = sym_lookup.get((fp_lower, sym_lower), [])
+            for qn, _ in candidates:
+                route_handlers.add(qn)
+
+        # Check for Pydantic model definitions
+        for match in _PYDANTIC_MODEL_RE.finditer(content):
+            model_name = match.group(1)
+            candidates = sym_lookup.get((fp_lower, model_name.lower()), [])
+            for qn, _ in candidates:
+                pydantic_models.add(qn)
+
+    return route_handlers, pydantic_models
 
 
 def detect_circular_dependencies(
@@ -214,12 +285,18 @@ def detect_dead_code(
             break
 
     # Dead symbols: in all_qualified but not in referenced, and not an entry point
+    # Scan chunks for route decorators and Pydantic models to exclude them
+    route_handlers, pydantic_models = _scan_chunks_for_entry_points(duckdb_store)
     dead_symbols: list[dict[str, object]] = []
     for qn, sym in all_qualified.items():
         if qn in referenced:
             continue
         kind = str(sym.get("kind", "") or "")
         if _is_entry_point(qn, kind):
+            continue
+        if qn in route_handlers:
+            continue
+        if qn in pydantic_models:
             continue
         file_path = str(sym.get("file_path", "") or "")
         # Skip test files — they're entry points by nature

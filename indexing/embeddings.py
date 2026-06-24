@@ -229,6 +229,13 @@ def prewarm_jina_model(model_name: str, device: str = "cpu") -> None:
             if model is not None and torch is not None:
                 resolved = _resolve_device(device)
                 model.to(resolved)
+                # Dummy forward pass to warm up CUDA kernels and compilation caches
+                try:
+                    dummy = torch.zeros(1, 8, dtype=torch.long)
+                    with torch.no_grad():
+                        model(dummy)
+                except Exception:
+                    pass  # Non-critical — just a warmup hint
             with _prewarm_lock:
                 _prewarm_ready[model_name] = model is not None
                 if model is None:

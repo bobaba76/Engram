@@ -804,6 +804,7 @@ def detect_duplicate_code_tool(
     max_chunks: int = 50,
     view: str = "",
     repo: str = "",
+    file_pattern: str = "",
 ) -> dict[str, object]:
     context = session.get_repo_context(repo)
     result = detect_duplicate_code(
@@ -813,6 +814,7 @@ def detect_duplicate_code_tool(
         similarity_threshold=similarity_threshold,
         max_chunks=max_chunks,
         model_name=str(context["settings"].embedding_model),
+        file_pattern=file_pattern,
     )
     if view:
         result["_view"] = view

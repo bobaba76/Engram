@@ -85,6 +85,14 @@ def _make_repo_safe_handler(session: MCPSession, handler: Any) -> Any:
             compact_summary.setdefault("repo_selection_mode", selection_mode)
         if not repo_arg:
             _append_warning(payload, f"No repo argument provided; used default repo '{resolved_repo_root.name}'. Pass the 'repo' argument explicitly to target a different repo.")
+        # Surface stale index warnings from repo context
+        try:
+            ctx = session.get_repo_context(repo_arg)
+            stale_warnings = ctx.get("stale_warnings", [])
+            for w in stale_warnings:
+                _append_warning(payload, w)
+        except Exception:
+            pass
         return payload
 
     # Build a signature without the session parameter for MCP schema generation
@@ -156,6 +164,13 @@ def main() -> int:
         prewarm_jina_model(settings.embedding_model, device=settings.embedding_device)
     except Exception:
         logger.debug("Startup prewarm failed", exc_info=True)
+
+    # Auto-start realtime indexing for the default repo
+    try:
+        session.start_realtime_indexing(poll_interval=3.0, debounce=5.0)
+        logger.info("Realtime indexing auto-started for %s", session.default_repo_root)
+    except Exception:
+        logger.debug("Realtime indexing auto-start failed", exc_info=True)
 
     for tool_name, handler, description in TOOL_DEFINITIONS:
         server.register_tool(tool_name, _make_repo_safe_handler(session, handler), description=description)

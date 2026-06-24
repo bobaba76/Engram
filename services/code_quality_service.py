@@ -21,12 +21,16 @@ def detect_duplicate_code(
     similarity_threshold: float = 0.85,
     max_chunks: int = 100,
     model_name: str = "jinaai/jina-embeddings-v2-base-code",
+    file_pattern: str = "",
 ) -> dict[str, object]:
     """Detect duplicate or near-duplicate code using vector similarity.
 
     Samples chunks from the vector store, embeds each one, and searches for
     similar chunks above the similarity threshold. Returns pairs of similar
     chunks grouped by file.
+
+    If *file_pattern* is given (e.g. ``"*.py"``, ``"backend/**"``), only chunks
+    whose file path matches the pattern are sampled and searched.
     """
     from indexing.embeddings import embed_texts, is_model_ready, get_model_load_error
 
@@ -43,12 +47,30 @@ def detect_duplicate_code(
         }
 
     # Fetch a limited sample of chunks directly from SQL (avoid loading entire table)
+    import fnmatch
+    pattern = str(file_pattern or "").strip().lower()
     sample_size = min(max_chunks, 100)
-    rows = duckdb_store.execute(
-        "SELECT chunk_id, file_path, start_line, end_line, content "
-        "FROM chunks WHERE LENGTH(content) > 20 "
-        f"ORDER BY random() LIMIT {int(sample_size)}"
-    ).fetchall()
+    if pattern:
+        # Filter by file_pattern using SQL LIKE for initial filtering, then fnmatch for precision
+        sql_pattern = pattern.replace("*", "%").replace("?", "_")
+        rows = duckdb_store.execute(
+            "SELECT chunk_id, file_path, start_line, end_line, content "
+            "FROM chunks WHERE LENGTH(content) > 20 "
+            f"AND lower(file_path) LIKE '{sql_pattern}' "
+            f"ORDER BY random() LIMIT {int(sample_size)}"
+        ).fetchall()
+        # Apply fnmatch for precise glob matching on normalized paths
+        rows = [
+            r for r in rows
+            if fnmatch.fnmatch(str(r[1] or "").replace("\\", "/").lower(), pattern)
+            or fnmatch.fnmatch(str(r[1] or "").replace("\\", "/").lower(), f"*/{pattern}")
+        ]
+    else:
+        rows = duckdb_store.execute(
+            "SELECT chunk_id, file_path, start_line, end_line, content "
+            "FROM chunks WHERE LENGTH(content) > 20 "
+            f"ORDER BY random() LIMIT {int(sample_size)}"
+        ).fetchall()
     if not rows:
         return {
             "status": "ok",

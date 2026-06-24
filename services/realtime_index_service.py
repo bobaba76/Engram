@@ -48,6 +48,7 @@ class PollingRealtimeIndexer:
         debounce_seconds: float = 1.0,
         status_interval_seconds: float = 30.0,
         log_callback: Callable[[str], None] | None = None,
+        on_reindex_complete: Callable[[], None] | None = None,
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.coder_root = coder_root.resolve()
@@ -55,6 +56,7 @@ class PollingRealtimeIndexer:
         self.debounce_seconds = max(float(debounce_seconds), 0.25)
         self.status_interval_seconds = max(float(status_interval_seconds), 5.0)
         self.log = log_callback or _default_log
+        self._on_reindex_complete = on_reindex_complete
         self._known: dict[str, int] = {}
         self._pending: set[str] = set()
         self._last_change_at: float | None = None
@@ -171,6 +173,11 @@ class PollingRealtimeIndexer:
                 self.log(f"incremental index failed with code {completed.returncode}")
             else:
                 self.log("incremental index completed")
+                if self._on_reindex_complete is not None:
+                    try:
+                        self._on_reindex_complete()
+                    except Exception:
+                        self.log("on_reindex_complete callback failed")
             self._pending.difference_update(pending_snapshot)
             self.stats.pending_changes = len(self._pending)
             self.stats.changed_paths = sorted(self._pending)[-25:]
