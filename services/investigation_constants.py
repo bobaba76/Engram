@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 LOCATION_TOKENS = {"where", "handled", "located", "defined", "implemented", "lives", "entrypoint", "entry", "owns", "owner"}
-FLOW_TOKENS = {"why", "flow", "path", "happen", "happens", "trigger", "sequence", "execution", "called", "calls"}
+FLOW_TOKENS = {"how", "why", "flow", "path", "happen", "happens", "trigger", "sequence", "execution", "called", "calls", "work", "works", "mechanism", "algorithm", "determine", "decide"}
 IMPACT_TOKENS = {"impact", "break", "breaks", "affected", "affects", "affect", "change", "changing", "depends", "dependents", "blast"}
 TEST_TOKENS = {"test", "tests", "verify", "coverage", "spec", "specs"}
 API_TOKENS = {"api", "route", "endpoint", "request", "response", "consumer", "handler"}

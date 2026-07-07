@@ -777,8 +777,14 @@ def list_communities(
     duckdb_store: DuckDBStore,
     *,
     limit: int = 20,
+    kuzu_store: KuzuStore | None = None,
 ) -> dict[str, object]:
-    """List detected communities from the most recent detection run."""
+    """List detected communities from the most recent detection run.
+
+    If no communities are persisted in DuckDB (e.g. detect_communities ran with
+    ``stored=False`` or was never called), falls back to on-demand detection
+    when a ``kuzu_store`` is provided so the caller always gets results.
+    """
     rows = duckdb_store.execute(
         """
         SELECT community_id, name, symbol_count, file_count, cohesion, top_kinds_json
@@ -798,15 +804,34 @@ def list_communities(
             "cohesion": float(row[4] or 0.0),
             "top_kinds": json.loads(str(row[5] or "[]")),
         })
+    if communities or kuzu_store is None:
+        return {
+            "status": "ok",
+            "communities": communities,
+            "community_count": len(communities),
+            "compact_summary": {
+                "community_count": len(communities),
+                "top_communities": [
+                    {"name": c["name"], "symbols": c["symbol_count"], "cohesion": c["cohesion"]}
+                    for c in communities[:8]
+                ],
+            },
+        }
+    # Fallback: no persisted communities — run on-demand detection.
+    logger.info("list_communities: no persisted communities, falling back to on-demand detection")
+    detection = detect_communities(duckdb_store, kuzu_store)
+    response_communities = detection.get("communities", []) if isinstance(detection, dict) else []
+    capped = response_communities[:limit]
     return {
         "status": "ok",
-        "communities": communities,
-        "community_count": len(communities),
+        "communities": capped,
+        "community_count": len(capped),
+        "source": "on_demand_fallback",
         "compact_summary": {
-            "community_count": len(communities),
+            "community_count": len(capped),
             "top_communities": [
-                {"name": c["name"], "symbols": c["symbol_count"], "cohesion": c["cohesion"]}
-                for c in communities[:8]
+                {"name": c.get("name", ""), "symbols": c.get("symbol_count", 0), "cohesion": c.get("cohesion", 0.0)}
+                for c in capped[:8]
             ],
         },
     }

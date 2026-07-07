@@ -383,6 +383,27 @@ def investigation_search_task(question: str, limit: int = 5) -> tuple[str, dict[
                             "task_source": "behavior_trace_seed",
                             "original_question": normalized_question,
                         }
+            # For broad questions, prefer a multi-word combination of symbol terms
+            # over a single-token generic seed (e.g. "Python indexing pipeline" over "Python").
+            # Skip combining when the candidate is a specific symbol-like term (camelCase,
+            # contains dots/slashes, or has mixed case) since those are good seeds on their own.
+            if bool(guardrails.get("broad_question")) and source == "symbol_term" and " " not in candidate:
+                _is_specific_symbol = (
+                    re.search(r"[a-z][A-Z]", candidate)  # camelCase (e.g. defaultView)
+                    or any(marker in candidate for marker in (".", "/", ":", "\\"))
+                )
+                if not _is_specific_symbol:
+                    symbol_values = query_rewrite.get("symbol_terms", [])
+                    if isinstance(symbol_values, list):
+                        combined = " ".join(str(v or "").strip() for v in symbol_values[:3] if str(v or "").strip())
+                        if combined and " " in combined and combined.lower() != candidate.lower() and not _is_weak_broad_seed(combined):
+                            return combined, {
+                                "intent": intent,
+                                "query_rewrite": query_rewrite,
+                                "guardrails": guardrails,
+                                "task_source": "combined_symbol_terms",
+                                "original_question": normalized_question,
+                            }
             task = candidate
             task_source = source
             return task, {
@@ -488,4 +509,5 @@ def _behavior_trace_features(question: str, query_rewrite: dict[str, object], li
             add_feature(" ".join(filtered_tokens[:4]))
     if normalized_question:
         add_feature(normalized_question)
+    return features[:limit]
     return features[:limit]

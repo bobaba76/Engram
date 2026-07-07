@@ -12,6 +12,7 @@ This file re-exports the public API and contains the main ``investigate_codebase
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -41,6 +42,8 @@ from services.investigation_discovery import (
 )
 from services.investigation_ranking import (
     _architecture_summary,
+    _boost_call_chain_files,
+    _call_chain_evidence,
     _classify_search_hits,
     _compact_hits,
     _data_flow_summary,
@@ -88,6 +91,7 @@ def investigate_codebase(
     question: str,
     search_payload: dict[str, object] | None = None,
     limit: int = 5,
+    verbose: bool = False,
 ) -> dict[str, object]:
     _t0 = time.monotonic()
     normalized_question = str(question or "").strip()
@@ -325,6 +329,70 @@ def investigate_codebase(
 
     resolution = resolve_tool_target(duckdb_store, repo_root, target=seed_target, limit=limit)
     resolved_target = str(resolution.get("resolved_target") or seed_target)
+    # Fallback: if the resolved target didn't match a real symbol but seed hits
+    # contain actual symbols, use the best seed hit as the resolved target.
+    # This is critical for flow-intent ("how") questions where we need a real
+    # symbol to traverse the call chain.
+    resolution_matches = resolution.get("matches", []) if isinstance(resolution, dict) else []
+    has_real_symbol = bool(resolution_matches) and any(
+        str(item.get("uid") or "").strip() for item in resolution_matches if isinstance(item, dict)
+    )
+    if not has_real_symbol:
+        # Build a list of candidate targets to try resolving, ordered by
+        # token overlap with the question so semantically closer symbols win.
+        primary_intent = str(intent.get("primary", "general") or "general")
+        question_tokens = {token for token in re.split(r"[^a-zA-Z0-9]+", normalized_question.lower()) if token and len(token) >= 3}
+        test_intent = primary_intent == "tests" or "tests" in (intent.get("secondary", []) if isinstance(intent.get("secondary", []), list) else [])
+        def _hit_relevance(hit: dict[str, object]) -> tuple[int, int]:
+            hit_target = str(hit.get("target") or "").lower()
+            if not hit_target:
+                return (0, 0)
+            split_target = re.sub(r"([a-z])([A-Z])", r"\1 \2", hit_target).replace("_", " ").lower()
+            target_tokens = {token for token in re.split(r"[^a-zA-Z0-9]+", split_target) if token}
+            token_overlap = len(question_tokens & target_tokens)
+            # Production-code bias: penalize test files for non-test-intent questions
+            hit_file = str(hit.get("file") or hit.get("file_path") or "").replace("\\", "/").lower()
+            is_test = any(marker in hit_file for marker in ("/tests/", "/test/", "/__tests__/")) or hit_file.startswith(("tests/", "test/", "__tests__/"))
+            stem = hit_file.rsplit("/", 1)[-1].rsplit(".", 1)[0] if hit_file else ""
+            is_test = is_test or stem.startswith("test_") or stem.endswith("_test") or stem.endswith("_tests") or stem.endswith("test") or stem.endswith("tests") or stem.endswith("spec") or stem.endswith("specs")
+            test_penalty = 0 if test_intent else (-1 if is_test else 0)
+            return (token_overlap, test_penalty)
+
+        # Collect candidates from seed hits and, for flow-intent questions,
+        # also from cheap symbol discovery (which may find symbols that the
+        # search missed due to the search_limit cap).
+        fallback_candidates: list[dict[str, object]] = list(seed_hits)
+        if primary_intent == "flow":
+            flow_discovered = cheap_symbol_discovery(duckdb_store, search_task, query_rewrite, limit=5)
+            for sym in flow_discovered:
+                if isinstance(sym, dict) and sym not in fallback_candidates:
+                    fallback_candidates.append(sym)
+            # Also try discovery with multi-word combinations from the question's
+            # core terms, since the search_task may have narrowed away the
+            # terms that actually match real symbols (e.g. "dead code" → detect_dead_code).
+            core_terms = query_rewrite.get("core_terms", [])
+            if isinstance(core_terms, list) and len(core_terms) >= 2:
+                # Try pairs of core terms that look like they could form a symbol name
+                for i in range(len(core_terms)):
+                    for j in range(i + 1, min(i + 3, len(core_terms))):
+                        pair = f"{core_terms[i]} {core_terms[j]}"
+                        pair_rewrite = {"core_terms": core_terms, "symbol_terms": [core_terms[i], core_terms[j]], "route_terms": [], "file_terms": [], "search_seeds": [pair], "rewritten_queries": [pair], "normalized_question": normalized_question}
+                        pair_discovered = cheap_symbol_discovery(duckdb_store, pair, pair_rewrite, limit=3)
+                        for sym in pair_discovered:
+                            if isinstance(sym, dict) and sym not in fallback_candidates:
+                                fallback_candidates.append(sym)
+
+        sorted_candidates = sorted(fallback_candidates, key=_hit_relevance, reverse=True)
+        for hit in sorted_candidates:
+            hit_target = str(hit.get("target") or hit.get("qualified_name") or "").strip()
+            if hit_target and hit_target != resolved_target and not _is_generic_target(hit_target):
+                retry_resolution = resolve_tool_target(duckdb_store, repo_root, target=hit_target, limit=limit)
+                retry_matches = retry_resolution.get("matches", []) if isinstance(retry_resolution, dict) else []
+                if retry_matches and any(str(item.get("uid") or "").strip() for item in retry_matches if isinstance(item, dict)):
+                    resolution = retry_resolution
+                    resolved_target = str(retry_resolution.get("resolved_target") or hit_target)
+                    warnings.append(f"Resolved target was replaced with search hit '{resolved_target}' for deeper analysis.")
+                    break
     app_target, app_target_source = _app_context_target(normalized_question, resolved_target, query_rewrite)
     if bool(guardrails.get("broad_question")) and _is_generic_target(resolved_target) and app_target_source in {"file_term", "route_term", "symbol_term"}:
         narrowed_target = str(app_target or "").strip()
@@ -337,7 +405,7 @@ def investigate_codebase(
                 if _is_generic_target(resolved_target):
                     resolved_target = narrowed_target
             warnings.append(f"Generic target resolution was replaced with narrowed term '{narrowed_target}'.")
-    search_hits = _prioritize_search_hits(search_hits, seed_target, resolved_target)
+    search_hits = _prioritize_search_hits(search_hits, seed_target, resolved_target, intent=intent)
     seed_hits, expanded_hits = _classify_search_hits(search_hits)
     app = app_context(repo_root, duckdb_store, kuzu_store, target=app_target, limit=6)
     source_context = get_source_context(duckdb_store, resolved_target, limit=3, repo_root=repo_root)
@@ -425,6 +493,43 @@ def investigate_codebase(
         ranked_files=ranked_files,
         intent=intent,
     )
+
+    # Call-chain traversal for flow-intent questions ("how does X work?")
+    call_chain_evidence: list[dict[str, object]] = []
+    primary_intent = str(intent.get("primary", "general") or "general")
+    if primary_intent == "flow" and isinstance(unified, dict):
+        callees = unified.get("callees", [])
+        if isinstance(callees, list) and callees:
+            snippets_by_callee: dict[str, list[dict[str, object]]] = {}
+            seen_callees: set[str] = set()
+            for edge in callees:
+                if not isinstance(edge, dict):
+                    continue
+                callee_name = str(edge.get("target") or "").strip()
+                if not callee_name or callee_name in seen_callees:
+                    continue
+                relation = str(edge.get("relation") or "").upper()
+                if relation not in {"CALLS", "REFERENCES"}:
+                    continue
+                if callee_name.startswith("property:"):
+                    continue
+                seen_callees.add(callee_name)
+                try:
+                    callee_source = get_source_context(duckdb_store, callee_name, limit=1, repo_root=repo_root)
+                    callee_snippets = callee_source.get("compact_results", [])
+                    if isinstance(callee_snippets, list):
+                        snippets_by_callee[callee_name] = [item for item in callee_snippets if isinstance(item, dict)]
+                except Exception:
+                    logger.debug("investigation: source context failed for callee %r", callee_name, exc_info=True)
+            call_chain_evidence = _call_chain_evidence(unified, snippets_by_callee, max_items=5)
+            if call_chain_evidence:
+                evidence.extend(call_chain_evidence)
+                ranked_files = _boost_call_chain_files(ranked_files, call_chain_evidence)
+                # Re-sort by score after boosting
+                ranked_files.sort(key=lambda item: float(item.get("score", 0.0) or 0.0), reverse=True)
+                callee_names = [str(item.get("target") or "") for item in call_chain_evidence[:3]]
+                warnings.append(f"Call-chain traversal surfaced implementation functions: {', '.join(callee_names)}.")
+
     if len(evidence) > evidence_limit:
         evidence = evidence[:evidence_limit]
         warnings.append("Evidence was truncated to keep the result compact.")
@@ -440,6 +545,7 @@ def investigate_codebase(
         intent,
         graph_signal,
         exploratory_groups=exploratory_groups,
+        call_chain_evidence=call_chain_evidence,
     )
     if not evidence and discovered_symbols:
         discovered_names = [
@@ -472,7 +578,7 @@ def investigate_codebase(
     guidance_summary = _guidance_summary(profile)
     change_guidance = _change_guidance(duckdb_store, resolved_target, ranked_files, unified_summary, app_summary)
 
-    return {
+    result = {
         "question": normalized_question,
         "target": resolved_target,
         "intent": intent,
@@ -495,6 +601,7 @@ def investigate_codebase(
             "seed_hits": seed_hits,
             "expanded_hits": expanded_hits,
             "source_snippets": snippets_list[:6],
+            "call_chain": call_chain_evidence,
         },
         "retrieval_diagnostics": diagnostics,
         "ranked_files": ranked_files,
@@ -509,10 +616,6 @@ def investigate_codebase(
         "open_questions": open_questions,
         "next_tools": next_tools,
         "resolution": resolution,
-        "search": search_payload,
-        "source_context": source_context,
-        "unified_context": unified,
-        "app_context": app,
         "answer_outline": [
             f"Primary target: {resolved_target}",
             f"Key files: {', '.join(key_files[:6])}" if key_files else "Key files: no strong file candidates",
@@ -560,4 +663,18 @@ def investigate_codebase(
             "graph_signal": graph_signal,
         },
     }
+    # Include raw sub-payloads only in verbose mode — these are large
+    # (search, source_context, unified_context, app_context are each full
+    # tool payloads) and bury the synthesized answer in noise.
+    if verbose:
+        result["search"] = search_payload
+        result["source_context"] = source_context
+        result["unified_context"] = unified
+        result["app_context"] = app
+    else:
+        result["verbose_note"] = (
+            "Raw sub-payloads (search, source_context, unified_context, app_context) "
+            "were omitted to keep the result compact. Pass verbose=true to include them."
+        )
+    return result
     logger.debug("investigate_codebase: full path completed in %.1fs", time.monotonic() - _t0)

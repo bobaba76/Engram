@@ -113,8 +113,8 @@ class KuzuStore:
             result = self._safe_execute("CALL show_tables() RETURN *")
             rows = _safe_get_all(result)
             for row in rows:
-                if row and len(row) >= 1:
-                    table_name = str(row[0]).upper()
+                if row and len(row) >= 2:
+                    table_name = str(row[1]).upper()
                     available.add(table_name)
         except RuntimeError:
             # Fallback: probe each known relation

@@ -1034,7 +1034,7 @@ def test_detect_changes_reports_affected_processes(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr("services.detect_changes_service._diff_output", lambda repo_root, scope="unstaged", base_ref=None: diff_text)
     monkeypatch.setattr("services.detect_changes_service._run_git", lambda repo_root, args: ".git")
     monkeypatch.setattr(
-        "services.detect_changes_service.trace_execution_flows",
+        "services.process_service.trace_execution_flows",
         lambda duckdb_store, kuzu_store, target, file_path=None, kind=None, symbol_uid=None, max_depth=4, max_flows=4, changed_symbols=None: {
             "flows": [
                 {
@@ -1068,6 +1068,9 @@ def test_detect_changes_reports_affected_processes(monkeypatch, tmp_path: Path) 
                     "end_line": 3,
                 }
             ]
+
+        def fetch_process_clusters_for_symbol(self, target, limit=4):
+            return []
 
     payload = detect_changes(tmp_path, _ProcessDuck(), _Kuzu(), scope="unstaged")
 

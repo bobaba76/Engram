@@ -282,6 +282,7 @@ def _synthesize_answer(
     intent: dict[str, object],
     graph_signal: dict[str, object],
     exploratory_groups: dict[str, list[str]] | None = None,
+    call_chain_evidence: list[dict[str, object]] | None = None,
 ) -> tuple[str, str, list[str]]:
     key_files = [str(item.get("file", "")) for item in ranked_files if str(item.get("file", "")).strip()]
     caller_count = int(architecture.get("caller_count", 0) or 0)
@@ -317,6 +318,11 @@ def _synthesize_answer(
     graph_text = f" Graph context shows {caller_count} callers and {callee_count} callees." if caller_count or callee_count else ""
     file_text = f" The strongest files are {', '.join(key_files[:4])}." if key_files else ""
     evidence_text = f" Primary evidence came from {len(seed_hits)} seed hits and {len(expanded_hits)} expanded hits."
+    call_chain_text = ""
+    if call_chain_evidence and primary_intent == "flow":
+        callee_names = [str(item.get("target") or "") for item in call_chain_evidence[:4] if item.get("target")]
+        if callee_names:
+            call_chain_text = f" Call-chain traversal from {resolved_target} found implementation functions: {', '.join(callee_names)}."
     indirect_frontend_text = ""
     if bool(graph_signal.get("has_indirect_frontend_path")):
         frontend_files = graph_signal.get("frontend_graph_files", []) if isinstance(graph_signal.get("frontend_graph_files", []), list) else []
@@ -348,7 +354,7 @@ def _synthesize_answer(
     else:
         answer = (
             f"For '{question}', the best current target is {resolved_target}."
-            f"{intent_text}{file_text}{graph_text}{route_text}{evidence_text}{indirect_frontend_text}{diagnostics_suffix}"
+            f"{intent_text}{file_text}{graph_text}{call_chain_text}{route_text}{evidence_text}{indirect_frontend_text}{diagnostics_suffix}"
             " Use the evidence list for exact files and line ranges."
         )
     return answer, confidence, open_questions

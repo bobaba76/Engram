@@ -73,8 +73,7 @@ def test_pipeline_scan_to_graph(synthetic_repo: Path, stores) -> None:
     # 2. Parse (symbol extraction)
     symbols_by_file: dict[str, list[SymbolRecord]] = {}
     for file_record in files:
-        source = (synthetic_repo / file_record.path).read_text(encoding="utf-8")
-        symbols, _status = extract_symbols_with_status(file_record, source)
+        symbols, _status = extract_symbols_with_status(synthetic_repo / file_record.path)
         symbols_by_file[file_record.path] = symbols
     assert len(symbols_by_file["app.py"]) >= 2
     assert any(s.name == "hello" for s in symbols_by_file["app.py"])
@@ -101,9 +100,11 @@ def test_pipeline_scan_to_graph(synthetic_repo: Path, stores) -> None:
         provider_name="local",
     )
     assert embed_result["chunk_count"] == len(all_chunks)
-    # Fallback embeddings are 32-dim; verify they were inserted
-    search_results = vector_store.search("hello", limit=5, embedding=embed_result.get("new_embedding_count") and [0.0] * 32)
-    # Search may return empty if table schema doesn't match, but should not error
+    # Verify embeddings were inserted — search without a query embedding returns
+    # empty list (no vector search), but confirms the table exists and is callable.
+    # Passing a dummy embedding would fail when the real model is available
+    # (dimension mismatch), so we just verify the search API doesn't error.
+    search_results = vector_store.search("hello", limit=5)
     assert isinstance(search_results, list)
 
     # 5. Graph
@@ -117,8 +118,7 @@ def test_pipeline_incremental_chunk_diff(synthetic_repo: Path, stores) -> None:
     """Verify that re-chunking unchanged files produces identical chunk IDs."""
     files = scan_repo(synthetic_repo, excluded_dirs=())
     file_record = files[0]
-    source = (synthetic_repo / file_record.path).read_text(encoding="utf-8")
-    symbols, _ = extract_symbols_with_status(file_record, source)
+    symbols, _ = extract_symbols_with_status(synthetic_repo / file_record.path)
     chunks_v1 = build_chunks(synthetic_repo, file_record.path, symbols)
     chunks_v2 = build_chunks(synthetic_repo, file_record.path, symbols)
 
@@ -133,8 +133,7 @@ def test_pipeline_embedding_cache_reuse(synthetic_repo: Path, stores) -> None:
     files = scan_repo(synthetic_repo, excluded_dirs=())
     all_chunks = []
     for file_record in files:
-        source = (synthetic_repo / file_record.path).read_text(encoding="utf-8")
-        symbols, _ = extract_symbols_with_status(file_record, source)
+        symbols, _ = extract_symbols_with_status(synthetic_repo / file_record.path)
         chunks = build_chunks(synthetic_repo, file_record.path, symbols)
         all_chunks.extend(chunks)
 

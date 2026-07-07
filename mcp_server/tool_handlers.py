@@ -193,7 +193,12 @@ def impact_analysis_tool(
     )
 
 
-def graph_query_tool(session: MCPSession, query: str, limit: int = 100, repo: str = "") -> dict[str, object]:
+def graph_query_tool(session: MCPSession, query: str = "", limit: int = 100, target: str = "", repo: str = "") -> dict[str, object]:
+    # 'target' is accepted as an alias for 'query' for naming consistency.
+    if not query and target:
+        query = target
+    if not query:
+        raise ValueError("query (or target) is required")
     return execute_graph_query(session.get_kuzu_store(repo), query=query, limit=limit)
 
 
@@ -233,7 +238,12 @@ def shape_check_tool(session: MCPSession, route: str = "", repo: str = "") -> di
     return shape_check(context["repo_root"], context["duckdb_store"], route=route, kuzu_store=session.lazy_kuzu(repo))
 
 
-def field_impact_tool(session: MCPSession, field: str, route: str = "", repo: str = "") -> dict[str, object]:
+def field_impact_tool(session: MCPSession, field: str = "", route: str = "", target: str = "", repo: str = "") -> dict[str, object]:
+    # 'target' is accepted as an alias for 'field' for naming consistency.
+    if not field and target:
+        field = target
+    if not field:
+        raise ValueError("field (or target) is required")
     context = session.get_repo_context(repo)
     return field_impact(
         context["repo_root"],
@@ -327,7 +337,14 @@ def symbol_process_participation_tool(
     )
 
 
-def preview_rename_tool(session: MCPSession, symbol_name: str, new_name: str, file_path: str = "", symbol_uid: str = "", repo: str = "") -> dict[str, object]:
+def preview_rename_tool(session: MCPSession, symbol_name: str = "", new_name: str = "", file_path: str = "", symbol_uid: str = "", target: str = "", repo: str = "") -> dict[str, object]:
+    # 'target' is accepted as an alias for 'symbol_name' for naming consistency.
+    if not symbol_name and target:
+        symbol_name = target
+    if not symbol_name:
+        raise ValueError("symbol_name (or target) is required")
+    if not new_name:
+        raise ValueError("new_name is required")
     context = session.get_repo_context(repo)
     return preview_rename(
         context["repo_root"],
@@ -340,7 +357,7 @@ def preview_rename_tool(session: MCPSession, symbol_name: str, new_name: str, fi
     )
 
 
-def semantic_code_search_tool(session: MCPSession, task: str, limit: int = 5, repo: str = "") -> dict[str, object]:
+def semantic_code_search_tool(session: MCPSession, query: str, limit: int = 5, repo: str = "") -> dict[str, object]:
     context = session.get_repo_context(repo)
     model_name = context["settings"].embedding_model
     prewarm_jina_model(model_name, device=context["settings"].embedding_device)
@@ -348,7 +365,7 @@ def semantic_code_search_tool(session: MCPSession, task: str, limit: int = 5, re
     load_error = get_model_load_error(model_name) if not model_ready else ""
     result = semantic_code_search(
         context["vector_store"],
-        task=task,
+        task=query,
         model_name=model_name,
         duckdb_store=context["duckdb_store"],
         kuzu_store=session.get_kuzu_store(repo),
@@ -373,7 +390,7 @@ def semantic_code_search_tool(session: MCPSession, task: str, limit: int = 5, re
     return result
 
 
-def investigate_codebase_tool(session: MCPSession, question: str, limit: int = 5, repo: str = "") -> dict[str, object]:
+def investigate_codebase_tool(session: MCPSession, question: str, limit: int = 5, verbose: bool = False, repo: str = "") -> dict[str, object]:
     context = session.get_repo_context(repo)
     prewarm_jina_model(context["settings"].embedding_model, device=context["settings"].embedding_device)
     search_task, search_plan = investigation_search_task(question, limit=limit)
@@ -401,6 +418,7 @@ def investigate_codebase_tool(session: MCPSession, question: str, limit: int = 5
                 "investigation_search_plan": search_plan,
             },
             limit=limit,
+            verbose=verbose,
         )
     search_limit = int(guardrails.get("search_limit", limit) or limit)
     lexical_terms = broad_lexical_search_terms(search_task, search_plan.get("query_rewrite", {}), limit=4) if safe_first_pass else [search_task]
@@ -472,6 +490,7 @@ def investigate_codebase_tool(session: MCPSession, question: str, limit: int = 5
         question=question,
         search_payload=search_payload,
         limit=limit,
+        verbose=verbose,
     )
 
 
@@ -630,7 +649,12 @@ def get_symbol_context_tool(session: MCPSession, target: str, repo: str = "") ->
     return get_symbol_context(duckdb_store=context["duckdb_store"], kuzu_store=session.get_kuzu_store(repo), target=target)
 
 
-def find_symbols_tool(session: MCPSession, query: str, limit: int = 10, file_path: str = "", kind: str = "", symbol_uid: str = "", repo: str = "") -> dict[str, object]:
+def find_symbols_tool(session: MCPSession, query: str = "", limit: int = 10, file_path: str = "", kind: str = "", symbol_uid: str = "", target: str = "", repo: str = "") -> dict[str, object]:
+    # 'target' is accepted as an alias for 'query' for naming consistency.
+    if not query and target:
+        query = target
+    if not query:
+        raise ValueError("query (or target) is required")
     context = session.get_repo_context(repo)
     return find_symbols(context["duckdb_store"], query=query, limit=limit, file_path=file_path or None, kind=kind or None, symbol_uid=symbol_uid or None)
 
@@ -645,12 +669,18 @@ def get_callers_and_callees_tool(session: MCPSession, target: str, view: str = "
 
 def get_file_dependencies_tool(
     session: MCPSession,
-    file_path: str,
+    file_path: str = "",
     relation: str = "",
     limit: int = 50,
     view: str = "",
+    target: str = "",
     repo: str = "",
 ) -> dict[str, object]:
+    # 'target' is accepted as an alias for 'file_path' for naming consistency.
+    if not file_path and target:
+        file_path = target
+    if not file_path:
+        raise ValueError("file_path (or target) is required")
     context = session.get_repo_context(repo)
     result = get_file_dependencies(
         context["duckdb_store"],
@@ -710,13 +740,20 @@ def check_stale_index_tool(session: MCPSession, repo: str = "") -> dict[str, obj
 
 def trace_data_flow_tool(
     session: MCPSession,
-    field: str,
+    field: str = "",
     target: str = "",
     max_depth: int = 3,
     limit: int = 30,
     view: str = "",
     repo: str = "",
 ) -> dict[str, object]:
+    # 'target' is accepted as an alias for 'field' for naming consistency.
+    # If both are provided, 'field' takes precedence; 'target' is used as the
+    # seed symbol for the data flow trace.
+    if not field and target:
+        field = target
+    if not field:
+        raise ValueError("field (or target) is required")
     context = session.get_repo_context(repo)
     result = trace_data_flow(
         context["duckdb_store"],
@@ -870,7 +907,7 @@ def list_communities_tool(
     from services.community_detection_service import list_communities
 
     context = session.get_repo_context(repo)
-    return list_communities(context["duckdb_store"], limit=limit)
+    return list_communities(context["duckdb_store"], limit=limit, kuzu_store=session.get_kuzu_store(repo))
 
 
 def get_community_detail_tool(
@@ -1009,9 +1046,15 @@ def realtime_indexing_status_tool(session: MCPSession) -> dict[str, object]:
 
 def explain_error_tool(
     session: MCPSession,
-    stack_trace: str,
+    stack_trace: str = "",
+    target: str = "",
     repo: str = "",
 ) -> dict[str, object]:
+    # 'target' is accepted as an alias for 'stack_trace' for naming consistency.
+    if not stack_trace and target:
+        stack_trace = target
+    if not stack_trace:
+        raise ValueError("stack_trace (or target) is required")
     from services.explain_error_service import explain_error
 
     context = session.get_repo_context(repo)
@@ -1032,8 +1075,13 @@ def diff_context_tool(
     base_ref: str = "",
     changed_files: list[str] | None = None,
     max_snippets: int = 20,
+    target: str = "",
     repo: str = "",
 ) -> dict[str, object]:
+    # 'target' is accepted as an alias for a single changed file path.
+    # If provided and changed_files is None, it is treated as a one-element list.
+    if changed_files is None and target:
+        changed_files = [target]
     from services.diff_context_service import diff_context
 
     context = session.get_repo_context(repo)
@@ -1100,7 +1148,7 @@ TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
     ("reindex_status", reindex_status_tool, "Poll a background reindex job started by reindex_project."),
     ("unified_context", unified_context_tool, "Resolve an exact or near-exact target and return matches, callers/callees, dependencies, and graph neighborhood. Prefer after resolve_target for broad names."),
     ("impact_analysis", impact_analysis_tool, "Estimate upstream or downstream impact for a symbol target. Prefer exact symbols or resolved targets; broad inputs may return partial results with warnings."),
-    ("graph_query", graph_query_tool, "Execute a read-only graph query against the indexed Kuzu graph."),
+    ("graph_query", graph_query_tool, "Execute a read-only Cypher query against the indexed KuzuDB graph. Node tables: File(path STRING), Symbol(qualified_name STRING, file_path STRING, kind STRING, start_line INT64, end_line INT64). Relationships: DEFINES(File->Symbol), CALLS, IMPORTS, REFERENCES, DECLARES, ASSOCIATED_WITH, ACCESSES, INCLUDES, INJECTS, USES_SERVICE, FETCHES, READS_FIELD, HAS_METHOD, HAS_PROPERTY, EXTENDS, IMPLEMENTS, METHOD_OVERRIDES, METHOD_IMPLEMENTS (all Symbol->Symbol). Pass query='schema' to get full schema docs and example queries. Only read-only MATCH queries are allowed."),
     ("detect_changes", detect_changes_tool, "Analyze changed files and related graph impact for the working tree or git ref."),
     ("route_map", route_map_tool, "Map API/frontend route strings to likely files and symbols."),
     ("api_impact", api_impact_tool, "Estimate code impact for an API route."),
@@ -1112,8 +1160,8 @@ TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
     ("list_processes", list_processes_tool, "List inferred process clusters from the indexed codebase."),
     ("symbol_process_participation", symbol_process_participation_tool, "Show process clusters involving a target symbol."),
     ("preview_rename", preview_rename_tool, "Preview references that may need edits for a symbol rename."),
-    ("semantic_code_search", semantic_code_search_tool, "Search indexed chunks semantically for a natural language task. Use when you do not yet have an exact symbol or file target."),
-    ("investigate_codebase", investigate_codebase_tool, "Safely investigate a natural-language codebase question using search, symbol resolution, snippets, graph, and app context. Broad questions may be narrowed automatically."),
+    ("semantic_code_search", semantic_code_search_tool, "Search indexed chunks semantically for a natural language query. Use when you do not yet have an exact symbol or file target."),
+    ("investigate_codebase", investigate_codebase_tool, "Investigate a natural-language codebase question and return a synthesized answer with evidence, ranked files, and next steps. By default omits raw sub-payloads (search, source_context, unified_context, app_context) to keep output compact; pass verbose=true to include them. Broad questions may be narrowed automatically."),
     ("change_impact_report", change_impact_report_tool, "Safely summarize git changes, likely impact, app context, and recommended tests for the current worktree or a base ref."),
     ("find_tests_for_target", find_tests_for_target_tool, "Find likely tests for a symbol, file, or feature target."),
     ("suggest_tests_for_change", suggest_tests_for_change_tool, "Suggest tests for current git changes."),

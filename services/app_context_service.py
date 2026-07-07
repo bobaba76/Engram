@@ -15,8 +15,7 @@ if TYPE_CHECKING:
 
 
 TABLE_PATTERN = re.compile(
-    r"\b(?:FROM|JOIN|UPDATE|INTO|TABLE|REFERENCES)\s+[`\"]?(?P<table>[A-Za-z_][A-Za-z0-9_\.]*)[`\"]?",
-    re.IGNORECASE,
+    r"\b(?:FROM|JOIN|UPDATE|INTO|TABLE|REFERENCES)\s+(?!.*\bimport\b)[`\"]?(?P<table>[A-Za-z_][A-Za-z0-9_\.]*)[`\"]?",
 )
 COMPONENT_FILE_HINTS = ("/components/", "/pages/", "/views/", "/screens/")
 REPOSITORY_FILE_HINTS = ("/repositories/", "/repository/", "/models/", "/database", "/db_")

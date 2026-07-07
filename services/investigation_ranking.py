@@ -165,11 +165,39 @@ def _is_exploratory_intent(intent: dict[str, object]) -> bool:
     return primary in {"ui_ownership", "feature_exploration"}
 
 
-def _prioritize_search_hits(search_hits: list[dict[str, object]], seed_target: str, resolved_target: str) -> list[dict[str, object]]:
+def _is_test_file(file_path: str) -> bool:
+    normalized = str(file_path or "").replace("\\", "/").lower()
+    if not normalized:
+        return False
+    # Directory-based test paths
+    if "/tests/" in normalized or "/test/" in normalized or "/__tests__/" in normalized:
+        return True
+    if normalized.startswith(("tests/", "test/", "__tests__/")):
+        return True
+    # File-name patterns
+    stem = normalized.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    return stem.startswith("test_") or stem.endswith("_test") or stem.endswith("_tests") or stem.endswith("test") or stem.endswith("tests") or stem.endswith("spec") or stem.endswith("specs")
+
+
+def _is_test_intent(intent: dict[str, object] | None) -> bool:
+    if not intent:
+        return False
+    primary = str(intent.get("primary", "general") or "general")
+    if primary == "tests":
+        return True
+    secondary = intent.get("secondary", [])
+    if isinstance(secondary, list) and "tests" in secondary:
+        return True
+    return False
+
+
+def _prioritize_search_hits(search_hits: list[dict[str, object]], seed_target: str, resolved_target: str, intent: dict[str, object] | None = None) -> list[dict[str, object]]:
+    test_intent = _is_test_intent(intent)
     return sorted(
         search_hits,
         key=lambda item: (
             _target_affinity_score(item, seed_target, resolved_target),
+            0 if test_intent else (-1 if _is_test_file(str(item.get("file") or item.get("file_path") or "")) else 0),
             float(item.get("score", 0.0) or 0.0),
             int(bool(not _is_expanded_hit(item))),
         ),
@@ -366,6 +394,17 @@ def _file_relevance(
                 item["score"] = float(item.get("score", 0.0) or 0.0) - 0.8
                 if isinstance(reasons, list) and "backend mismatch penalty: weak endpoint/service fit for this prompt" not in reasons:
                     reasons.append("backend mismatch penalty: weak endpoint/service fit for this prompt")
+
+    # Production-code bias: penalize test files for non-test-intent questions
+    # so that production implementations outrank test functions with token overlap.
+    if not _is_test_intent(intent):
+        for item in file_map.values():
+            file_path = str(item.get("file", "") or "")
+            if _is_test_file(file_path):
+                item["score"] = float(item.get("score", 0.0) or 0.0) - 2.0
+                reasons = item.get("reasons", [])
+                if isinstance(reasons, list) and "production-code bias: test file penalized for non-test question" not in reasons:
+                    reasons.append("production-code bias: test file penalized for non-test question")
 
     ranked = sorted(
         file_map.values(),
@@ -572,3 +611,80 @@ def _evidence_items(
             continue
         evidence.append({"source": "app_context", "file": file_path, "reason": "app-level related file"})
     return evidence[:12]
+
+
+def _call_chain_evidence(
+    unified: dict[str, object],
+    snippets_by_callee: dict[str, list[dict[str, object]]],
+    max_items: int = 5,
+) -> list[dict[str, object]]:
+    """Build evidence items from call-chain traversal for flow-intent questions.
+
+    ``unified`` is the unified_context payload with a ``callees`` list.
+    ``snippets_by_callee`` maps callee qualified_name → source context snippets.
+    """
+    callees = unified.get("callees", []) if isinstance(unified, dict) else []
+    if not isinstance(callees, list):
+        return []
+    evidence: list[dict[str, object]] = []
+    seen_targets: set[str] = set()
+    for edge in callees:
+        if not isinstance(edge, dict):
+            continue
+        callee_name = str(edge.get("target") or "").strip()
+        if not callee_name or callee_name in seen_targets:
+            continue
+        # Skip property/method accesses — they're noise for "how" questions
+        relation = str(edge.get("relation") or "").upper()
+        if relation not in {"CALLS", "REFERENCES"}:
+            continue
+        if callee_name.startswith("property:"):
+            continue
+        seen_targets.add(callee_name)
+        snippets = snippets_by_callee.get(callee_name, [])
+        if snippets:
+            snippet = snippets[0]
+            evidence.append({
+                "source": "call_chain",
+                "target": callee_name,
+                "file": snippet.get("file") or snippet.get("file_path"),
+                "lines": snippet.get("lines"),
+                "reason": f"call chain: {edge.get('source', '')} {relation} {callee_name}",
+            })
+        else:
+            evidence.append({
+                "source": "call_chain",
+                "target": callee_name,
+                "reason": f"call chain: {edge.get('source', '')} {relation} {callee_name}",
+            })
+        if len(evidence) >= max_items:
+            break
+    return evidence
+
+
+def _boost_call_chain_files(
+    ranked_files: list[dict[str, object]],
+    call_chain_evidence: list[dict[str, object]],
+    boost: float = 1.2,
+) -> list[dict[str, object]]:
+    """Boost files that contain call-chain callees in the ranked files list."""
+    if not call_chain_evidence:
+        return ranked_files
+    callee_files: dict[str, str] = {}
+    for item in call_chain_evidence:
+        file_path = str(item.get("file") or "").strip()
+        target = str(item.get("target") or "").strip()
+        if file_path and target:
+            callee_files[file_path] = target
+    if not callee_files:
+        return ranked_files
+    for entry in ranked_files:
+        file_path = str(entry.get("file") or "").strip()
+        if file_path in callee_files:
+            entry["score"] = float(entry.get("score", 0.0) or 0.0) + boost
+            reasons = entry.get("reasons", [])
+            if isinstance(reasons, list):
+                reason = f"call chain callee: {callee_files[file_path]}"
+                if reason not in reasons:
+                    reasons.append(reason)
+    return ranked_files

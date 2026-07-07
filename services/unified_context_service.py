@@ -88,6 +88,17 @@ def get_unified_context(
         max_edges=24,
         suppress_common_hubs=True,
     )
+    raw_categorized = callers_and_callees.get("categorized_references", {})
+    # Filter out empty relation categories to reduce output noise
+    filtered_categorized = {
+        rel: payload for rel, payload in raw_categorized.items()
+        if isinstance(payload, dict) and (payload.get("incoming_count", 0) or payload.get("outgoing_count", 0))
+    } if isinstance(raw_categorized, dict) else raw_categorized
+    raw_related = callers_and_callees.get("related_symbols_by_relation", {})
+    filtered_related = {
+        rel: symbols for rel, symbols in raw_related.items()
+        if isinstance(symbols, list) and len(symbols) > 0
+    } if isinstance(raw_related, dict) else raw_related
     return {
         "target": target,
         "status": "ambiguous" if ambiguous else "found",
@@ -97,8 +108,8 @@ def get_unified_context(
         "matches": top_matches,
         "callers": callers_and_callees.get("callers", []),
         "callees": callers_and_callees.get("callees", []),
-        "categorized_references": callers_and_callees.get("categorized_references", {}),
-        "related_symbols_by_relation": callers_and_callees.get("related_symbols_by_relation", {}),
+        "categorized_references": filtered_categorized,
+        "related_symbols_by_relation": filtered_related,
         "relation_counts": callers_and_callees.get("relation_counts", {}),
         "dependencies": dependencies,
         "neighborhood": neighborhood,

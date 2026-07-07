@@ -47,6 +47,11 @@ class MCPServer:
                 return await asyncio.to_thread(_run)
 
             wrapped_handler.__signature__ = handler_signature
+            # FastMCP uses __doc__ as the tool description; @wraps copies the
+            # handler's (empty) docstring, so explicitly set it from the
+            # description passed to register_tool.
+            if description:
+                wrapped_handler.__doc__ = description
 
             self._fastmcp.tool(name=name)(wrapped_handler)
 

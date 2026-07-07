@@ -2,6 +2,34 @@ from storage.kuzu_store import KuzuStore
 from services.risk_profiles import path_risk_hints
 
 RAW_EDGE_LIMIT = 80
+_COLLAPSE_THRESHOLD = 5  # collapse when 5+ edges share the same (relation, source_file)
+
+
+def _collapse_repetitive_inbound(edges: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Collapse repetitive inbound edges of the same relation type.
+
+    When many symbols all import/reference the same target via the same relation
+    (e.g. 60 tool handlers all IMPORTS detect_dead_code), replace them with a
+    single summary edge to reduce noise.
+    """
+    groups: dict[str, list[dict[str, object]]] = {}
+    for edge in edges:
+        relation = str(edge.get("relation", "") or "")
+        groups.setdefault(relation, []).append(edge)
+    result: list[dict[str, object]] = []
+    for relation, group in groups.items():
+        if len(group) >= _COLLAPSE_THRESHOLD:
+            result.append({
+                "source": f"{len(group)} symbols",
+                "relation": relation,
+                "target": str(group[0].get("target", "") or ""),
+                "collapsed": True,
+                "collapsed_count": len(group),
+                "collapsed_sources": [str(e.get("source", "") or "") for e in group[:8]],
+            })
+        else:
+            result.extend(group)
+    return result
 
 
 def _distinct_nodes(edges: list[dict[str, object]], key: str, limit: int = 8) -> list[str]:
@@ -127,7 +155,8 @@ def _native_header_blast_radius(kuzu_store: KuzuStore, target: str) -> dict[str,
 
 
 def get_dependencies(kuzu_store: KuzuStore, target: str) -> dict[str, object]:
-    inbound = kuzu_store.edges_for_target(target)
+    raw_inbound = kuzu_store.edges_for_target(target)
+    inbound = _collapse_repetitive_inbound(raw_inbound)
     outbound = kuzu_store.edges_for_source(target)
     defines = kuzu_store.edges_for_source(target, relation="DEFINES")
     imports = kuzu_store.edges_for_source(target, relation="IMPORTS")

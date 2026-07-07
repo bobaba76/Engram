@@ -17,7 +17,7 @@ _ENTRY_POINT_PATTERNS = (
     "setup", "create_app", "handler", "lambda_handler", "cli",
 )
 
-_ENTRY_POINT_KINDS = {"module", "exports", "entry_point", "test_file"}
+_ENTRY_POINT_KINDS = {"module", "exports", "entry_point", "test_file", "component"}
 
 # Regex patterns for detecting route handlers and Pydantic models in chunk content.
 # These cover FastAPI, Flask, Django, and Express-style decorators.
@@ -38,6 +38,28 @@ _PYDANTIC_MODEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Regex patterns for detecting JSX prop usage in React/TSX files.
+# Matches patterns like:  onClick={handleClick}  onChange={setVideoSrc}
+#   onUpload={handleFileUpload}  render={renderRow}  component={MyComponent}
+# Also matches bare identifier references inside JSX expression containers
+#   that are not function calls (e.g. {someValue} or {setXxx}).
+_JSX_PROP_VALUE_RE = re.compile(
+    r"=\s*\{\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\}",
+)
+# React hooks and common React component patterns that should be treated as
+# entry points (they are called by React itself, not by explicit CALLS edges).
+_REACT_ENTRY_POINT_NAMES = {
+    "render", "componentdidmount", "componentdidupdate", "componentwillunmount",
+    "shouldcomponentupdate", "getderivedstatefromprops", "getsnapshotbeforeupdate",
+    "getderivedstatefromerror", "componentdidcatch",
+}
+_REACT_HOOK_NAMES = {
+    "usestate", "useeffect", "usereducer", "usecontext", "usecallback",
+    "usememo", "useref", "useimperativehandle", "uselayouteffect",
+    "usedebugvalue", "useid", "usesyncexternalstore", "usetransition",
+    "usedeferredvalue", "useinsertioneffect",
+}
+
 
 def _is_entry_point(qualified_name: str, kind: str = "") -> bool:
     name_lower = qualified_name.lower()
@@ -45,7 +67,12 @@ def _is_entry_point(qualified_name: str, kind: str = "") -> bool:
     if kind_lower in _ENTRY_POINT_KINDS:
         return True
     tail = name_lower.rsplit(".", 1)[-1]
-    return any(pattern in tail for pattern in _ENTRY_POINT_PATTERNS)
+    if any(pattern in tail for pattern in _ENTRY_POINT_PATTERNS):
+        return True
+    # React lifecycle methods and hooks are entry points (called by React runtime)
+    if tail in _REACT_ENTRY_POINT_NAMES or tail in _REACT_HOOK_NAMES:
+        return True
+    return False
 
 
 def _scan_chunks_for_entry_points(duckdb_store: "DuckDBStore") -> tuple[set[str], set[str]]:
@@ -97,6 +124,118 @@ def _scan_chunks_for_entry_points(duckdb_store: "DuckDBStore") -> tuple[set[str]
                 pydantic_models.add(qn)
 
     return route_handlers, pydantic_models
+
+
+def _scan_chunks_for_jsx_prop_usage(duckdb_store: "DuckDBStore") -> set[str]:
+    """Scan JSX/TSX chunk content for symbols passed as props or used in JSX.
+
+    React components pass functions as props (e.g. ``onClick={handleClick}``,
+    ``onChange={setVideoSrc}``) and reference state setters directly in JSX.
+    These usages don't create CALLS/REFERENCES graph edges, so the dead code
+    detector would falsely flag them as dead. This function scans chunk content
+    in ``.jsx``/``.tsx`` files for identifier references inside JSX expression
+    containers and returns the set of qualified_names that are referenced.
+    """
+    referenced: set[str] = set()
+    try:
+        rows = duckdb_store.execute(
+            "SELECT file_path, symbol_name, content FROM chunks "
+            "WHERE file_path LIKE '%.jsx' OR file_path LIKE '%.tsx' "
+            "OR file_path LIKE '%.jsx.ts' OR file_path LIKE '%.ts'"
+        ).fetchall()
+    except Exception:
+        return referenced
+
+    # Build a lookup from (file_path_lower, name_lower) -> list of qualified_names
+    sym_rows = duckdb_store.execute(
+        "SELECT qualified_name, name, file_path FROM symbols"
+    ).fetchall()
+    # Also build a global name -> qualified_names index for cross-file prop usage
+    global_sym_lookup: dict[str, list[str]] = {}
+    sym_lookup: dict[tuple[str, str], list[str]] = {}
+    for qn, name, fp in sym_rows:
+        qn_str = str(qn or "")
+        name_lower = str(name or "").lower()
+        fp_lower = str(fp or "").lower()
+        if qn_str and name_lower:
+            sym_lookup.setdefault((fp_lower, name_lower), []).append(qn_str)
+            global_sym_lookup.setdefault(name_lower, []).append(qn_str)
+
+    for file_path, symbol_name, content in rows:
+        if not content:
+            continue
+        fp_lower = str(file_path or "").lower()
+
+        # Find all identifiers used as JSX prop values: prop={identifier}
+        for match in _JSX_PROP_VALUE_RE.finditer(content):
+            ident = match.group(1)
+            if not ident:
+                continue
+            ident_lower = ident.lower()
+            # Try same-file match first (most common case)
+            candidates = sym_lookup.get((fp_lower, ident_lower), [])
+            if candidates:
+                referenced.update(candidates)
+            else:
+                # Fall back to global match (e.g. imported symbols)
+                global_candidates = global_sym_lookup.get(ident_lower, [])
+                if global_candidates:
+                    referenced.update(global_candidates)
+
+        # Also detect component render functions and React lifecycle methods
+        # by checking if the symbol name matches known React entry points
+        sym_lower = str(symbol_name or "").lower()
+        if sym_lower in _REACT_ENTRY_POINT_NAMES or sym_lower in _REACT_HOOK_NAMES:
+            candidates = sym_lookup.get((fp_lower, sym_lower), [])
+            referenced.update(candidates)
+
+    return referenced
+
+
+# Pattern for detecting function calls in chunk content: identifier followed by (
+# Used as a fallback when graph CALLS edges are missing (e.g. indirect calls,
+# string-based dispatch, or parser limitations with f-strings/dynamic calls).
+_CALL_PATTERN_RE = re.compile(r"\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\(")
+
+
+def _scan_chunks_for_call_references(duckdb_store: "DuckDBStore") -> set[str]:
+    """Scan all chunk content for function call patterns as a fallback.
+
+    The graph may miss CALLS edges for indirect calls, f-string interpolations,
+    or parser limitations. This function scans chunk content for
+    ``identifier(`` patterns and marks matching symbols as referenced.
+    Only matches symbols that are already in the symbols table, so it won't
+    produce false positives from string literals or comments that happen to
+    look like calls.
+    """
+    referenced: set[str] = set()
+    try:
+        # Build a global name -> qualified_names index
+        sym_rows = duckdb_store.execute(
+            "SELECT qualified_name, name FROM symbols"
+        ).fetchall()
+        name_to_qns: dict[str, list[str]] = {}
+        for qn, name in sym_rows:
+            qn_str = str(qn or "")
+            name_lower = str(name or "").lower()
+            if qn_str and name_lower:
+                name_to_qns.setdefault(name_lower, []).append(qn_str)
+
+        # Scan all chunk content for call patterns
+        chunk_rows = duckdb_store.execute(
+            "SELECT content FROM chunks"
+        ).fetchall()
+        for (content,) in chunk_rows:
+            if not content:
+                continue
+            for match in _CALL_PATTERN_RE.finditer(content):
+                ident_lower = match.group(1).lower()
+                candidates = name_to_qns.get(ident_lower)
+                if candidates:
+                    referenced.update(candidates)
+    except Exception:
+        pass
+    return referenced
 
 
 def detect_circular_dependencies(
@@ -287,6 +426,12 @@ def detect_dead_code(
     # Dead symbols: in all_qualified but not in referenced, and not an entry point
     # Scan chunks for route decorators and Pydantic models to exclude them
     route_handlers, pydantic_models = _scan_chunks_for_entry_points(duckdb_store)
+    # Scan JSX/TSX chunks for symbols passed as props (React-specific false positives)
+    jsx_referenced = _scan_chunks_for_jsx_prop_usage(duckdb_store)
+    referenced.update(jsx_referenced)
+    # Fallback: scan chunk content for call patterns to catch missing graph edges
+    call_referenced = _scan_chunks_for_call_references(duckdb_store)
+    referenced.update(call_referenced)
     dead_symbols: list[dict[str, object]] = []
     for qn, sym in all_qualified.items():
         if qn in referenced:

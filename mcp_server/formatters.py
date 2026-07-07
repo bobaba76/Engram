@@ -4,7 +4,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_MAX_RESPONSE_BYTES = 256_000  # 256KB — guard against stdio transport overflow
+_MAX_RESPONSE_BYTES = 128_000  # 128KB — guard against stdio transport overflow
 
 
 def _compact_json(value: Any) -> str:
@@ -88,16 +88,28 @@ def _derive_partial(payload: dict[str, Any], compact_summary: dict[str, Any], st
 
 
 def _derive_confidence(payload: dict[str, Any], compact_summary: dict[str, Any]) -> str:
+    # Respect explicit confidence from the service layer (e.g. graph_query sets
+    # "high" for deterministic queries with results).
     for value in (payload.get("confidence"), compact_summary.get("confidence")):
-        text = str(value or "").strip()
-        if text:
+        text = str(value or "").strip().lower()
+        if text in {"high", "medium", "low"}:
             return text
+    # Deterministic tools that return rows/results should not default to "low".
+    row_count = payload.get("row_count")
+    if row_count is not None and int(row_count or 0) > 0:
+        return "high"
     if _as_list(payload.get("matches")) or _as_list(payload.get("compact_results")):
         return "medium"
+    if _as_list(payload.get("rows")) or _as_list(payload.get("communities")) or _as_list(payload.get("cycles")) or _as_list(payload.get("dead_symbols")) or _as_list(payload.get("duplicates")):
+        return "high"
+    # Tools that return counts (e.g. index_status) have deterministic data.
+    counts = payload.get("counts")
+    if isinstance(counts, dict) and any(int(v or 0) > 0 for v in counts.values() if isinstance(v, (int, float))):
+        return "high"
     status = str(payload.get("status") or compact_summary.get("status") or "").strip().lower()
     if status == "ambiguous":
         return "low"
-    if status in {"found", "ok"}:
+    if status in {"found", "ok", "ready"}:
         return "medium"
     return "low"
 
@@ -565,8 +577,12 @@ def _project_view(enriched: dict[str, Any], view: str) -> dict[str, Any]:
 
 
 def _truncate_for_transport(payload: dict[str, Any], max_bytes: int = _MAX_RESPONSE_BYTES) -> dict[str, Any]:
-    """Truncate large list fields in the payload to keep the JSON under max_bytes."""
-    encoded = json.dumps(payload, ensure_ascii=False)
+    """Truncate large list fields in the payload to keep the JSON under max_bytes.
+
+    The MCP transport (FastMCP) serializes results with indent=2, so we check
+    the indented JSON size to match what actually goes over the wire.
+    """
+    encoded = json.dumps(payload, ensure_ascii=False, indent=2)
     if len(encoded) <= max_bytes:
         return payload
     logger.warning("enrich_payload: response size %d bytes exceeds limit %d, truncating", len(encoded), max_bytes)
@@ -576,6 +592,50 @@ def _truncate_for_transport(payload: dict[str, Any], max_bytes: int = _MAX_RESPO
         payload["warnings"] = warnings
     warnings.append(f"Response was truncated to fit transport limit ({len(encoded)} -> ~{max_bytes} bytes).")
 
+    # Phase 1: Cap known large list fields to reasonable defaults before generic shrinking.
+    # These fields are the most common source of 100KB+ payloads.
+    _FIELD_CAPS: dict[str, int] = {
+        "relationships": 10,
+        "memberships": 10,
+        "flows": 8,
+        "step_details": 8,
+        "risk_by_file": 10,
+        "risk_by_route": 10,
+        "risk_by_process": 10,
+        "affected_processes": 8,
+        "symbol_impacts": 8,
+        "app_contexts": 6,
+        "untested_symbols": 20,
+        "untested_files": 30,
+        "dead_symbols": 15,
+        "dead_by_file": 10,
+        "duplicates": 8,
+        "cycles": 8,
+        "communities": 5,
+        "members": 20,
+        "file_paths": 15,
+        "rows": 10,
+        "sample_rows": 5,
+    }
+    def _cap_known_fields(value: Any) -> Any:
+        if isinstance(value, dict):
+            result: dict[str, Any] = {}
+            for key, val in value.items():
+                if key in _FIELD_CAPS and isinstance(val, list) and len(val) > _FIELD_CAPS[key]:
+                    result[key] = val[:_FIELD_CAPS[key]]
+                else:
+                    result[key] = _cap_known_fields(val)
+            return result
+        if isinstance(value, list):
+            return [_cap_known_fields(item) for item in value]
+        return value
+
+    capped = _cap_known_fields(payload)
+    encoded = json.dumps(capped, ensure_ascii=False, indent=2)
+    if len(encoded) <= max_bytes:
+        return capped
+
+    # Phase 2: Generic shrink — reduce all lists to 1/4 of their size (min 5).
     def _shrink(value: Any, depth: int = 0) -> Any:
         if depth > 6:
             return value
@@ -588,8 +648,8 @@ def _truncate_for_transport(payload: dict[str, Any], max_bytes: int = _MAX_RESPO
             return {k: _shrink(v, depth + 1) for k, v in value.items()}
         return value
 
-    truncated = _shrink(payload)
-    encoded = json.dumps(truncated, ensure_ascii=False)
+    truncated = _shrink(capped)
+    encoded = json.dumps(truncated, ensure_ascii=False, indent=2)
     if len(encoded) <= max_bytes:
         return truncated
     # Still too large — aggressively truncate all lists to 3 items

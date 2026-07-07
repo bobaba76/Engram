@@ -25,9 +25,43 @@ def _repo_signal(root: Path) -> bool:
     return (root / ".git").exists() or (root / "pyproject.toml").exists() or (root / "package.json").exists()
 
 
+_MAX_DISCOVERY_DEPTH = 3
+_DISCOVERY_SKIP_DIRS = {".git", "data", "node_modules", "__pycache__", ".venv", "venv", ".pytest_cache", ".uv-cache", ".uv-python", "dist", "build", ".next", ".nuxt", "target"}
+
+
+def _iter_indexed_repos_under(root: Path, *, max_depth: int = _MAX_DISCOVERY_DEPTH):
+    """Yield directories under *root* that have an index manifest.
+
+    Recurses into subdirectories up to *max_depth* levels deep, skipping
+    common non-repo directories (node_modules, venv, .git, etc.).
+    """
+    root = root.resolve()
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    seen: set[Path] = {root}
+    while stack:
+        current, depth = stack.pop()
+        if depth >= max_depth:
+            continue
+        try:
+            children = sorted(current.iterdir(), key=lambda item: item.name.lower())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir() or child.name.startswith(".") or child.name in _DISCOVERY_SKIP_DIRS:
+                continue
+            resolved = child.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if has_index_manifest(resolved):
+                yield resolved
+            stack.append((resolved, depth + 1))
+
+
 def most_recent_indexed_sibling() -> Path | None:
     parent = ROOT.parent
     candidates: list[tuple[float, Path]] = []
+    # Check direct children first (fast path, same as before)
     for child in parent.iterdir():
         if not child.is_dir() or child.resolve() == ROOT.resolve():
             continue
@@ -38,6 +72,20 @@ def most_recent_indexed_sibling() -> Path | None:
             candidates.append((manifest_path.stat().st_mtime, child.resolve()))
         except OSError:
             continue
+    # Recurse into subdirectories to find nested indexed repos
+    for repo_root in _iter_indexed_repos_under(parent):
+        if repo_root == ROOT.resolve():
+            continue
+        manifest_path = _manifest_path_for(repo_root)
+        if not manifest_path.exists():
+            continue
+        try:
+            mtime = manifest_path.stat().st_mtime
+        except OSError:
+            continue
+        entry = (mtime, repo_root)
+        if entry not in candidates:
+            candidates.append(entry)
     if not candidates:
         return None
     candidates.sort(key=lambda item: item[0], reverse=True)

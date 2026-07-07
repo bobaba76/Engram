@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from services import investigation_service
+from services import investigation_guidance
+from services import investigation_question_analysis
 
 
 class _Store:
@@ -1173,7 +1175,7 @@ def test_investigation_search_task_prefers_feature_phrase_over_endpoint_seed_for
 
 
 def test_symbolish_terms_rejects_imperative_seed_tokens() -> None:
-    terms = investigation_service._symbolish_terms(
+    terms = investigation_question_analysis._symbolish_terms(
         "Find the frontend national overview page and code path for its period selector",
         limit=8,
     )
@@ -1183,7 +1185,7 @@ def test_symbolish_terms_rejects_imperative_seed_tokens() -> None:
 
 
 def test_symbolish_terms_rejects_generic_exploratory_nouns() -> None:
-    terms = investigation_service._symbolish_terms(
+    terms = investigation_question_analysis._symbolish_terms(
         "Find the frontend national overview page and the code path for its period selector, including shared date period utilities",
         limit=10,
     )
@@ -1768,7 +1770,7 @@ def test_investigate_codebase_includes_change_guidance(monkeypatch) -> None:
         lambda repo_root, duckdb_store, kuzu_store, target="", limit=6: {"compact_summary": {"top_routes": [], "top_files": ["app/coordinator.py", "app/main.py"], "top_processes": [], "file_kinds": {"backend": 1}, "graph_edge_count": 0}},
     )
     monkeypatch.setattr(
-        investigation_service,
+        investigation_guidance,
         "find_tests_for_target",
         lambda duckdb_store, target, limit=4: {
             "compact_results": [
