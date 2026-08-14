@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 from functools import lru_cache
 from typing import Iterable
@@ -169,21 +170,75 @@ def _load_jina_model(model_name: str, use_half_precision: bool = True):
         return None, None
     if AutoTokenizer is None or AutoModel is None or torch is None:
         return None, None
+    dtype = torch.float16 if use_half_precision and _supports_half_precision() else torch.float32
+    # Offline-first: transformers' trust_remote_code path and its nested
+    # tokenizer loads (cached remote-code files call AutoTokenizer without
+    # local_files_only) probe huggingface.co on EVERY server spawn even when
+    # the model is fully cached — and some MCP clients don't propagate the
+    # env section's HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE to the child process.
+    # At the office the resulting retry storm got huggingface.co firewalled.
+    # Force offline in-process so every load is local-only by default; set
+    # CODER_EMBED_ALLOW_ONLINE=1 to restore network loading (e.g. a fresh
+    # machine that needs to download the model once).
+    if os.environ.get("CODER_EMBED_ALLOW_ONLINE", "0") != "1":
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        dtype = torch.float16 if use_half_precision and _supports_half_precision() else torch.float32
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name, trust_remote_code=True, local_files_only=True
+        )
         model = AutoModel.from_pretrained(
             model_name,
             trust_remote_code=True,
             attn_implementation="eager",
             torch_dtype=dtype,
+            local_files_only=True,
         )
         model.eval()
         logger.info("_load_jina_model: loaded %s with dtype=%s", model_name, dtype)
         return tokenizer, model
-    except Exception:
-        logger.warning("_load_jina_model: failed to load model %s", model_name, exc_info=True)
-        return None, None
+    except Exception as exc:
+        # Detect network/connection errors that warrant an offline retry.
+        exc_msg = str(exc).lower()
+        is_network_error = any(
+            token in exc_msg
+            for token in ("connection", "name resolution", "getaddrinfo", "timeout", "max retries", "huggingface.co")
+        )
+        if not is_network_error:
+            logger.warning("_load_jina_model: failed to load model %s", model_name, exc_info=True)
+            return None, None
+        logger.warning(
+            "_load_jina_model: network error loading %s, retrying with local_files_only=True "
+            "(using cached snapshot, no hub lookups): %s",
+            model_name,
+            exc,
+        )
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name, trust_remote_code=True, local_files_only=True
+            )
+            model = AutoModel.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+                attn_implementation="eager",
+                torch_dtype=dtype,
+                local_files_only=True,
+            )
+            model.eval()
+            logger.info(
+                "_load_jina_model: loaded %s offline with dtype=%s (local_files_only=True)",
+                model_name,
+                dtype,
+            )
+            return tokenizer, model
+        except Exception:
+            logger.warning(
+                "_load_jina_model: offline retry also failed for %s — model may not be cached locally. "
+                "Run once with internet access to download it.",
+                model_name,
+                exc_info=True,
+            )
+            return None, None
 
 
 def _supports_half_precision() -> bool:
