@@ -426,7 +426,7 @@ def test_investigate_codebase_exposes_query_rewrite_metadata(monkeypatch) -> Non
     assert "/api/customers" in rewrite["route_terms"]
     assert "backend/services/customer_service.py" in rewrite["file_terms"]
     assert rewrite["search_seeds"]
-    assert payload["compact_summary"]["query_rewrite"]["search_seeds"]
+    assert payload["compact_summary"]["question"] == "please show me where /api/customers is handled in backend/services/customer_service.py"
 
 
 def test_investigate_codebase_uses_rewritten_seed_when_search_hits_missing(monkeypatch) -> None:
@@ -613,7 +613,7 @@ def test_investigate_codebase_surfaces_graph_backed_frontend_evidence(monkeypatc
     assert any("graph-backed frontend path" in reason for reason in payload["ranked_files"][0]["reasons"])
     assert payload["evidence"][0]["source"] == "graph_frontend_expanded"
     assert "Frontend implementation evidence is partly graph-backed" in payload["answer"]
-    assert payload["compact_summary"]["graph_signal"]["has_indirect_frontend_path"] is True
+    assert payload["graph_signal"]["has_indirect_frontend_path"] is True
 
 
 def test_investigate_codebase_guidance_calls_out_indirect_frontend_path(monkeypatch) -> None:
@@ -1604,7 +1604,7 @@ def test_investigate_codebase_uses_cheap_symbol_discovery_when_search_is_empty(m
     assert len(payload["discovered_symbols"]) == 2
     assert "cheap lexical discovery" in " ".join(payload["warnings"]).lower()
     assert "nearby candidates" in payload["answer"]
-    assert payload["compact_summary"]["discovered_symbols"]
+    assert payload["discovered_symbols"]
 
 
 def test_investigate_codebase_tries_alternate_discovery_anchors_when_primary_is_empty(monkeypatch) -> None:

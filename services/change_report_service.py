@@ -299,6 +299,11 @@ def change_impact_report(
         tests = suggest_tests_for_change(repo_root, duckdb_store, kuzu_store, scope=scope, base_ref=base_ref, changes=changes)
     except TypeError:
         tests = suggest_tests_for_change(repo_root, duckdb_store, kuzu_store, scope=scope, base_ref=base_ref)
+    # Strip the duplicated `changes` payload from test_recommendations — it
+    # is already embedded at the top level via the `changes` key above, so
+    # including it here doubles the changes payload size for no value.
+    if isinstance(tests, dict) and "changes" in tests:
+        tests = {k: v for k, v in tests.items() if k != "changes"}
     base_risk = changes.get("risk", "LOW") if isinstance(changes, dict) else "UNKNOWN"
     risk = base_risk
     risk_adjustments: list[str] = []

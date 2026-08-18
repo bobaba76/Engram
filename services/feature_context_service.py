@@ -389,6 +389,7 @@ def feature_context(
         if normalized and normalized not in role_groups[role] and len(role_groups[role]) < role_limit:
             role_groups[role].append(normalized)
 
+    symbols_per_file_cap = 5
     for item in files if isinstance(files, list) else []:
         if not isinstance(item, dict):
             continue
@@ -404,7 +405,15 @@ def feature_context(
                 add_role_file("shared_ui_files", file_path)
             elif role == "backend":
                 add_role_file("backend_files", file_path)
-        feature_files.append({**item, "feature_tags": tags, "feature_roles": roles})
+        # Cap symbols per file to keep payload bounded. The full symbol
+        # list is recoverable via get_file_summary if needed.
+        capped_item = dict(item)
+        symbols = capped_item.get("symbols", [])
+        if isinstance(symbols, list) and len(symbols) > symbols_per_file_cap:
+            capped_item["symbols"] = symbols[:symbols_per_file_cap]
+            capped_item["symbols_truncated"] = True
+            capped_item["total_symbol_count"] = len(symbols)
+        feature_files.append({**capped_item, "feature_tags": tags, "feature_roles": roles})
     app_processes = app.get("processes", []) if isinstance(app, dict) else []
     processes = app_processes if app_processes else process_fallbacks
     graph_edges = app.get("graph_edges", []) if isinstance(app, dict) else []
