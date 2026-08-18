@@ -317,9 +317,9 @@ def trace_processes_tool(
     )
 
 
-def list_processes_tool(session: MCPSession, query: str = "", limit: int = 15, repo: str = "") -> dict[str, object]:
+def list_processes_tool(session: MCPSession, query: str = "", limit: int = 15, compact: bool = True, repo: str = "") -> dict[str, object]:
     context = session.get_repo_context(repo)
-    return list_processes(context["duckdb_store"], query=query, limit=limit)
+    return list_processes(context["duckdb_store"], query=query, limit=limit, compact=compact)
 
 
 def symbol_process_participation_tool(
@@ -723,6 +723,7 @@ def get_graph_neighborhood_tool(
     max_edges: int = 0,
     mode: str = "full",
     suppress_common_hubs: bool = False,
+    compact: bool = True,
     view: str = "",
     repo: str = "",
 ) -> dict[str, object]:
@@ -735,6 +736,7 @@ def get_graph_neighborhood_tool(
         max_edges=max_edges or None,
         mode=mode,
         suppress_common_hubs=suppress_common_hubs,
+        compact=compact,
     )
     if view:
         result["_view"] = view
@@ -1226,7 +1228,7 @@ TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
     ("app_context", app_context_tool, "Map app-level context across routes, files, tables, graph edges, and processes. Broad natural-language targets are capped for safety and may return partial context."),
     ("resolve_target", resolve_target_tool, "Resolve a file, symbol name, or symbol UID to the indexed target Coder will use. Best first step before graph-heavy symbol tools."),
     ("trace_processes", trace_processes_tool, "Trace execution/process flows around a target symbol."),
-    ("list_processes", list_processes_tool, "List inferred process clusters from the indexed codebase."),
+    ("list_processes", list_processes_tool, "List inferred process clusters from the indexed codebase. compact=true (default) skips per-process memberships and relationships to keep output small; pass compact=false to include them."),
     ("symbol_process_participation", symbol_process_participation_tool, "Show process clusters involving a target symbol."),
     ("preview_rename", preview_rename_tool, "Preview references that may need edits for a symbol rename."),
     ("semantic_code_search", semantic_code_search_tool, "Search indexed chunks semantically for a natural language query. Use when you do not yet have an exact symbol or file target."),
@@ -1243,7 +1245,7 @@ TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
     ("get_symbol_context", get_symbol_context_tool, "Show direct symbol metadata and related source context."),
     ("find_symbols", find_symbols_tool, "Find symbols by query, file, kind, or symbol UID. Good follow-up when resolve_target reports ambiguity."),
     ("get_callers_and_callees", get_callers_and_callees_tool, "Show direct CALLS callers and callees for a symbol target. Pass compact=true to drop the full per-relation incoming/outgoing edge lists and keep only counts + top samples (saves context for hub-like targets). edge_cap (default 25) bounds the per-relation sample size in the non-compact payload."),
-    ("get_graph_neighborhood", get_graph_neighborhood_tool, "Show filtered graph neighborhood for a target."),
+    ("get_graph_neighborhood", get_graph_neighborhood_tool, "Show filtered graph neighborhood for a target. compact=true (default) returns only compact_summary with top edges and relation breakdown; pass compact=false for full nodes and edges lists."),
     ("get_file_dependencies", get_file_dependencies_tool, "Show file-to-file dependency map for a file path. Aggregates all symbols in the file. edges_per_file (default 3) caps the per-file edge sample to keep payload bounded; raise it if you need more detail per dependent file."),
     ("get_file_summary", get_file_summary_tool, "Summarize indexed symbols and chunks for a file."),
     ("get_source_context", get_source_context_tool, "Return source chunks and previews for a target."),

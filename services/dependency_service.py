@@ -1,7 +1,7 @@
 from storage.kuzu_store import KuzuStore
 from services.risk_profiles import path_risk_hints
 
-RAW_EDGE_LIMIT = 80
+RAW_EDGE_LIMIT = 40
 _COLLAPSE_THRESHOLD = 5  # collapse when 5+ edges share the same (relation, source_file)
 
 

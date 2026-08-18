@@ -392,8 +392,8 @@ def get_callers_and_callees(kuzu_store: KuzuStore, target: str, include_noisy: b
 
 
 
-def get_graph_neighborhood(kuzu_store: KuzuStore, target: str, depth: int = 1) -> dict[str, object]:
-    return get_graph_neighborhood_with_options(kuzu_store, target=target, depth=depth)
+def get_graph_neighborhood(kuzu_store: KuzuStore, target: str, depth: int = 1, compact: bool = False) -> dict[str, object]:
+    return get_graph_neighborhood_with_options(kuzu_store, target=target, depth=depth, compact=compact)
 
 
 def get_graph_neighborhood_with_options(
@@ -404,6 +404,7 @@ def get_graph_neighborhood_with_options(
     max_edges: int | None = None,
     mode: str = "full",
     suppress_common_hubs: bool = False,
+    compact: bool = False,
 ) -> dict[str, object]:
     normalized_mode = mode if mode in {"full", "focused", "direct"} else "full"
     resolved_target = _normalize_graph_target(target)
@@ -417,6 +418,33 @@ def get_graph_neighborhood_with_options(
     warnings = _expansion_warnings(resolved_target, depth, len(filtered_nodes), len(filtered_edges), normalized_mode, relation, suppress_common_hubs)
     if hub_summary["is_hub"]:
         warnings.insert(0, "This target behaves like a graph hub; results are summarized and may be partial.")
+    compact_summary = {
+        "target": resolved_target,
+        "depth": depth,
+        "mode": normalized_mode,
+        "relation_filter": relation,
+        "suppress_common_hubs": suppress_common_hubs,
+        "node_count": len(filtered_nodes),
+        "edge_count": len(filtered_edges),
+        "direct_edge_count": len(direct_edges),
+        "raw_node_count": raw_node_count,
+        "raw_edge_count": len(all_edges),
+        "partial": bool(hub_summary["truncated_edge_count"]),
+        "hub_summary": hub_summary,
+        "top_edges": filtered_edges[:8],
+        "top_direct_edges": direct_edges[:8],
+        "top_neighbors": _top_neighbors(filtered_edges, resolved_target),
+        "relation_breakdown": _relation_breakdown(filtered_edges),
+        "warnings": warnings,
+    }
+    if compact:
+        return {
+            "target": resolved_target,
+            "depth": depth,
+            "mode": normalized_mode,
+            "partial": bool(hub_summary["truncated_edge_count"]),
+            "compact_summary": compact_summary,
+        }
     return {
         "target": resolved_target,
         "depth": depth,
@@ -434,25 +462,7 @@ def get_graph_neighborhood_with_options(
             "filtered_node_count": len(filtered_nodes),
             "filtered_edge_count": len(filtered_edges),
         },
-        "compact_summary": {
-            "target": resolved_target,
-            "depth": depth,
-            "mode": normalized_mode,
-            "relation_filter": relation,
-            "suppress_common_hubs": suppress_common_hubs,
-            "node_count": len(filtered_nodes),
-            "edge_count": len(filtered_edges),
-            "direct_edge_count": len(direct_edges),
-            "raw_node_count": raw_node_count,
-            "raw_edge_count": len(all_edges),
-            "partial": bool(hub_summary["truncated_edge_count"]),
-            "hub_summary": hub_summary,
-            "top_edges": filtered_edges[:8],
-            "top_direct_edges": direct_edges[:8],
-            "top_neighbors": _top_neighbors(filtered_edges, resolved_target),
-            "relation_breakdown": _relation_breakdown(filtered_edges),
-            "warnings": warnings,
-        },
+        "compact_summary": compact_summary,
     }
 
 

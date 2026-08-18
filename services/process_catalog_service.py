@@ -9,10 +9,10 @@ if TYPE_CHECKING:
     from storage.duckdb_store import DuckDBStore
 
 
-def _inflate_cluster(row: dict[str, object], duckdb_store: DuckDBStore) -> dict[str, object]:
+def _inflate_cluster(row: dict[str, object], duckdb_store: DuckDBStore, compact: bool = False) -> dict[str, object]:
     cluster_id = str(row.get("cluster_id", ""))
     file_paths = json.loads(str(row.get("file_paths_json", "[]") or "[]"))
-    return {
+    base = {
         "cluster_id": cluster_id,
         "name": row.get("name", ""),
         "process_type": row.get("process_type", ""),
@@ -25,13 +25,20 @@ def _inflate_cluster(row: dict[str, object], duckdb_store: DuckDBStore) -> dict[
         "file_paths": file_paths[:20],
         "file_paths_total_count": len(file_paths) if len(file_paths) > 20 else None,
         "keywords": json.loads(str(row.get("keywords_json", "[]") or "[]"))[:10],
-        "memberships": duckdb_store.processes.fetch_memberships_for_cluster(cluster_id, limit=20),
-        "relationships": duckdb_store.processes.fetch_relationships(cluster_id, limit=15),
     }
+    if compact:
+        # Skip memberships and relationships — they're the bulk of the payload
+        # and can be fetched per-process via symbol_process_participation.
+        base["membership_count"] = duckdb_store.processes.fetch_memberships_for_cluster(cluster_id, limit=1)
+        base["has_relationships"] = bool(duckdb_store.processes.fetch_relationships(cluster_id, limit=1))
+        return base
+    base["memberships"] = duckdb_store.processes.fetch_memberships_for_cluster(cluster_id, limit=20)
+    base["relationships"] = duckdb_store.processes.fetch_relationships(cluster_id, limit=15)
+    return base
 
 
-def list_processes(duckdb_store: DuckDBStore, query: str = "", limit: int = 15) -> dict[str, object]:
-    rows = [_inflate_cluster(row, duckdb_store) for row in duckdb_store.processes.fetch_clusters(limit=limit, query=query)]
+def list_processes(duckdb_store: DuckDBStore, query: str = "", limit: int = 15, compact: bool = False) -> dict[str, object]:
+    rows = [_inflate_cluster(row, duckdb_store, compact=compact) for row in duckdb_store.processes.fetch_clusters(limit=limit, query=query)]
     return {
         "query": query,
         "total": len(rows),
