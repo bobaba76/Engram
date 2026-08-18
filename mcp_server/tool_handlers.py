@@ -19,11 +19,12 @@ from services.change_report_service import change_impact_report
 from services.code_analysis_service import detect_circular_dependencies, detect_dead_code
 from services.code_quality_service import detect_duplicate_code, test_coverage_gaps
 from services.data_flow_service import trace_data_flow
-from services.detect_changes_service import detect_changes
 from services.dependency_service import get_dependencies
+from services.detect_changes_service import detect_changes
 from services.feature_context_service import feature_context
 from services.field_impact_service import field_impact
 from services.file_summary_service import get_file_summary
+from services.god_nodes_service import god_nodes
 from services.graph_query_service import execute_graph_query
 from services.graph_service import get_callers_and_callees, get_file_dependencies, get_graph_neighborhood_with_options
 from services.impact_service import analyze_impact
@@ -34,15 +35,17 @@ from services.investigation_service import (
     investigate_codebase,
     investigation_search_task,
 )
+from services.post_change_review_service import post_change_review
+from services.pr_impact_service import pr_impact
 from services.process_catalog_service import get_symbol_process_participation, list_processes
 from services.process_service import trace_execution_flows
-from services.post_change_review_service import post_change_review
 from services.rename_service import preview_rename
 from services.repo_registry_service import list_indexed_repos, resolve_indexed_repo
 from services.review_history_service import get_review_history
 from services.route_map_service import route_map
 from services.semantic_search import semantic_code_search
 from services.shape_check_service import shape_check
+from services.shortest_path_service import shortest_path
 from services.source_retrieval_service import get_source_context
 from services.symbol_context_service import get_symbol_context
 from services.symbol_lookup_service import find_symbols
@@ -151,6 +154,7 @@ def unified_context_tool(
     file_path: str = "",
     kind: str = "",
     symbol_uid: str = "",
+    compact: bool = True,
     view: str = "",
     repo: str = "",
 ) -> dict[str, object]:
@@ -164,6 +168,7 @@ def unified_context_tool(
         file_path=file_path or None,
         kind=kind or None,
         symbol_uid=symbol_uid or None,
+        compact=compact,
     )
     if view:
         result["_view"] = view
@@ -568,6 +573,18 @@ def change_impact_report_tool(session: MCPSession, scope: str = "unstaged", base
     )
 
 
+def pr_impact_tool(session: MCPSession, scope: str = "unstaged", base_ref: str = "", repo: str = "") -> dict[str, object]:
+    repo_root = fast_repo_root_for_tool(session.default_repo_root, repo)
+    context = session.get_repo_context(repo)
+    return pr_impact(
+        repo_root=repo_root,
+        duckdb_store=context["duckdb_store"],
+        kuzu_store=session.get_kuzu_store(repo),
+        scope=scope,
+        base_ref=base_ref or None,
+    )
+
+
 def find_tests_for_target_tool(session: MCPSession, target: str, limit: int = 10, repo: str = "") -> dict[str, object]:
     context = session.get_repo_context(repo)
     return find_tests_for_target(context["duckdb_store"], target=target, limit=limit, kuzu_store=session.lazy_kuzu(repo))
@@ -659,9 +676,9 @@ def find_symbols_tool(session: MCPSession, query: str = "", limit: int = 10, fil
     return find_symbols(context["duckdb_store"], query=query, limit=limit, file_path=file_path or None, kind=kind or None, symbol_uid=symbol_uid or None)
 
 
-def get_callers_and_callees_tool(session: MCPSession, target: str, view: str = "", include_noisy: bool = False, repo: str = "") -> dict[str, object]:
+def get_callers_and_callees_tool(session: MCPSession, target: str, view: str = "", include_noisy: bool = False, compact: bool = False, edge_cap: int = 25, repo: str = "") -> dict[str, object]:
     resolved = _resolve_graph_target(session, target, repo)
-    result = get_callers_and_callees(session.get_kuzu_store(repo), target=resolved, include_noisy=include_noisy)
+    result = get_callers_and_callees(session.get_kuzu_store(repo), target=resolved, include_noisy=include_noisy, compact=compact, edge_cap=edge_cap)
     if view:
         result["_view"] = view
     return result
@@ -672,6 +689,7 @@ def get_file_dependencies_tool(
     file_path: str = "",
     relation: str = "",
     limit: int = 50,
+    edges_per_file: int = 3,
     view: str = "",
     target: str = "",
     repo: str = "",
@@ -688,6 +706,7 @@ def get_file_dependencies_tool(
         file_path=file_path,
         relation=relation or None,
         limit=limit,
+        edges_per_file=edges_per_file,
     )
     if view:
         result["_view"] = view
@@ -766,6 +785,37 @@ def trace_data_flow_tool(
     if view:
         result["_view"] = view
     return result
+
+
+def shortest_path_tool(
+    session: MCPSession,
+    source: str,
+    target: str,
+    source_file: str = "",
+    source_kind: str = "",
+    source_uid: str = "",
+    target_file: str = "",
+    target_kind: str = "",
+    target_uid: str = "",
+    max_hops: int = 8,
+    repo: str = "",
+) -> dict[str, object]:
+    if not source or not target:
+        raise ValueError("source and target are required")
+    context = session.get_repo_context(repo)
+    return shortest_path(
+        context["duckdb_store"],
+        session.get_kuzu_store(repo),
+        source=source,
+        target=target,
+        source_file=source_file or None,
+        source_kind=source_kind or None,
+        source_uid=source_uid or None,
+        target_file=target_file or None,
+        target_kind=target_kind or None,
+        target_uid=target_uid or None,
+        max_hops=max_hops,
+    )
 
 
 def post_change_review_tool(
@@ -1136,6 +1186,23 @@ def find_similar_functions_tool(
     )
 
 
+def god_nodes_tool(
+    session: MCPSession,
+    limit: int = 20,
+    min_degree: int = 0,
+    include_files: bool = False,
+    repo: str = "",
+) -> dict[str, object]:
+    context = session.get_repo_context(repo)
+    return god_nodes(
+        context["duckdb_store"],
+        session.get_kuzu_store(repo),
+        limit=limit,
+        min_degree=min_degree or None,
+        include_files=include_files,
+    )
+
+
 # --- Tool registration table -----------------------------------------------
 
 TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
@@ -1146,7 +1213,7 @@ TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
     ("get_run_metrics", get_run_metrics_tool, "Show parsed persisted stage metrics for a specific run ID."),
     ("reindex_project", reindex_project_tool, "Start an incremental or full index refresh for a repository. Defaults to background mode to avoid MCP client timeouts."),
     ("reindex_status", reindex_status_tool, "Poll a background reindex job started by reindex_project."),
-    ("unified_context", unified_context_tool, "Resolve an exact or near-exact target and return matches, callers/callees, dependencies, and graph neighborhood. Prefer after resolve_target for broad names."),
+    ("unified_context", unified_context_tool, "Resolve an exact or near-exact target and return matches, callers/callees, dependencies, and graph neighborhood. Prefer after resolve_target for broad names. compact=true (default) omits redundant convenience fields (callers, callees, primary_match, compact_results, related_symbols_by_relation) that duplicate categorized_references; pass compact=false for the full legacy payload."),
     ("impact_analysis", impact_analysis_tool, "Estimate upstream or downstream impact for a symbol target. Prefer exact symbols or resolved targets; broad inputs may return partial results with warnings."),
     ("graph_query", graph_query_tool, "Execute a read-only Cypher query against the indexed KuzuDB graph. Node tables: File(path STRING), Symbol(qualified_name STRING, file_path STRING, kind STRING, start_line INT64, end_line INT64). Relationships: DEFINES(File->Symbol), CALLS, IMPORTS, REFERENCES, DECLARES, ASSOCIATED_WITH, ACCESSES, INCLUDES, INJECTS, USES_SERVICE, FETCHES, READS_FIELD, HAS_METHOD, HAS_PROPERTY, EXTENDS, IMPLEMENTS, METHOD_OVERRIDES, METHOD_IMPLEMENTS (all Symbol->Symbol). Pass query='schema' to get full schema docs and example queries. Only read-only MATCH queries are allowed."),
     ("detect_changes", detect_changes_tool, "Analyze changed files and related graph impact for the working tree or git ref."),
@@ -1163,6 +1230,7 @@ TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
     ("semantic_code_search", semantic_code_search_tool, "Search indexed chunks semantically for a natural language query. Use when you do not yet have an exact symbol or file target."),
     ("investigate_codebase", investigate_codebase_tool, "Investigate a natural-language codebase question and return a synthesized answer with evidence, ranked files, and next steps. By default omits raw sub-payloads (search, source_context, unified_context, app_context) to keep output compact; pass verbose=true to include them. Broad questions may be narrowed automatically."),
     ("change_impact_report", change_impact_report_tool, "Safely summarize git changes, likely impact, app context, and recommended tests for the current worktree or a base ref."),
+    ("pr_impact", pr_impact_tool, "PR-aware graph impact: map changed symbols in a git diff to their functional communities and compute per-community blast radius. Wraps detect_changes with community mapping (requires detect_communities to have been run). Flags concentrated communities (>=30% of members downstream of changed symbols) as priority review areas. Falls back to a plain change report when communities are not available."),
     ("find_tests_for_target", find_tests_for_target_tool, "Find likely tests for a symbol, file, or feature target."),
     ("suggest_tests_for_change", suggest_tests_for_change_tool, "Suggest tests for current git changes."),
     ("test_impact", test_impact_tool, "Estimate testing impact and risk for current git changes."),
@@ -1172,13 +1240,14 @@ TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
     ("get_review_history", get_review_history_tool, "Show persisted review findings and analyses for a target file."),
     ("get_symbol_context", get_symbol_context_tool, "Show direct symbol metadata and related source context."),
     ("find_symbols", find_symbols_tool, "Find symbols by query, file, kind, or symbol UID. Good follow-up when resolve_target reports ambiguity."),
-    ("get_callers_and_callees", get_callers_and_callees_tool, "Show direct CALLS callers and callees for a symbol target."),
+    ("get_callers_and_callees", get_callers_and_callees_tool, "Show direct CALLS callers and callees for a symbol target. Pass compact=true to drop the full per-relation incoming/outgoing edge lists and keep only counts + top samples (saves context for hub-like targets). edge_cap (default 25) bounds the per-relation sample size in the non-compact payload."),
     ("get_graph_neighborhood", get_graph_neighborhood_tool, "Show filtered graph neighborhood for a target."),
-    ("get_file_dependencies", get_file_dependencies_tool, "Show file-to-file dependency map for a file path. Aggregates all symbols in the file."),
+    ("get_file_dependencies", get_file_dependencies_tool, "Show file-to-file dependency map for a file path. Aggregates all symbols in the file. edges_per_file (default 3) caps the per-file edge sample to keep payload bounded; raise it if you need more detail per dependent file."),
     ("get_file_summary", get_file_summary_tool, "Summarize indexed symbols and chunks for a file."),
     ("get_source_context", get_source_context_tool, "Return source chunks and previews for a target."),
     ("check_stale_index", check_stale_index_tool, "Detect files modified since the last successful index run. Returns stale file count and warning."),
     ("trace_data_flow", trace_data_flow_tool, "Trace how a field or type propagates through the codebase via graph relations (READS_FIELD, ACCESSES, FETCHES, etc.)."),
+    ("shortest_path", shortest_path_tool, "Find the shortest connection between two symbols in the graph. Answers 'how are A and B connected?' in one call. Resolves source/target via the same ambiguity handling as resolve_target; returns the path as a list of (source, relation, target) hops. IMPORTS is excluded by default to avoid noisy shared-module paths. Use max_hops to bound the search (default 8, max 12)."),
     ("post_change_review", post_change_review_tool, "Orchestrate a full post-change review: detect changes, impact analysis, test recommendations, and stale index check in one call."),
     ("detect_circular_dependencies", detect_circular_dependencies_tool, "Find circular dependencies in the graph via DFS cycle detection. Default relation: IMPORTS."),
     ("detect_dead_code", detect_dead_code_tool, "Find symbols with zero inbound dependency edges (excluding entry points). Likely dead code."),
@@ -1203,4 +1272,5 @@ TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
     ("diff_context", diff_context_tool, "Build a minimal review pack for changed files: source snippets, callers, callees, and impacted files. Uses git diff or explicit file list."),
     ("build_unified_graph", build_unified_graph_tool, "Build a unified in-memory graph from all repos in a group. Merges Kuzu graphs and infers cross-repo edges from shared symbol names."),
     ("find_similar_functions", find_similar_functions_tool, "Find functions with similar signatures and behavior to a target function. Scores by name token overlap, parameter count, return type, and call target overlap."),
+    ("god_nodes", god_nodes_tool, "Rank symbols by total graph degree (inbound + outbound edges across all relations). Flags god-nodes (degree >= 40 by default) that will produce noisy neighborhood queries — pass min_degree to override the threshold, include_files=true to also rank File nodes by DEFINES degree. Use as a first-pass sanity check before deep traversals."),
 ]

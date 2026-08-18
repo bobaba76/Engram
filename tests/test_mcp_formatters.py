@@ -62,14 +62,13 @@ def test_enrich_payload_adds_agent_reliability_contract_fields() -> None:
 
     enriched = enrich_payload(payload)
 
-    assert enriched["status"] == "ok"
-    assert enriched["confidence"] == "medium"
-    assert enriched["partial"] is False
-    assert enriched["warnings"] == []
-    assert enriched["top_files"] == ["pkg/service.py"]
-    assert enriched["top_symbols"] == ["pkg.service.do_work"]
-    assert enriched["next_tools"][0]["tool"] == "get_source_context"
+    # Derived metadata lives in compact_summary, not duplicated at top level.
     assert enriched["compact_summary"]["status"] == "ok"
+    assert enriched["compact_summary"]["confidence"] == "medium"
+    assert enriched["compact_summary"]["partial"] is False
+    assert enriched["compact_summary"]["warnings"] == []
+    assert enriched["compact_summary"]["top_files"] == ["pkg/service.py"]
+    assert enriched["compact_summary"]["top_symbols"] == ["pkg.service.do_work"]
     assert enriched["compact_summary"]["next_tools"][0]["tool"] == "get_source_context"
 
 
@@ -110,7 +109,7 @@ def test_enrich_payload_promotes_pre_commit_follow_up_tools() -> None:
 
     enriched = enrich_payload(payload)
 
-    assert enriched["next_tools"] == [
+    assert enriched["compact_summary"]["next_tools"] == [
         {
             "tool": "get_source_context",
             "target": "services/api_impact_service.py",
@@ -127,7 +126,6 @@ def test_enrich_payload_promotes_pre_commit_follow_up_tools() -> None:
             "why": "Find focused tests for this slice.",
         },
     ]
-    assert enriched["compact_summary"]["next_tools"] == enriched["next_tools"]
 
 
 def test_enrich_payload_prioritizes_field_and_process_blast_radius_tools() -> None:
@@ -178,7 +176,7 @@ def test_enrich_payload_prioritizes_field_and_process_blast_radius_tools() -> No
 
     enriched = enrich_payload(payload)
 
-    assert enriched["next_tools"][:3] == [
+    assert enriched["compact_summary"]["next_tools"][:3] == [
         {
             "tool": "field_impact",
             "target": "/products/trends metrics.intransit_stock",
@@ -195,7 +193,6 @@ def test_enrich_payload_prioritizes_field_and_process_blast_radius_tools() -> No
             "why": "Inspect the highest-risk changed file in this slice.",
         },
     ]
-    assert enriched["compact_summary"]["next_tools"] == enriched["next_tools"]
 
 
 def test_enrich_payload_promotes_change_report_top_files_and_symbols() -> None:
@@ -211,10 +208,8 @@ def test_enrich_payload_promotes_change_report_top_files_and_symbols() -> None:
 
     enriched = enrich_payload(payload)
 
-    assert enriched["top_files"] == ["indexing/parsers/python.py", "scripts/run_mcp.py"]
-    assert enriched["top_symbols"] == ["extract_symbols", "extract_symbols.visit", "parse"]
-    assert enriched["compact_summary"]["top_files"] == enriched["top_files"]
-    assert enriched["compact_summary"]["top_symbols"] == enriched["top_symbols"]
+    assert enriched["compact_summary"]["top_files"] == ["indexing/parsers/python.py", "scripts/run_mcp.py"]
+    assert enriched["compact_summary"]["top_symbols"] == ["extract_symbols", "extract_symbols.visit", "parse"]
 
 
 def test_enrich_payload_marks_capped_reports_partial_even_when_payload_says_false() -> None:
@@ -233,7 +228,6 @@ def test_enrich_payload_marks_capped_reports_partial_even_when_payload_says_fals
 
     enriched = enrich_payload(payload)
 
-    assert enriched["partial"] is True
     assert enriched["compact_summary"]["partial"] is True
 
 
@@ -253,3 +247,29 @@ def test_enrich_payload_strips_large_embedding_vectors() -> None:
     enriched = enrich_payload(payload)
 
     assert "vector" not in enriched["search"]["results"][0]
+
+
+def test_enrich_payload_suggests_search_tools_when_no_matches() -> None:
+    """When unified_context returns 0 matches, suggest semantic_code_search
+    and resolve_target instead of circular graph-heavy tools."""
+    payload = {
+        "target": "nonexistent_thing",
+        "status": "not_found",
+        "resolved_target": "nonexistent_thing",
+        "matches": [],
+        "compact_summary": {
+            "target": "nonexistent_thing",
+            "status": "not_found",
+            "match_count": 0,
+        },
+    }
+
+    enriched = enrich_payload(payload)
+
+    next_tools = enriched["compact_summary"]["next_tools"]
+    tool_names = [t["tool"] for t in next_tools]
+    assert "semantic_code_search" in tool_names
+    assert "resolve_target" in tool_names
+    # Should NOT suggest tools that require a resolved symbol
+    assert "get_source_context" not in tool_names
+    assert "unified_context" not in tool_names

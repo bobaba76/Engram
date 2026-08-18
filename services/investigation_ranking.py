@@ -624,6 +624,13 @@ def _call_chain_evidence(
     ``snippets_by_callee`` maps callee qualified_name → source context snippets.
     """
     callees = unified.get("callees", []) if isinstance(unified, dict) else []
+    if not callees and isinstance(unified, dict):
+        # Compact mode: callees are in categorized_references.CALLS.outgoing
+        cat_refs = unified.get("categorized_references", {})
+        if isinstance(cat_refs, dict):
+            calls_ref = cat_refs.get("CALLS", {})
+            if isinstance(calls_ref, dict):
+                callees = calls_ref.get("outgoing", [])
     if not isinstance(callees, list):
         return []
     evidence: list[dict[str, object]] = []

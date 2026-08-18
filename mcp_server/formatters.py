@@ -250,9 +250,16 @@ def _derive_next_tools(payload: dict[str, Any], compact_summary: dict[str, Any])
     target = _render_target(payload.get("target") or compact_summary.get("target") or "")
     task = str(payload.get("task") or "").strip()
     suggested: list[dict[str, str]] = []
-    if target and (_as_list(payload.get("matches")) or payload.get("resolved_target")):
+    has_matches = bool(_as_list(payload.get("matches")) or payload.get("resolved_target"))
+    status_lower = str(payload.get("status") or compact_summary.get("status") or "").strip().lower()
+    if target and has_matches and status_lower != "not_found":
         suggested.append({"tool": "get_source_context", "why": "Read concrete source snippets for the resolved target."})
         suggested.append({"tool": "unified_context", "why": "Inspect nearby callers, callees, and dependencies."})
+    elif target and (not has_matches or status_lower == "not_found"):
+        # No matches found — suggest search-oriented tools instead of
+        # graph-heavy ones that require a resolved symbol.
+        suggested.append({"tool": "semantic_code_search", "why": "Search semantically for related code when exact symbol matching returns no results."})
+        suggested.append({"tool": "resolve_target", "why": "Try broader resolution with file_path or kind hints to pin the target."})
     if task:
         suggested.append({"tool": "resolve_target", "why": "Pin broad search results to an exact symbol before graph-heavy follow-up."})
     if compact_summary.get("changed_file_count") or compact_summary.get("changed_symbol_count"):
@@ -280,13 +287,12 @@ def _normalize_contract(payload: dict[str, Any]) -> dict[str, Any]:
     enriched_summary["next_tools"] = next_tools
     enriched_summary["partial"] = partial
     enriched = dict(payload)
-    enriched["status"] = status
-    enriched["warnings"] = warnings
-    enriched["confidence"] = confidence
-    enriched["top_files"] = top_files
-    enriched["top_symbols"] = top_symbols
-    enriched["next_tools"] = next_tools
-    enriched["partial"] = partial
+    # Derived metadata (status, warnings, confidence, top_files, top_symbols,
+    # next_tools, partial) lives ONLY in compact_summary to avoid duplicating
+    # these fields at the top level. The top level keeps the original
+    # service-layer data (counts, matches, callers, etc.). This roughly
+    # halves the token cost of every response by eliminating the
+    # top-level/compact_summary field mirror.
     enriched["compact_summary"] = enriched_summary
     return enriched
 

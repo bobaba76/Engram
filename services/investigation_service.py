@@ -498,7 +498,15 @@ def investigate_codebase(
     call_chain_evidence: list[dict[str, object]] = []
     primary_intent = str(intent.get("primary", "general") or "general")
     if primary_intent == "flow" and isinstance(unified, dict):
+        # In compact mode, callees are in categorized_references.CALLS.outgoing.
+        # In full mode, they're also available as unified["callees"].
         callees = unified.get("callees", [])
+        if not callees:
+            cat_refs = unified.get("categorized_references", {})
+            if isinstance(cat_refs, dict):
+                calls_ref = cat_refs.get("CALLS", {})
+                if isinstance(calls_ref, dict):
+                    callees = calls_ref.get("outgoing", [])
         if isinstance(callees, list) and callees:
             snippets_by_callee: dict[str, list[dict[str, object]]] = {}
             seen_callees: set[str] = set()

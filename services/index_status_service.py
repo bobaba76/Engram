@@ -10,12 +10,16 @@ logger = logging.getLogger(__name__)
 
 
 def get_index_status(manifest: dict[str, object]) -> dict[str, object]:
+    # The full manifest dict is intentionally omitted from the response.
+    # It duplicates counts/versions/status/run_id already projected below,
+    # and includes large sub-objects (embedding_runtime, mcp_resolution_source,
+    # etc.) that roughly double the response's token cost. Callers that need
+    # the full manifest can use select_repo.
     return {
         "status": manifest.get("status", "missing"),
         "run_id": manifest.get("run_id", ""),
         "counts": manifest.get("counts", {}),
         "versions": manifest.get("versions", {}),
-        "manifest": manifest,
     }
 
 
