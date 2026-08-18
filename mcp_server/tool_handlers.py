@@ -1208,73 +1208,85 @@ def god_nodes_tool(
 
 
 # --- Tool registration table -----------------------------------------------
+#
+# Tools are organized by category. Handlers for removed tools remain in this
+# file for backward compatibility and internal use, but are not exposed to MCP
+# clients. To re-expose a tool, add it back to this list.
+#
+# Categories:
+#   1. Index & repo management
+#   2. Symbol & context lookup
+#   3. Graph traversal
+#   4. Search & investigation
+#   5. Change analysis
+#   6. Test intelligence
+#   7. Process & flow tracing
+#   8. Architecture & code quality
+#   9. API & route analysis
+#  10. Multi-repo groups
+#  11. Error & diff helpers
 
 TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
+    # --- 1. Index & repo management ---
     ("index_status", index_status, "Show index readiness, counts, versions, and resolved repository metadata."),
+    ("index_health", index_health_tool, "Report index health, counts, parser/chunk distribution, recent runs, and warnings. Includes stale file detection and recent run summaries."),
     ("list_repos", list_repos_tool, "List indexed sibling repositories Coder can serve."),
     ("select_repo", select_repo_tool, "Resolve a repo name or path to its indexed root and manifest. Does not change the session default repo — pass 'repo' explicitly on subsequent tool calls to target a different repo."),
-    ("get_recent_runs", get_recent_runs_tool, "List recent persisted index runs including parsed stage summaries."),
-    ("get_run_metrics", get_run_metrics_tool, "Show parsed persisted stage metrics for a specific run ID."),
     ("reindex_project", reindex_project_tool, "Start an incremental or full index refresh for a repository. Defaults to background mode to avoid MCP client timeouts."),
-    ("reindex_status", reindex_status_tool, "Poll a background reindex job started by reindex_project."),
-    ("unified_context", unified_context_tool, "Resolve an exact or near-exact target and return matches, callers/callees, dependencies, and graph neighborhood. Prefer after resolve_target for broad names. compact=true (default) omits redundant convenience fields (callers, callees, primary_match, compact_results, related_symbols_by_relation) that duplicate categorized_references; pass compact=false for the full legacy payload."),
-    ("impact_analysis", impact_analysis_tool, "Estimate upstream or downstream impact for a symbol target. Prefer exact symbols or resolved targets; broad inputs may return partial results with warnings."),
-    ("graph_query", graph_query_tool, "Execute a read-only Cypher query against the indexed KuzuDB graph. Node tables: File(path STRING), Symbol(qualified_name STRING, file_path STRING, kind STRING, start_line INT64, end_line INT64). Relationships: DEFINES(File->Symbol), CALLS, IMPORTS, REFERENCES, DECLARES, ASSOCIATED_WITH, ACCESSES, INCLUDES, INJECTS, USES_SERVICE, FETCHES, READS_FIELD, HAS_METHOD, HAS_PROPERTY, EXTENDS, IMPLEMENTS, METHOD_OVERRIDES, METHOD_IMPLEMENTS (all Symbol->Symbol). Pass query='schema' to get full schema docs and example queries. Only read-only MATCH queries are allowed."),
+
+    # --- 2. Symbol & context lookup ---
+    ("resolve_target", resolve_target_tool, "Resolve a file, symbol name, or symbol UID to the indexed target Coder will use. Best first step before graph-heavy symbol tools."),
+    ("find_symbols", find_symbols_tool, "Find symbols by query, file, kind, or symbol UID. Good follow-up when resolve_target reports ambiguity."),
+    ("unified_context", unified_context_tool, "Resolve an exact or near-exact target and return matches, callers/callees, dependencies, and graph neighborhood. Prefer after resolve_target for broad names. compact=true (default) omits redundant convenience fields; pass compact=false for the full payload."),
+    ("get_file_dependencies", get_file_dependencies_tool, "Show file-to-file dependency map for a file path. Aggregates all symbols in the file. edges_per_file (default 3) caps the per-file edge sample."),
+
+    # --- 3. Graph traversal ---
+    ("get_callers_and_callees", get_callers_and_callees_tool, "Show direct CALLS callers and callees for a symbol target. compact=true (default) drops full per-relation edge lists and keeps counts + top samples."),
+    ("get_dependencies", get_dependencies_tool, "Show dependency graph context for a target."),
+    ("get_graph_neighborhood", get_graph_neighborhood_tool, "Show filtered graph neighborhood for a target. compact=true (default) returns only compact_summary; pass compact=false for full nodes and edges lists."),
+    ("graph_query", graph_query_tool, "Execute a read-only Cypher query against the indexed KuzuDB graph. Pass query='schema' to get full schema docs and example queries."),
+    ("shortest_path", shortest_path_tool, "Find the shortest connection between two symbols in the graph. Answers 'how are A and B connected?' in one call."),
+
+    # --- 4. Search & investigation ---
+    ("semantic_code_search", semantic_code_search_tool, "Search indexed chunks semantically for a natural language query. Use when you do not yet have an exact symbol or file target."),
+    ("investigate_codebase", investigate_codebase_tool, "Investigate a natural-language codebase question and return a synthesized answer with evidence, ranked files, and next steps. Pass verbose=true to include raw sub-payloads."),
+    ("app_context", app_context_tool, "Map app-level context across routes, files, tables, graph edges, and processes. Broad natural-language targets are capped for safety."),
+
+    # --- 5. Change analysis ---
     ("detect_changes", detect_changes_tool, "Analyze changed files and related graph impact for the working tree or git ref."),
+    ("change_impact_report", change_impact_report_tool, "Safely summarize git changes, likely impact, app context, and recommended tests for the current worktree or a base ref. Pass verbose=true for full sub-payloads."),
+    ("pr_impact", pr_impact_tool, "PR-aware graph impact: map changed symbols in a git diff to their functional communities and compute per-community blast radius. Requires detect_communities to have been run."),
+    ("post_change_review", post_change_review_tool, "Orchestrate a full post-change review: detect changes, impact analysis, test recommendations, and stale index check in one call."),
+    ("impact_analysis", impact_analysis_tool, "Estimate upstream or downstream impact for a symbol target. Prefer exact symbols or resolved targets."),
+
+    # --- 6. Test intelligence ---
+    ("find_tests_for_target", find_tests_for_target_tool, "Find likely tests for a symbol, file, or feature target."),
+    ("test_coverage_gaps", test_coverage_gaps_tool, "Identify source files and symbols with no associated test coverage."),
+
+    # --- 7. Process & flow tracing ---
+    ("trace_processes", trace_processes_tool, "Trace execution/process flows around a target symbol."),
+    ("list_processes", list_processes_tool, "List inferred process clusters from the indexed codebase. compact=true (default) skips per-process memberships and relationships."),
+    ("symbol_process_participation", symbol_process_participation_tool, "Show process clusters involving a target symbol."),
+    ("trace_data_flow", trace_data_flow_tool, "Trace how a field or type propagates through the codebase via graph relations (READS_FIELD, ACCESSES, FETCHES, etc.)."),
+
+    # --- 8. Architecture & code quality ---
+    ("detect_communities", detect_communities_tool, "Detect functional communities in the symbol graph. Supports 'label_propagation' (default) or 'louvain'. Stores results for later queries."),
+    ("list_communities", list_communities_tool, "List detected communities from the most recent detection run, with member details."),
+    ("detect_circular_dependencies", detect_circular_dependencies_tool, "Find circular dependencies in the graph via DFS cycle detection. Default relation: IMPORTS."),
+    ("detect_dead_code", detect_dead_code_tool, "Find symbols with zero inbound dependency edges (excluding entry points). Likely dead code."),
+
+    # --- 9. API & route analysis ---
     ("route_map", route_map_tool, "Map API/frontend route strings to likely files and symbols."),
     ("api_impact", api_impact_tool, "Estimate code impact for an API route."),
     ("shape_check", shape_check_tool, "Check API route response shapes against frontend consumer field reads."),
     ("field_impact", field_impact_tool, "Show which consumers read a specific API response field, optionally within one route."),
-    ("app_context", app_context_tool, "Map app-level context across routes, files, tables, graph edges, and processes. Broad natural-language targets are capped for safety and may return partial context."),
-    ("resolve_target", resolve_target_tool, "Resolve a file, symbol name, or symbol UID to the indexed target Coder will use. Best first step before graph-heavy symbol tools."),
-    ("trace_processes", trace_processes_tool, "Trace execution/process flows around a target symbol."),
-    ("list_processes", list_processes_tool, "List inferred process clusters from the indexed codebase. compact=true (default) skips per-process memberships and relationships to keep output small; pass compact=false to include them."),
-    ("symbol_process_participation", symbol_process_participation_tool, "Show process clusters involving a target symbol."),
-    ("preview_rename", preview_rename_tool, "Preview references that may need edits for a symbol rename."),
-    ("semantic_code_search", semantic_code_search_tool, "Search indexed chunks semantically for a natural language query. Use when you do not yet have an exact symbol or file target."),
-    ("investigate_codebase", investigate_codebase_tool, "Investigate a natural-language codebase question and return a synthesized answer with evidence, ranked files, and next steps. By default omits raw sub-payloads (search, source_context, unified_context, app_context) to keep output compact; pass verbose=true to include them. Broad questions may be narrowed automatically."),
-    ("change_impact_report", change_impact_report_tool, "Safely summarize git changes, likely impact, app context, and recommended tests for the current worktree or a base ref. By default, symbol_impacts and app_contexts are replaced with their compact_summary to keep output small; pass verbose=true to include full sub-payloads."),
-    ("pr_impact", pr_impact_tool, "PR-aware graph impact: map changed symbols in a git diff to their functional communities and compute per-community blast radius. Wraps detect_changes with community mapping (requires detect_communities to have been run). Flags concentrated communities (>=30% of members downstream of changed symbols) as priority review areas. Falls back to a plain change report when communities are not available."),
-    ("find_tests_for_target", find_tests_for_target_tool, "Find likely tests for a symbol, file, or feature target."),
-    ("suggest_tests_for_change", suggest_tests_for_change_tool, "Suggest tests for current git changes."),
-    ("test_impact", test_impact_tool, "Estimate testing impact and risk for current git changes."),
-    ("feature_context", feature_context_tool, "Map a feature to related files, routes, tables, processes, and graph context."),
-    ("index_health", index_health_tool, "Report index health, counts, parser/chunk distribution, recent runs, and warnings."),
-    ("get_dependencies", get_dependencies_tool, "Show dependency graph context for a target."),
-    ("get_review_history", get_review_history_tool, "Show persisted review findings and analyses for a target file."),
-    ("get_symbol_context", get_symbol_context_tool, "Show direct symbol metadata and related source context."),
-    ("find_symbols", find_symbols_tool, "Find symbols by query, file, kind, or symbol UID. Good follow-up when resolve_target reports ambiguity."),
-    ("get_callers_and_callees", get_callers_and_callees_tool, "Show direct CALLS callers and callees for a symbol target. Pass compact=true to drop the full per-relation incoming/outgoing edge lists and keep only counts + top samples (saves context for hub-like targets). edge_cap (default 25) bounds the per-relation sample size in the non-compact payload."),
-    ("get_graph_neighborhood", get_graph_neighborhood_tool, "Show filtered graph neighborhood for a target. compact=true (default) returns only compact_summary with top edges and relation breakdown; pass compact=false for full nodes and edges lists."),
-    ("get_file_dependencies", get_file_dependencies_tool, "Show file-to-file dependency map for a file path. Aggregates all symbols in the file. edges_per_file (default 3) caps the per-file edge sample to keep payload bounded; raise it if you need more detail per dependent file."),
-    ("get_file_summary", get_file_summary_tool, "Summarize indexed symbols and chunks for a file."),
-    ("get_source_context", get_source_context_tool, "Return source chunks and previews for a target."),
-    ("check_stale_index", check_stale_index_tool, "Detect files modified since the last successful index run. Returns stale file count and warning."),
-    ("trace_data_flow", trace_data_flow_tool, "Trace how a field or type propagates through the codebase via graph relations (READS_FIELD, ACCESSES, FETCHES, etc.)."),
-    ("shortest_path", shortest_path_tool, "Find the shortest connection between two symbols in the graph. Answers 'how are A and B connected?' in one call. Resolves source/target via the same ambiguity handling as resolve_target; returns the path as a list of (source, relation, target) hops. IMPORTS is excluded by default to avoid noisy shared-module paths. Use max_hops to bound the search (default 8, max 12)."),
-    ("post_change_review", post_change_review_tool, "Orchestrate a full post-change review: detect changes, impact analysis, test recommendations, and stale index check in one call."),
-    ("detect_circular_dependencies", detect_circular_dependencies_tool, "Find circular dependencies in the graph via DFS cycle detection. Default relation: IMPORTS."),
-    ("detect_dead_code", detect_dead_code_tool, "Find symbols with zero inbound dependency edges (excluding entry points). Likely dead code."),
-    ("detect_duplicate_code", detect_duplicate_code_tool, "Find duplicate or near-duplicate code across files using vector similarity search."),
-    ("test_coverage_gaps", test_coverage_gaps_tool, "Identify source files and symbols with no associated test coverage."),
-    ("detect_communities", detect_communities_tool, "Detect functional communities in the symbol graph. Supports 'label_propagation' (default) or 'louvain' modularity optimization algorithm. Stores results for later queries."),
-    ("list_communities", list_communities_tool, "List detected communities from the most recent detection run."),
-    ("get_community_detail", get_community_detail_tool, "Get detailed information about a specific community including all member symbols."),
-    ("get_symbol_community", get_symbol_community_tool, "Find which functional community a symbol belongs to."),
-    ("group_create", group_create_tool, "Create a new repo group for multi-repo analysis."),
-    ("group_add_repo", group_add_repo_tool, "Add a repository to an existing repo group."),
-    ("group_remove_repo", group_remove_repo_tool, "Remove a repository from a repo group by its hierarchy path."),
+
+    # --- 10. Multi-repo groups ---
     ("group_list", group_list_tool, "List all configured repo groups and their members."),
-    ("group_detail", group_detail_tool, "Get detailed information about a specific repo group."),
     ("group_sync", group_sync_tool, "Extract contracts from each repo in a group and find cross-repo matches."),
     ("group_query", group_query_tool, "Search for symbols and execution flows across all repos in a group."),
-    ("group_status", group_status_tool, "Check index staleness of repos in a group."),
-    ("start_realtime_indexing", start_realtime_indexing_tool, "Start a background file watcher that triggers incremental reindexing when files change. Uses watchdog with polling fallback."),
-    ("stop_realtime_indexing", stop_realtime_indexing_tool, "Stop the background file watcher."),
-    ("realtime_indexing_status", realtime_indexing_status_tool, "Check if the realtime file watcher is running and see pending changes and reindex count."),
-    ("explain_error", explain_error_tool, "Parse a Python or TypeScript/JavaScript stack trace and return resolved symbols, source snippets, and caller chains for each frame. Paste the full traceback."),
-    ("diff_context", diff_context_tool, "Build a minimal review pack for changed files: source snippets, callers, callees, and impacted files. Uses git diff or explicit file list."),
     ("build_unified_graph", build_unified_graph_tool, "Build a unified in-memory graph from all repos in a group. Merges Kuzu graphs and infers cross-repo edges from shared symbol names."),
-    ("find_similar_functions", find_similar_functions_tool, "Find functions with similar signatures and behavior to a target function. Scores by name token overlap, parameter count, return type, and call target overlap."),
-    ("god_nodes", god_nodes_tool, "Rank symbols by total graph degree (inbound + outbound edges across all relations). Flags god-nodes (degree >= 40 by default) that will produce noisy neighborhood queries — pass min_degree to override the threshold, include_files=true to also rank File nodes by DEFINES degree. Use as a first-pass sanity check before deep traversals."),
+
+    # --- 11. Error & diff helpers ---
+    ("explain_error", explain_error_tool, "Parse a Python or TypeScript/JavaScript stack trace and return resolved symbols, source snippets, and caller chains for each frame. Paste the full traceback."),
 ]

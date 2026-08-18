@@ -32,7 +32,9 @@ def test_reindex_project_defaults_to_background_and_registers_status_tool() -> N
     assert "job = self._load_reindex_job(job_id)" in session
     assert 'for key in ("kuzu_store", "duckdb_store", "vector_store")' in session
     assert "subprocess.Popen" in session
-    assert "(\"reindex_status\", reindex_status_tool" in handlers
+    # reindex_project is registered; reindex_status handler remains available
+    # but is not exposed as a separate tool (polled via reindex_project job_id).
+    assert "(\"reindex_project\", reindex_project_tool" in handlers
 
 
 def test_mcp_repo_aware_tools_echo_repo_metadata_and_warn_on_fallback() -> None:
