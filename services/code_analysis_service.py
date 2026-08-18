@@ -447,6 +447,13 @@ def detect_dead_code(
         # Skip test files — they're entry points by nature
         if "/test" in file_path.lower() or "/tests/" in file_path.lower() or ".test." in file_path.lower() or ".spec." in file_path.lower():
             continue
+        name = str(sym.get("name", "") or "")
+        # React/JS destructuring patterns (e.g. `[activeTab, setActiveTab]` from
+        # useState) are synthetic binding symbols — the pattern is used via its
+        # bare member names in JSX, which the graph can't resolve back to the
+        # tuple, so they read as "dead". Not actionable; skip them.
+        if name.startswith("[") or name.startswith("{"):
+            continue
         dead_symbols.append({
             "qualified_name": qn,
             "name": str(sym.get("name", "") or ""),

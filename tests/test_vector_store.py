@@ -50,11 +50,20 @@ def test_embedding_token_estimate_prefers_tokenizer_when_available() -> None:
     assert estimate_tokens("one two three", tokenizer=_Tokenizer()) == 3
 
 
-def test_token_aware_batches_use_tokenizer_counts() -> None:
-    class _Tokenizer:
-        def encode(self, text, add_special_tokens=True, truncation=False):
-            return str(text).split()
+def test_token_aware_batches_uses_char_heuristic() -> None:
+    # Char-based heuristic: len(text) // 4 tokens per text
+    # "aaaa aaaa aaaa" = 14 chars -> 3 tokens
+    # "bbbb bbbb bbbb" = 14 chars -> 3 tokens
+    # "cccc" = 4 chars -> 1 token
+    batches = _token_aware_batches(["aaaa aaaa aaaa", "bbbb bbbb bbbb", "cccc"], batch_size=10, max_batch_tokens=4)
 
-    batches = _token_aware_batches(["one two", "three four", "five"], batch_size=10, max_batch_tokens=4, tokenizer=_Tokenizer())
+    # 3 + 3 = 6 > 4, so "aaaa..." alone; 3 + 1 = 4 <= 4, so "bbbb..." + "cccc" together
+    assert batches == [["aaaa aaaa aaaa"], ["bbbb bbbb bbbb", "cccc"]]
 
-    assert batches == [["one two", "three four"], ["five"]]
+
+def test_vector_store_reset_preserves_embedding_cache(tmp_path) -> None:
+    store = VectorStore(tmp_path)
+    store.cache_embeddings({"hash-a": [0.1, 0.2], "hash-b": [0.3, 0.4]})
+    store.reset()
+    assert store.get_cached_vectors(["hash-a", "hash-b"]) == {"hash-a": [0.1, 0.2], "hash-b": [0.3, 0.4]}
+    store.close()

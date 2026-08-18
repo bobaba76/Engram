@@ -4,7 +4,6 @@ import re
 
 from storage.kuzu_store import KuzuStore
 
-
 DEFAULT_QUERY_LIMIT = 100
 
 _BLOCKED_PATTERNS = [
@@ -46,27 +45,31 @@ GRAPH_SCHEMA = {
         },
     ],
     "relationship_tables": [
-        {"label": "DEFINES", "from": "File", "to": "Symbol", "description": "A file defines a symbol."},
-        {"label": "CALLS", "from": "Symbol", "to": "Symbol", "description": "A symbol calls another symbol (function/method call)."},
-        {"label": "IMPORTS", "from": "Symbol", "to": "Symbol", "description": "A symbol imports another symbol or module."},
-        {"label": "REFERENCES", "from": "Symbol", "to": "Symbol", "description": "A symbol references another (type reference, variable use)."},
-        {"label": "DECLARES", "from": "Symbol", "to": "Symbol", "description": "A symbol declares another (e.g. class declares method)."},
-        {"label": "ASSOCIATED_WITH", "from": "Symbol", "to": "Symbol", "description": "General association between symbols."},
-        {"label": "ACCESSES", "from": "Symbol", "to": "Symbol", "description": "A symbol accesses a property or field of another."},
-        {"label": "INCLUDES", "from": "Symbol", "to": "Symbol", "description": "C/C++ include relationship."},
-        {"label": "DECLARES_IN_HEADER", "from": "Symbol", "to": "Symbol", "description": "C/C++ header declaration."},
-        {"label": "DEFINES_IMPLEMENTATION", "from": "Symbol", "to": "Symbol", "description": "C/C++ implementation definition."},
-        {"label": "INJECTS", "from": "Symbol", "to": "Symbol", "description": "Dependency injection relationship."},
-        {"label": "USES_SERVICE", "from": "Symbol", "to": "Symbol", "description": "A symbol uses a service."},
-        {"label": "FETCHES", "from": "Symbol", "to": "Symbol", "description": "A symbol fetches data from a source."},
-        {"label": "READS_FIELD", "from": "Symbol", "to": "Symbol", "description": "A symbol reads a field."},
-        {"label": "HAS_METHOD", "from": "Symbol", "to": "Symbol", "description": "A class/type has a method."},
-        {"label": "HAS_PROPERTY", "from": "Symbol", "to": "Symbol", "description": "A class/type has a property."},
-        {"label": "EXTENDS", "from": "Symbol", "to": "Symbol", "description": "A symbol extends/inherits from another (class inheritance)."},
-        {"label": "IMPLEMENTS", "from": "Symbol", "to": "Symbol", "description": "A symbol implements an interface."},
-        {"label": "METHOD_OVERRIDES", "from": "Symbol", "to": "Symbol", "description": "A method overrides a parent class method."},
-        {"label": "METHOD_IMPLEMENTS", "from": "Symbol", "to": "Symbol", "description": "A method implements an interface method."},
+        {"label": "DEFINES", "from": "File", "to": "Symbol", "description": "A file defines a symbol.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "CALLS", "from": "Symbol", "to": "Symbol", "description": "A symbol calls another symbol (function/method call).", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "IMPORTS", "from": "Symbol", "to": "Symbol", "description": "A symbol imports another symbol or module.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "REFERENCES", "from": "Symbol", "to": "Symbol", "description": "A symbol references another (type reference, variable use).", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "DECLARES", "from": "Symbol", "to": "Symbol", "description": "A symbol declares another (e.g. class declares method).", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "ASSOCIATED_WITH", "from": "Symbol", "to": "Symbol", "description": "General association between symbols.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "ACCESSES", "from": "Symbol", "to": "Symbol", "description": "A symbol accesses a property or field of another.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "INCLUDES", "from": "Symbol", "to": "Symbol", "description": "C/C++ include relationship.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "DECLARES_IN_HEADER", "from": "Symbol", "to": "Symbol", "description": "C/C++ header declaration.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "DEFINES_IMPLEMENTATION", "from": "Symbol", "to": "Symbol", "description": "C/C++ implementation definition.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "INJECTS", "from": "Symbol", "to": "Symbol", "description": "Dependency injection relationship.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "USES_SERVICE", "from": "Symbol", "to": "Symbol", "description": "A symbol uses a service.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "FETCHES", "from": "Symbol", "to": "Symbol", "description": "A symbol fetches data from a source.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "READS_FIELD", "from": "Symbol", "to": "Symbol", "description": "A symbol reads a field.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "HAS_METHOD", "from": "Symbol", "to": "Symbol", "description": "A class/type has a method.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "HAS_PROPERTY", "from": "Symbol", "to": "Symbol", "description": "A class/type has a property.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "EXTENDS", "from": "Symbol", "to": "Symbol", "description": "A symbol extends/inherits from another (class inheritance).", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "IMPLEMENTS", "from": "Symbol", "to": "Symbol", "description": "A symbol implements an interface.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "METHOD_OVERRIDES", "from": "Symbol", "to": "Symbol", "description": "A method overrides a parent class method.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
+        {"label": "METHOD_IMPLEMENTS", "from": "Symbol", "to": "Symbol", "description": "A method implements an interface method.", "properties": {"confidence": "STRING (EXTRACTED | INFERRED | AMBIGUOUS) — provenance of the edge"}},
     ],
+    "edge_confidence": {
+        "values": ["EXTRACTED", "INFERRED", "AMBIGUOUS"],
+        "description": "Every relationship carries a confidence property indicating whether it was parsed directly from source (EXTRACTED) or derived by a heuristic (INFERRED). AMBIGUOUS is reserved for edges whose source cannot be cleanly classified. Query with `r.confidence` to filter, e.g. MATCH (s1)-[r:CALLS]->(s2) WHERE r.confidence = 'EXTRACTED' RETURN ...",
+    },
     "example_queries": [
         "MATCH (f:File)-[:DEFINES]->(s:Symbol) WHERE f.path = 'src/main.py' RETURN s.qualified_name, s.kind",
         "MATCH (s1:Symbol)-[:CALLS]->(s2:Symbol) WHERE s1.qualified_name = 'myFunc' RETURN s2.qualified_name",

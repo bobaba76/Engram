@@ -33,3 +33,6 @@ build/
 Thumbs.db
 .vscode/
 .idea/
+graphify-out/
+tmp_*.md
+tmp_*.py

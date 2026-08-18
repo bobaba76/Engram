@@ -1,7 +1,6 @@
-from storage.kuzu_store import KuzuStore
-from storage.duckdb_store import DuckDBStore
 from services.symbol_resolution_service import graph_target_from_uid_target
-
+from storage.duckdb_store import DuckDBStore
+from storage.kuzu_store import KuzuStore
 
 COMMON_HUB_TOKENS = {
     "data",
@@ -269,19 +268,41 @@ def _directional_edges(kuzu_store: KuzuStore, target: str, relation: str) -> dic
     return {"incoming": incoming, "outgoing": outgoing}
 
 
-def _categorized_references(kuzu_store: KuzuStore, target: str) -> dict[str, dict[str, object]]:
+def _categorized_references(kuzu_store: KuzuStore, target: str, edge_cap: int = 25) -> dict[str, dict[str, object]]:
     categories: dict[str, dict[str, object]] = {}
     for relation in SYMBOL_CONTEXT_RELATIONS:
         directional = _directional_edges(kuzu_store, target, relation)
         incoming = directional["incoming"]
         outgoing = directional["outgoing"]
+        # Compute related symbols from the FULL lists before capping, so
+        # _related_symbols_by_relation and all_related_symbol_count are
+        # correct even when the capped lists omit edges.
+        related_sources: set[str] = set()
+        related_targets: set[str] = set()
+        for edge in incoming:
+            src = str(edge.get("source", "") or "")
+            if src and src != target:
+                related_sources.add(src)
+        for edge in outgoing:
+            tgt = str(edge.get("target", "") or "")
+            if tgt and tgt != target:
+                related_targets.add(tgt)
+        # Cap the full lists to keep payload size bounded. The exact count
+        # is preserved in incoming_count/outgoing_count; consumers that need
+        # the full set should query graph_query or edges_for_target directly.
+        capped_incoming = incoming[:edge_cap]
+        capped_outgoing = outgoing[:edge_cap]
         categories[relation] = {
-            "incoming": incoming,
-            "outgoing": outgoing,
+            "incoming": capped_incoming,
+            "outgoing": capped_outgoing,
             "incoming_count": len(incoming),
             "outgoing_count": len(outgoing),
+            "incoming_truncated": len(incoming) > edge_cap,
+            "outgoing_truncated": len(outgoing) > edge_cap,
             "top_incoming": incoming[:5],
             "top_outgoing": outgoing[:5],
+            "_related_sources": sorted(related_sources),
+            "_related_targets": sorted(related_targets),
         }
     return categories
 
@@ -289,17 +310,14 @@ def _categorized_references(kuzu_store: KuzuStore, target: str) -> dict[str, dic
 def _related_symbols_by_relation(categories: dict[str, dict[str, object]], target: str) -> dict[str, list[str]]:
     related: dict[str, list[str]] = {}
     for relation, payload in categories.items():
-        nodes = set()
-        for edge in payload.get("incoming", []) if isinstance(payload, dict) else []:
-            if isinstance(edge, dict):
-                source = str(edge.get("source", ""))
-                if source and source != target:
-                    nodes.add(source)
-        for edge in payload.get("outgoing", []) if isinstance(payload, dict) else []:
-            if isinstance(edge, dict):
-                target_value = str(edge.get("target", ""))
-                if target_value and target_value != target:
-                    nodes.add(target_value)
+        if not isinstance(payload, dict):
+            related[relation] = []
+            continue
+        # Use the precomputed _related_sources/_related_targets which are
+        # derived from the FULL edge lists, not the capped ones.
+        sources = payload.get("_related_sources", [])
+        targets = payload.get("_related_targets", [])
+        nodes = set(sources) | set(targets)
         related[relation] = sorted(nodes)
     return related
 
@@ -320,9 +338,9 @@ def _dedupe_edges(edges: list[dict[str, object]], key_field: str = "target") -> 
     return deduped
 
 
-def get_callers_and_callees(kuzu_store: KuzuStore, target: str, include_noisy: bool = False) -> dict[str, object]:
+def get_callers_and_callees(kuzu_store: KuzuStore, target: str, include_noisy: bool = False, compact: bool = False, edge_cap: int = 25) -> dict[str, object]:
     resolved_target = _normalize_graph_target(target)
-    categorized = _categorized_references(kuzu_store, resolved_target)
+    categorized = _categorized_references(kuzu_store, resolved_target, edge_cap=edge_cap)
     callers = _dedupe_edges(categorized["CALLS"]["incoming"], key_field="source")
     callees = _dedupe_edges(categorized["CALLS"]["outgoing"], key_field="target")
     related_by_relation = _related_symbols_by_relation(categorized, resolved_target)
@@ -335,12 +353,15 @@ def get_callers_and_callees(kuzu_store: KuzuStore, target: str, include_noisy: b
         for relation, payload in categorized.items()
         if relation not in excluded_relations
     }
-    return {
+    # Token-budget discipline: when compact=True, drop the full per-relation
+    # incoming/outgoing lists and the related_symbols_by_relation map. The
+    # compact_summary already carries counts + top samples, which is enough
+    # for most agent follow-ups. The full payload is still available by
+    # default for callers that need every edge.
+    payload: dict[str, object] = {
         "target": resolved_target,
         "callers": callers,
         "callees": callees,
-        "categorized_references": categorized,
-        "related_symbols_by_relation": related_by_relation,
         "relation_counts": relation_counts,
         "compact_summary": {
             "target": resolved_target,
@@ -354,6 +375,20 @@ def get_callers_and_callees(kuzu_store: KuzuStore, target: str, include_noisy: b
             "all_related_symbol_count": len({symbol for relation, symbols in related_by_relation.items() if relation not in excluded_relations for symbol in symbols}),
         },
     }
+    if not compact:
+        payload["categorized_references"] = categorized
+        payload["related_symbols_by_relation"] = related_by_relation
+    else:
+        # Surface truncation flags so consumers know when to drill in.
+        payload["truncation"] = {
+            relation: {
+                "incoming_truncated": bool(payload_data.get("incoming_truncated")),
+                "outgoing_truncated": bool(payload_data.get("outgoing_truncated")),
+            }
+            for relation, payload_data in categorized.items()
+            if payload_data.get("incoming_truncated") or payload_data.get("outgoing_truncated")
+        }
+    return payload
 
 
 
@@ -448,6 +483,7 @@ def get_file_dependencies(
     file_path: str,
     relation: str | None = None,
     limit: int = 50,
+    edges_per_file: int = 3,
 ) -> dict[str, object]:
     """Return a file-to-file dependency map for all symbols defined in *file_path*.
 
@@ -526,14 +562,18 @@ def get_file_dependencies(
             "target_symbol": target,
         })
 
-    # Sort by edge count descending
+    # Sort by edge count descending. edges_per_file caps the per-file sample
+    # to keep the payload bounded; the full edge_count is preserved so the
+    # magnitude signal is not lost. Default 3 (down from 5) reflects the
+    # benchmark finding that 5 samples × N files produced 800+ line payloads.
+    sample_cap = max(0, int(edges_per_file))
     inbound_list = sorted(
-        [{"file_path": fp, "edge_count": len(edges), "edges": edges[:5]} for fp, edges in inbound_files.items()],
+        [{"file_path": fp, "edge_count": len(edges), "edges": edges[:sample_cap]} for fp, edges in inbound_files.items()],
         key=lambda item: item["edge_count"],
         reverse=True,
     )[:limit]
     outbound_list = sorted(
-        [{"file_path": fp, "edge_count": len(edges), "edges": edges[:5]} for fp, edges in outbound_files.items()],
+        [{"file_path": fp, "edge_count": len(edges), "edges": edges[:sample_cap]} for fp, edges in outbound_files.items()],
         key=lambda item: item["edge_count"],
         reverse=True,
     )[:limit]

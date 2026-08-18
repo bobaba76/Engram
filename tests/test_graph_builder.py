@@ -1,5 +1,5 @@
-from models.entity_models import FileRecord, SymbolRecord
 from indexing.graph_builder import build_graph
+from models.entity_models import FileRecord, SymbolRecord
 
 
 class _Kuzu:
@@ -14,8 +14,27 @@ class _Kuzu:
     def ensure_symbol(self, qualified_name: str, file_path: str, kind: str, start_line: int, end_line: int) -> None:
         self.symbols.append((qualified_name, file_path, kind, start_line, end_line))
 
-    def add_edge(self, source: str, relation: str, target: str) -> None:
+    def add_edge(self, source: str, relation: str, target: str, confidence: str = "EXTRACTED") -> None:
+        # Tests assert on 3-tuple membership; confidence is exercised via
+        # test_edge_confidence.py against a real KuzuStore.
         self.edges.append((source, relation, target))
+
+    def bulk_ensure_nodes(self, files: list[str], symbols: list[dict] | None = None) -> None:
+        for path in files:
+            self.files.append(path)
+        for sym in symbols or []:
+            self.symbols.append((
+                sym["qualified_name"],
+                sym["file_path"],
+                sym["kind"],
+                sym["start_line"],
+                sym["end_line"],
+            ))
+
+    def bulk_add_edges(self, relation: str, edges: list[tuple[str, str, str]]) -> int:
+        for source, target, _confidence in edges:
+            self.edges.append((source, relation, target))
+        return len(edges)
 
 
 def test_build_graph_resolves_typescript_import_and_call_edges() -> None:

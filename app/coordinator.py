@@ -781,6 +781,10 @@ class Coordinator:
             scope["impacted_file_details"],
             full_rebuild,
         )
+        # NOTE: Stage overlap (embed ∥ process via ThreadPoolExecutor) was
+        # attempted but caused a hang with 149 threads and no I/O for 15+ min
+        # on the SalesDash full reindex. Likely a torch/CUDA + thread
+        # interaction. Reverted to sequential execution until root-caused.
         process_records, process_clusters, _process_memberships, _process_relationships = self._run_process_stage(
             summary,
             scope["file_map"],

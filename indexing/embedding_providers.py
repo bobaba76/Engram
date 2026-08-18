@@ -17,7 +17,7 @@ from indexing.embeddings import (
 class EmbeddingRequest:
     model_name: str
     provider_name: str = "local"
-    batch_size: int = 24
+    batch_size: int = 48
     max_length: int = 512
     device: str = "cpu"
     max_batch_tokens: int = 12000
@@ -65,7 +65,7 @@ class LocalJinaEmbeddingProvider:
         if requested > 0:
             return requested
         device = (request.device or "").lower()
-        return 24 if device == "cuda" else 8
+        return 48 if device == "cuda" else 8
 
     def embed(self, texts: Iterable[str], request: EmbeddingRequest) -> list[list[float]]:
         return embed_texts(

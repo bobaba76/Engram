@@ -48,7 +48,7 @@ PYDANTIC_FIELD_PATTERN = re.compile(r"^\s+(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*:\
 RESPONSE_MODEL_PATTERN = re.compile(r"response_model\s*=\s*(?:list\s*\[\s*)?(?P<model>[A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
 ROUTE_METHODS_PATTERN = re.compile(r"methods\s*=\s*\[(?P<methods>[^\]]+)\]", re.IGNORECASE)
 FRONTEND_ROUTE_USAGE_PATTERN = re.compile(
-    r"(?:apiClient|axios)\.(?P<method>get|post|put|delete|patch)\(\s*[`'\"](?P<route>/[^`'\"]+)[`'\"]|fetch\(\s*[`'\"](?P<fetch_route>/[^`'\"]+)[`'\"]",
+    r"(?:[A-Za-z_$][A-Za-z0-9_$]*\.)?(?P<method>get|post|put|delete|patch)\(\s*[`'\"](?P<route>/[^`'\"]+)[`'\"]|fetch\(\s*[`'\"](?P<fetch_route>/[^`'\"]+)[`'\"]",
     re.IGNORECASE,
 )
 FRONTEND_ROUTE_CONSTANT_PATTERN = re.compile(
@@ -677,7 +677,43 @@ def normalize_route(route: str) -> str:
 
 
 def route_matches(found_route: str, requested_route: str) -> bool:
-    return not requested_route or normalize_route(found_route) == normalize_route(requested_route)
+    """Match a found route against a requested route.
+
+    Beyond exact equality this tolerates the two real-world gaps that break
+    naive comparisons:
+
+    1. Router prefixes — FastAPI/Express mount handlers under a router prefix
+       (``/api/analytics/monthly-sales-summary`` in the frontend vs the
+       handler's ``/monthly-sales-summary``), so the trailing segments of both
+       routes are compared.
+    2. Path parameters — ``/kpi-summary/2026/08`` must match the handler's
+       ``/kpi-summary/{year}/{month}``, so ``{param}`` segments are wildcards.
+    """
+    if not requested_route:
+        return True
+    found = normalize_route(found_route)
+    requested = normalize_route(requested_route)
+    if found == requested:
+        return True
+    found_segments = [segment for segment in found.split("/") if segment]
+    requested_segments = [segment for segment in requested.split("/") if segment]
+    if not found_segments or not requested_segments:
+        return False
+    # 1) Router prefix tolerance: shared trailing segments.
+    overlap = min(len(found_segments), len(requested_segments))
+    if found_segments[-overlap:] == requested_segments[-overlap:]:
+        return True
+    # 2) Parameterized tolerance: same shape, {param} matches anything
+    #    (either side may carry the parameter — handlers and frontend calls
+    #    both use {placeholders} and concrete values interchangeably).
+    if len(found_segments) == len(requested_segments):
+        return all(
+            f == r
+            or (f.startswith("{") and f.endswith("}"))
+            or (r.startswith("{") and r.endswith("}"))
+            for f, r in zip(found_segments, requested_segments)
+        )
+    return False
 
 
 def enclosing_function_name(source: str, offset: int) -> str:

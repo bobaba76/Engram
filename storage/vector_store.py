@@ -130,7 +130,6 @@ class VectorStore:
             if "chunks" in table_names:
                 self.db.drop_table("chunks")
             self.table = None
-        self._clear_embedding_cache()
 
     def get_cached_vectors(self, content_hashes: list[str]) -> dict[str, list[float]]:
         if self.cache_db is not None and content_hashes:

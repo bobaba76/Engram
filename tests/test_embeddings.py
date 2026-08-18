@@ -138,15 +138,10 @@ def test_token_aware_batches_respects_batch_size() -> None:
 
 
 def test_token_aware_batches_respects_token_budget() -> None:
-    class FakeTokenizer:
-        def encode(self, text, add_special_tokens=True, truncation=False):
-            return list(text)  # 1 token per char
-    texts = ["aaaa", "bbbb", "cccc"]
-    batches = _token_aware_batches(
-        texts, batch_size=10, max_batch_tokens=5, tokenizer=FakeTokenizer()
-    )
-    # Each text is 4 tokens, so two fit per batch (4+4=8 > 5? no, 4 <= 5, 4+4=8 > 5)
-    # First batch: ["aaaa"] (4 tokens), next would be 4+4=8 > 5, so new batch
+    # Char-based heuristic: len(text) // 4 tokens per text
+    texts = ["a" * 20, "b" * 20, "c" * 20]  # 5 tokens each
+    batches = _token_aware_batches(texts, batch_size=10, max_batch_tokens=8)
+    # 5 + 5 = 10 > 8, so each text gets its own batch
     assert len(batches) >= 2
 
 

@@ -255,7 +255,7 @@ Configuration is read from environment variables. `.env.example` contains the co
 - `CODER_SCAN_EXCLUDED_DIRS`, `CODER_SCAN_INCLUDE_PATTERNS`, and `CODER_SCAN_EXCLUDE_PATTERNS`: adjust scanning scope.
 - `CODER_EMBED_PROVIDER`, `CODER_EMBED_MODEL`, `CODER_EMBED_DEVICE`, `CODER_EMBED_API_KEY`, and `CODER_EMBED_BASE_URL`: configure local or OpenAI-compatible embeddings.
 - `CODER_PROCESS_EXTRACTION_ENABLED`: enable or disable bounded execution-flow extraction.
-- `CODER_REVIEW_ENABLED`: enable or disable the indexing review stage.
+- `CODER_REVIEW_ENABLED`: enable or disable the indexing review stage. It is `false` by default.
 - `CODER_LLM_FEATURES_ENABLED`: enable optional LLM-backed review analysis and run summaries. It is `false` by default.
 - `CODER_REVIEW_ANALYSIS_PROVIDER`: select `heuristic-multi-agent` or `openrouter-multi-agent` when the corresponding feature is enabled.
 - `OPENROUTER_API_KEY`: required for OpenRouter-backed review analysis and summaries.

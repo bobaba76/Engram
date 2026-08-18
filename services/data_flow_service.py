@@ -11,17 +11,15 @@ if TYPE_CHECKING:
     from storage.kuzu_store import KuzuStore
 
 
+# Relations that actually carry data between symbols. REFERENCES, HAS_METHOD,
+# EXTENDS, IMPLEMENTS etc. are structural/co-reference edges — including them
+# floods trace_data_flow with "flows" that are merely symbol mentions and
+# drowns the real signal (observed: 23 of 36 gpPercentage edges were plain
+# REFERENCES).
 DATA_FLOW_RELATIONS = (
     "READS_FIELD",
     "ACCESSES",
     "FETCHES",
-    "REFERENCES",
-    "HAS_PROPERTY",
-    "HAS_METHOD",
-    "EXTENDS",
-    "IMPLEMENTS",
-    "ASSOCIATED_WITH",
-    "DECLARES",
 )
 
 
@@ -50,8 +48,8 @@ def trace_data_flow(
     """Trace how a field or type propagates through the codebase.
 
     Starting from *target* (a symbol or type name), follows data-flow relations
-    (READS_FIELD, ACCESSES, FETCHES, REFERENCES, HAS_PROPERTY, EXTENDS, etc.)
-    to find all symbols that read, write, transform, or carry the *field*.
+    (READS_FIELD, ACCESSES, FETCHES) to find all symbols that read, write,
+    transform, or carry the *field*.
 
     If *target* is empty, searches by field name across all symbols.
     """

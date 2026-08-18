@@ -145,14 +145,14 @@ def estimate_tokens(text: str, tokenizer=None) -> int:
     return max(1, len(text or "") // CHARS_PER_TOKEN_ESTIMATE)
 
 
-def _token_aware_batches(texts: list[str], batch_size: int, max_batch_tokens: int, tokenizer=None) -> list[list[str]]:
+def _token_aware_batches(texts: list[str], batch_size: int, max_batch_tokens: int) -> list[list[str]]:
     batches: list[list[str]] = []
     current: list[str] = []
     current_tokens = 0
     safe_batch_size = max(int(batch_size or 1), 1)
     safe_token_limit = max(int(max_batch_tokens or 1), 1)
     for text in texts:
-        token_count = estimate_tokens(text, tokenizer=tokenizer)
+        token_count = estimate_tokens(text)
         if current and (len(current) >= safe_batch_size or current_tokens + token_count > safe_token_limit):
             batches.append(current)
             current = []
@@ -338,7 +338,7 @@ def get_model_load_error(model_name: str) -> str:
 def embed_texts(
     texts: Iterable[str],
     model_name: str,
-    batch_size: int = 24,
+    batch_size: int = 48,
     max_length: int = 512,
     device: str = "cpu",
     max_batch_tokens: int = 12000,
@@ -357,18 +357,36 @@ def embed_texts(
             resolved_device = _resolve_device(device)
             with _embedding_model_lock:
                 model = model.to(resolved_device)
-                embeddings_batches = []
-                for batch in _token_aware_batches(text_list, batch_size=batch_size, max_batch_tokens=max_batch_tokens, tokenizer=tokenizer):
-                    encoded_input = tokenizer(batch, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
-                    encoded_input = {key: value.to(resolved_device) for key, value in encoded_input.items()}
+                batches = _token_aware_batches(text_list, batch_size=batch_size, max_batch_tokens=max_batch_tokens)
+                if not batches:
+                    return []
+                # Double-buffered loop: tokenize batch N+1 on CPU while GPU
+                # processes batch N. CUDA kernels are async — launching them
+                # returns immediately, so the CPU is free to tokenize the next
+                # batch while the GPU computes. The .cpu() call is the sync
+                # point that waits for the GPU to finish.
+                current_encoded = tokenizer(
+                    batches[0], padding=True, truncation=True, max_length=max_length, return_tensors="pt"
+                )
+                current_encoded = {key: value.to(resolved_device) for key, value in current_encoded.items()}
+                embeddings_batches: list[list[float]] = []
+                for i in range(len(batches)):
                     with torch.inference_mode():
-                        model_output = model(**encoded_input)
-                    embeddings = _mean_pooling(model_output, encoded_input["attention_mask"])
-                    embeddings = torch_functional.normalize(embeddings, p=2, dim=1)
-                    embeddings_batches.extend(embeddings.cpu().tolist())
-                    del encoded_input
-                    del model_output
-                    del embeddings
+                        model_output = model(**current_encoded)
+                        pooled = _mean_pooling(model_output, current_encoded["attention_mask"])
+                        normalized = torch_functional.normalize(pooled, p=2, dim=1)
+                    # Tokenize next batch on CPU while GPU processes current batch
+                    next_encoded_device = None
+                    if i + 1 < len(batches):
+                        next_encoded = tokenizer(
+                            batches[i + 1], padding=True, truncation=True, max_length=max_length, return_tensors="pt"
+                        )
+                        next_encoded_device = {key: value.to(resolved_device) for key, value in next_encoded.items()}
+                    # Sync: move current result to CPU (waits for GPU to finish)
+                    embeddings_batches.extend(normalized.cpu().tolist())
+                    if next_encoded_device is not None:
+                        current_encoded = next_encoded_device
+                    del model_output, pooled, normalized
             return embeddings_batches
         if not allow_fallback:
             raise EmbeddingNotReadyError(

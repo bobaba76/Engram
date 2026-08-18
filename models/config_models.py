@@ -43,7 +43,7 @@ class RuntimeConfig:
     process_max_relationships: int = 5000
     llm_features_enabled: bool = False
     reviewer_model: str = "heuristic-v1"
-    review_enabled: bool = True
+    review_enabled: bool = False
     review_analysis_provider: str = "heuristic-multi-agent"
     review_analysis_model: str = "mistralai/devstral-small"
     review_max_source_chars: int = 12000

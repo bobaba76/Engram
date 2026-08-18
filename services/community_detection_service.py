@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import time
+import zlib
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
@@ -580,7 +581,7 @@ def _name_community(
     elif kinds:
         name = f"{max(kinds, key=kinds.get)}s"
     else:
-        name = f"cluster_{abs(hash(tuple(sorted(members[:3])))) % 10000}"
+        name = f"cluster_{zlib.crc32('|'.join(sorted(members[:3])).encode()) % 10000}"
 
     return name, top_kinds
 

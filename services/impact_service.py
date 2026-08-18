@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from collections import deque
 import json
+from collections import deque
 
-from storage.duckdb_store import DuckDBStore
-from storage.kuzu_store import KuzuStore
 from services.graph_edge_utils import edges_for_source_limited, edges_for_target_limited
 from services.symbol_resolution_service import ambiguity_status, resolve_candidates, symbol_uid_from_target
-
+from storage.duckdb_store import DuckDBStore
+from storage.kuzu_store import KuzuStore
 
 DEFAULT_RELATIONS = ("CALLS", "INCLUDES", "REFERENCES", "ACCESSES", "FETCHES", "READS_FIELD", "HAS_METHOD", "HAS_PROPERTY", "EXTENDS", "IMPLEMENTS", "METHOD_OVERRIDES", "METHOD_IMPLEMENTS", "INJECTS", "USES_SERVICE")
 RELATION_WEIGHTS = {
@@ -31,6 +30,11 @@ DEFAULT_EDGE_LIMIT_PER_RELATION = 80
 BROAD_EDGE_LIMIT_PER_RELATION = 18
 DEFAULT_NODE_BUDGET = 240
 BROAD_NODE_BUDGET = 80
+# Maximum number of items retained per by_depth bucket in the response.
+# The full traversal still runs against the node budget above; this cap
+# only affects how many items are serialized into the tool payload, to
+# keep agent context windows bounded for hub-like targets.
+IMPACT_BY_DEPTH_CAP = 25
 RUNTIME_RELATIONS = {"CALLS", "FETCHES", "READS_FIELD", "ACCESSES", "USES_SERVICE", "INJECTS"}
 
 
@@ -242,6 +246,20 @@ def analyze_impact(
     direct_count = len(by_depth.get("d=1", []))
     runtime_direct_count = sum(1 for item in by_depth.get("d=1", []) if str(item.get("relation", "")).upper() in RUNTIME_RELATIONS)
     files_affected = len({item["file_path"] for item in all_impacted if item.get("file_path")})
+    # Token-budget discipline: cap each by_depth list to IMPACT_BY_DEPTH_CAP
+    # entries. The full count is recoverable as len(by_depth[key]) +
+    # by_depth_truncation.get(key, 0); impacted_count and direct_count above
+    # are computed from the uncapped lists so they remain accurate.
+    capped_by_depth: dict[str, object] = {}
+    by_depth_truncation: dict[str, int] = {}
+    for depth_key, items in by_depth.items():
+        full_count = len(items)
+        if full_count > IMPACT_BY_DEPTH_CAP:
+            capped_by_depth[depth_key] = items[:IMPACT_BY_DEPTH_CAP]
+            by_depth_truncation[depth_key] = full_count - IMPACT_BY_DEPTH_CAP
+        else:
+            capped_by_depth[depth_key] = items
+    by_depth = capped_by_depth
     semantic_weight = _semantic_weight(all_impacted)
     risk = _risk_level(direct_count, impacted_count, files_affected, ambiguous, runtime_direct_count, semantic_weight)
     process_participation = _process_participation(duckdb_store, graph_target)
@@ -292,6 +310,7 @@ def analyze_impact(
             "semantic_weight": semantic_weight,
         },
         "by_depth": by_depth,
+        "by_depth_truncation": by_depth_truncation,
         "compact_summary": {
             "target": resolved_target,
             "direction": normalized_direction,
@@ -302,6 +321,7 @@ def analyze_impact(
             "runtime_direct": runtime_direct_count,
             "semantic_weight": semantic_weight,
             "top_impacted": [item["symbol"] for item in all_impacted[:8]],
+            "top_impacted_files": sorted({str(item.get("file_path", "") or "") for item in all_impacted if item.get("file_path")})[:10],
             "frontend_graph": frontend_graph,
             "warnings": warnings,
         },
