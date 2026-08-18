@@ -4,7 +4,7 @@ lancedb>=0.20,<1.0
 mcp>=1.9,<2.0
 openai>=1.50,<2.0
 sentence-transformers>=3.0,<4.0
-transformers==4.52.4
+transformers>=4.52.4,<5.0.0
 tree-sitter>=0.23,<1.0
 tree-sitter-language-pack>=0.4,<1.0
 libclang>=16.0,<20.0

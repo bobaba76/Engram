@@ -6,6 +6,7 @@ and helper methods that were previously closures inside ``run_mcp.main()``.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 import threading
@@ -13,6 +14,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from config.settings import load_settings
 from mcp_server.git_change_cache import (
@@ -454,7 +457,8 @@ class MCPSession:
             coder_root=coder_root,
             poll_interval_seconds=poll_interval,
             debounce_seconds=debounce,
-            log_callback=lambda msg: None,
+            log_callback=lambda msg: logger.info("[realtime-index] %s", msg),
+            on_reindex_start=self.close_all_repo_contexts,
             on_reindex_complete=self.close_all_repo_contexts,
         )
         self._realtime_thread = threading.Thread(
@@ -502,6 +506,8 @@ class MCPSession:
             "pending_changes": stats.pending_changes,
             "reindex_count": stats.reindex_count,
             "last_reindex_at": stats.last_reindex_at,
+            "last_reindex_return_code": stats.last_reindex_return_code,
+            "last_error": stats.last_error if stats.last_reindex_return_code else "",
             "last_change_at": stats.last_change_at,
             "changed_paths": stats.changed_paths,
             "compact_summary": {
@@ -509,6 +515,8 @@ class MCPSession:
                 "known_files": stats.known_files,
                 "pending": stats.pending_changes,
                 "reindex_count": stats.reindex_count,
+                "last_reindex_return_code": stats.last_reindex_return_code,
+                "last_error": stats.last_error[:500] if stats.last_reindex_return_code and stats.last_error else "",
             },
         }
 

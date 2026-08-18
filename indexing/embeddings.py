@@ -26,9 +26,47 @@ class EmbeddingLoadError(RuntimeError):
     """Raised when the embedding model fails to load."""
 
 
+def _patch_transformers_compat() -> None:
+    """Monkey-patch functions removed in transformers 5.x that jina-bert custom code needs.
+
+    The jina-embeddings-v2-base-code model uses trust_remote_code=True, which loads
+    custom modeling code from jinaai/jina-bert-implementation. That code imports
+    find_pruneable_heads_and_indices from transformers.pytorch_utils, but this
+    function was removed in transformers 5.0. We re-add it here so the model
+    loads without downgrading transformers.
+    """
+    try:
+        from transformers import pytorch_utils as _ptu
+        if not hasattr(_ptu, "find_pruneable_heads_and_indices"):
+            import torch as _torch
+
+            def find_pruneable_heads_and_indices(
+                heads: list[int], n_heads: int, head_size: int, already_pruned_heads: set[int]
+            ) -> tuple[set[int], "torch.LongTensor"]:
+                mask = _torch.ones(n_heads, head_size)
+                heads = set(heads) - already_pruned_heads
+                for head in heads:
+                    head = head - sum(1 if h < head else 0 for h in already_pruned_heads)
+                    mask[head] = 0
+                mask = mask.view(-1).contiguous().eq(1)
+                index: "torch.LongTensor" = _torch.arange(len(mask))[mask].long()
+                return heads, index
+
+            _ptu.find_pruneable_heads_and_indices = find_pruneable_heads_and_indices
+            logger.info("Patched transformers.pytorch_utils.find_pruneable_heads_and_indices for transformers 5.x compat")
+    except Exception:
+        logger.debug("Failed to patch transformers compat shim", exc_info=True)
+
+
 @lru_cache(maxsize=1)
 def _load_embedding_dependencies() -> bool:
     global torch, torch_functional, AutoModel, AutoTokenizer
+    # Force offline mode BEFORE importing transformers so that all
+    # hub lookups (including trust_remote_code tokenizer loads) are
+    # local-only. Set CODER_EMBED_ALLOW_ONLINE=1 to allow network.
+    if os.environ.get("CODER_EMBED_ALLOW_ONLINE", "0") != "1":
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     try:
         import torch as torch_module
         import torch.nn.functional as torch_functional_module
@@ -39,6 +77,7 @@ def _load_embedding_dependencies() -> bool:
     torch_functional = torch_functional_module
     AutoModel = auto_model_class
     AutoTokenizer = auto_tokenizer_class
+    _patch_transformers_compat()
     return True
 
 

@@ -49,6 +49,7 @@ class PollingRealtimeIndexer:
         status_interval_seconds: float = 30.0,
         log_callback: Callable[[str], None] | None = None,
         on_reindex_complete: Callable[[], None] | None = None,
+        on_reindex_start: Callable[[], None] | None = None,
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.coder_root = coder_root.resolve()
@@ -57,6 +58,7 @@ class PollingRealtimeIndexer:
         self.status_interval_seconds = max(float(status_interval_seconds), 5.0)
         self.log = log_callback or _default_log
         self._on_reindex_complete = on_reindex_complete
+        self._on_reindex_start = on_reindex_start
         self._known: dict[str, int] = {}
         self._pending: set[str] = set()
         self._last_change_at: float | None = None
@@ -154,6 +156,15 @@ class PollingRealtimeIndexer:
         ]
         self._indexing = True
         self.log(f"indexing {len(pending_snapshot)} changed paths after {self.debounce_seconds:g}s debounce")
+        # Close repo contexts BEFORE spawning the subprocess so it can open
+        # DuckDB/Kuzu for writing. The MCP server holds read-only handles
+        # that would otherwise block the writer.
+        if self._on_reindex_start is not None:
+            try:
+                self._on_reindex_start()
+                self.log("closed repo contexts for reindex")
+            except Exception:
+                self.log("on_reindex_start callback failed")
         try:
             completed = subprocess.run(
                 command,
