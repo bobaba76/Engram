@@ -499,7 +499,7 @@ def investigate_codebase_tool(session: MCPSession, question: str, limit: int = 5
     )
 
 
-def change_impact_report_tool(session: MCPSession, scope: str = "unstaged", base_ref: str = "", max_symbols: int = 5, repo: str = "", target: str = "") -> dict[str, object]:
+def change_impact_report_tool(session: MCPSession, scope: str = "unstaged", base_ref: str = "", max_symbols: int = 5, repo: str = "", target: str = "", verbose: bool = False) -> dict[str, object]:
     cached_changes = session.detect_changes_from_cache(scope, base_ref, repo)
     if cached_changes is not None:
         context = session.get_repo_context(repo)
@@ -512,6 +512,7 @@ def change_impact_report_tool(session: MCPSession, scope: str = "unstaged", base
             max_symbols=max_symbols,
             changes=cached_changes,
             target=target,
+            verbose=verbose,
         )
     repo_root = fast_repo_root_for_tool(session.default_repo_root, repo)
     from mcp_server.git_change_cache import mcp_git_changed_files
@@ -570,6 +571,7 @@ def change_impact_report_tool(session: MCPSession, scope: str = "unstaged", base
         base_ref=base_ref,
         max_symbols=max_symbols,
         target=target,
+        verbose=verbose,
     )
 
 
@@ -1229,7 +1231,7 @@ TOOL_DEFINITIONS: list[tuple[str, Any, str]] = [
     ("preview_rename", preview_rename_tool, "Preview references that may need edits for a symbol rename."),
     ("semantic_code_search", semantic_code_search_tool, "Search indexed chunks semantically for a natural language query. Use when you do not yet have an exact symbol or file target."),
     ("investigate_codebase", investigate_codebase_tool, "Investigate a natural-language codebase question and return a synthesized answer with evidence, ranked files, and next steps. By default omits raw sub-payloads (search, source_context, unified_context, app_context) to keep output compact; pass verbose=true to include them. Broad questions may be narrowed automatically."),
-    ("change_impact_report", change_impact_report_tool, "Safely summarize git changes, likely impact, app context, and recommended tests for the current worktree or a base ref."),
+    ("change_impact_report", change_impact_report_tool, "Safely summarize git changes, likely impact, app context, and recommended tests for the current worktree or a base ref. By default, symbol_impacts and app_contexts are replaced with their compact_summary to keep output small; pass verbose=true to include full sub-payloads."),
     ("pr_impact", pr_impact_tool, "PR-aware graph impact: map changed symbols in a git diff to their functional communities and compute per-community blast radius. Wraps detect_changes with community mapping (requires detect_communities to have been run). Flags concentrated communities (>=30% of members downstream of changed symbols) as priority review areas. Falls back to a plain change report when communities are not available."),
     ("find_tests_for_target", find_tests_for_target_tool, "Find likely tests for a symbol, file, or feature target."),
     ("suggest_tests_for_change", suggest_tests_for_change_tool, "Suggest tests for current git changes."),

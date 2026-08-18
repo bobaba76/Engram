@@ -594,5 +594,10 @@ def _build_pre_commit_workflow(changes: dict[str, object], tests: dict[str, obje
             for item in row.get("process_blast_radius", [])
         ][:12],
     }
+    # process_blast_radius is now aggregated at the workflow level above,
+    # so strip it from individual slices to avoid duplication.
+    for row in slices:
+        if isinstance(row, dict):
+            row.pop("process_blast_radius", None)
     workflow["readiness"] = _pre_commit_readiness(changes, workflow)
     return workflow

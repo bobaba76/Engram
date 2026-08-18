@@ -549,8 +549,10 @@ def test_change_impact_report_builds_pre_commit_workflow_slices(monkeypatch) -> 
     assert "frontend/src/components/ProductTrendModal.tsx" in first_slice["consumers"]
     assert "metrics.intransit_stock" in first_slice["fields"]
     assert first_slice["processes"] == ["backend: get_product_trends -> get_db_path"]
-    assert first_slice["process_blast_radius"][0]["changed_steps"][0]["symbol"] == "get_product_trend_data"
-    assert "backend/services/product_trends.py" in first_slice["process_blast_radius"][0]["files"]
+    # process_blast_radius is aggregated at the workflow level, not per-slice
+    workflow_pbr = workflow["process_blast_radius"]
+    assert workflow_pbr[0]["changed_steps"][0]["symbol"] == "get_product_trend_data"
+    assert "backend/services/product_trends.py" in workflow_pbr[0]["files"]
     assert any("Missing response fields" in item for item in first_slice["what_can_break"])
     assert first_slice["follow_up_tools"][0]["tool"] == "api_impact"
     assert any(item["tool"] == "field_impact" for item in first_slice["follow_up_tools"])

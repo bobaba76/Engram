@@ -267,12 +267,31 @@ def change_impact_report(
     max_symbols: int = 5,
     changes: dict[str, object] | None = None,
     target: str = "",
+    verbose: bool = False,
 ) -> dict[str, object]:
     from services.change_report_slices import _build_pre_commit_workflow
 
     changes = changes or detect_changes(repo_root, duckdb_store, kuzu_store, scope=scope, base_ref=base_ref or None)
     if target:
         changes = _filter_changes_to_target(changes, target)
+    # In non-verbose mode, cap the large list fields inside `changes` to keep
+    # the response bounded. changed_symbols and impacted_symbols can each be
+    # 20K+ bytes with full metadata; the compact_summary already has top-N
+    # lists for quick consumption.
+    if not verbose and isinstance(changes, dict):
+        changes = dict(changes)  # shallow copy so we don't mutate the caller's dict
+        for key, cap in (("changed_symbols", 10), ("impacted_symbols", 20), ("impacted_files", 20)):
+            val = changes.get(key)
+            if isinstance(val, list) and len(val) > cap:
+                changes[key] = val[:cap]
+                changes[f"{key}_truncated"] = True
+                changes[f"{key}_total_count"] = len(val)
+        # Strip heavy metadata from changed_symbols — each symbol's metadata
+        # (imports, import_aliases, calls, references, etc.) can be 10K+.
+        # The change report only needs identity + location, not full AST data.
+        for sym in changes.get("changed_symbols", []) if isinstance(changes.get("changed_symbols"), list) else []:
+            if isinstance(sym, dict) and "metadata" in sym:
+                sym["metadata"] = {k: v for k, v in sym["metadata"].items() if k in ("parser",)} if isinstance(sym["metadata"], dict) else {}
     changed_symbols = changes.get("changed_symbols", []) if isinstance(changes, dict) else []
     symbol_reports = []
     for symbol in changed_symbols[:max_symbols] if isinstance(changed_symbols, list) else []:
@@ -356,8 +375,14 @@ def change_impact_report(
         "affected_processes": affected_processes,
         "risk_by_process": risk_by_process,
         "changes": changes,
-        "symbol_impacts": symbol_reports,
-        "app_contexts": app_payloads,
+        "symbol_impacts": symbol_reports if verbose else [
+            report.get("compact_summary", report) if isinstance(report, dict) else report
+            for report in symbol_reports
+        ],
+        "app_contexts": app_payloads if verbose else [
+            payload.get("compact_summary", payload) if isinstance(payload, dict) else payload
+            for payload in app_payloads
+        ],
         "frontend_graph": frontend_graph,
         "test_recommendations": tests,
         "pre_commit_workflow": pre_commit_workflow,
@@ -430,4 +455,5 @@ def change_impact_report(
             "frontend_graph": frontend_graph,
         },
     }
+
 
