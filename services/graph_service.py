@@ -426,11 +426,13 @@ def get_graph_neighborhood_with_options(
         "suppress_common_hubs": suppress_common_hubs,
         "partial": bool(hub_summary["truncated_edge_count"]),
         "hub_summary": hub_summary,
-        "nodes": filtered_nodes,
-        "edges": filtered_edges,
+        "nodes": filtered_nodes[:100],
+        "edges": filtered_edges[:50],
         "raw_counts": {
             "node_count": raw_node_count,
             "edge_count": len(all_edges),
+            "filtered_node_count": len(filtered_nodes),
+            "filtered_edge_count": len(filtered_edges),
         },
         "compact_summary": {
             "target": resolved_target,

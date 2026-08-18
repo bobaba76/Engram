@@ -103,7 +103,6 @@ def get_source_context(duckdb_store: DuckDBStore, target: str, limit: int = 5, r
             "chunk_kind": chunk.get("chunk_kind"),
             "start_line": chunk.get("start_line"),
             "end_line": chunk.get("end_line"),
-            "content": chunk.get("content", ""),
             "preview": "\n".join(chunk.get("content", "").splitlines()[:12]),
             "retrieval_source": "chunk_index",
         }
@@ -118,7 +117,6 @@ def get_source_context(duckdb_store: DuckDBStore, target: str, limit: int = 5, r
     return {
         "target": target,
         "symbol_matches": symbol_matches[:limit],
-        "results": results,
         "snippet_results": snippet_results,
         "compact_results": [
             {

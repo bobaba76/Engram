@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 def _inflate_cluster(row: dict[str, object], duckdb_store: DuckDBStore) -> dict[str, object]:
     cluster_id = str(row.get("cluster_id", ""))
+    file_paths = json.loads(str(row.get("file_paths_json", "[]") or "[]"))
     return {
         "cluster_id": cluster_id,
         "name": row.get("name", ""),
@@ -19,16 +20,17 @@ def _inflate_cluster(row: dict[str, object], duckdb_store: DuckDBStore) -> dict[
         "canonical_terminal_symbol": row.get("canonical_terminal_symbol", ""),
         "process_count": int(row.get("process_count", 0) or 0),
         "avg_step_count": float(row.get("avg_step_count", 0.0) or 0.0),
-        "module_tags": json.loads(str(row.get("module_tags_json", "[]") or "[]")),
-        "community_tags": json.loads(str(row.get("community_tags_json", "[]") or "[]")),
-        "file_paths": json.loads(str(row.get("file_paths_json", "[]") or "[]")),
-        "keywords": json.loads(str(row.get("keywords_json", "[]") or "[]")),
-        "memberships": duckdb_store.processes.fetch_memberships_for_cluster(cluster_id, limit=120),
-        "relationships": duckdb_store.processes.fetch_relationships(cluster_id, limit=60),
+        "module_tags": json.loads(str(row.get("module_tags_json", "[]") or "[]"))[:10],
+        "community_tags": json.loads(str(row.get("community_tags_json", "[]") or "[]"))[:10],
+        "file_paths": file_paths[:20],
+        "file_paths_total_count": len(file_paths) if len(file_paths) > 20 else None,
+        "keywords": json.loads(str(row.get("keywords_json", "[]") or "[]"))[:10],
+        "memberships": duckdb_store.processes.fetch_memberships_for_cluster(cluster_id, limit=20),
+        "relationships": duckdb_store.processes.fetch_relationships(cluster_id, limit=15),
     }
 
 
-def list_processes(duckdb_store: DuckDBStore, query: str = "", limit: int = 25) -> dict[str, object]:
+def list_processes(duckdb_store: DuckDBStore, query: str = "", limit: int = 15) -> dict[str, object]:
     rows = [_inflate_cluster(row, duckdb_store) for row in duckdb_store.processes.fetch_clusters(limit=limit, query=query)]
     return {
         "query": query,
@@ -48,7 +50,7 @@ def get_symbol_process_participation(
     file_path: str | None = None,
     kind: str | None = None,
     symbol_uid: str | None = None,
-    limit: int = 25,
+    limit: int = 15,
 ) -> dict[str, object]:
     candidates = resolve_candidates(
         duckdb_store,

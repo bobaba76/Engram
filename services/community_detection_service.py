@@ -702,9 +702,9 @@ def detect_communities(
             "symbol_count": r["symbol_count"],
             "file_count": r["file_count"],
             "cohesion": r["cohesion"],
-            "top_kinds": r["top_kinds"],
-            "members": r["members"][:50],
-            "file_paths": r["file_paths"],
+            "top_kinds": r["top_kinds"][:8],
+            "members": r["members"][:20],
+            "file_paths": r["file_paths"][:15],
         })
 
     return {
@@ -803,7 +803,7 @@ def list_communities(
             "symbol_count": int(row[2] or 0),
             "file_count": int(row[3] or 0),
             "cohesion": float(row[4] or 0.0),
-            "top_kinds": json.loads(str(row[5] or "[]")),
+            "top_kinds": json.loads(str(row[5] or "[]"))[:8],
         })
     if communities or kuzu_store is None:
         return {

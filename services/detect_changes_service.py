@@ -150,6 +150,28 @@ def detect_changes(
     }
     confidence = _confidence(changed_files, changed_symbols, impacted_files, warnings)
     follow_up_tools = _focused_followups(file_risks, changed_symbols, warnings)
+    # Strip heavy metadata from changed_symbols — each symbol's metadata
+    # (imports, import_aliases, calls, references, etc.) can be 10K+ bytes.
+    # The change report only needs identity + location, not full AST data.
+    capped_changed_symbols = []
+    for sym in changed_symbols[:20]:
+        if isinstance(sym, dict):
+            sym = dict(sym)
+            if "metadata" in sym and isinstance(sym["metadata"], dict):
+                sym["metadata"] = {k: v for k, v in sym["metadata"].items() if k in ("parser",)}
+            capped_changed_symbols.append(sym)
+        else:
+            capped_changed_symbols.append(sym)
+    # Also strip metadata from impacted_symbols
+    capped_impacted_symbols = []
+    for sym in impacted_symbols[:30]:
+        if isinstance(sym, dict):
+            sym = dict(sym)
+            if "metadata" in sym and isinstance(sym["metadata"], dict):
+                sym["metadata"] = {k: v for k, v in sym["metadata"].items() if k in ("parser",)}
+            capped_impacted_symbols.append(sym)
+        else:
+            capped_impacted_symbols.append(sym)
     return {
         "repo_root": str(repo_root.resolve()),
         "scope": normalized_scope,
@@ -171,9 +193,12 @@ def detect_changes(
         "affected_processes": process_summary.get("affected_processes", []),
         "risk_by_process": process_summary.get("risk_by_process", []),
         "changed_files": changed_files,
-        "changed_symbols": changed_symbols,
-        "impacted_files": impacted_files,
-        "impacted_symbols": impacted_symbols,
+        "changed_symbols": capped_changed_symbols,
+        "changed_symbols_total_count": len(changed_symbols) if len(changed_symbols) > 20 else None,
+        "impacted_files": impacted_files[:30],
+        "impacted_files_total_count": len(impacted_files) if len(impacted_files) > 30 else None,
+        "impacted_symbols": capped_impacted_symbols,
+        "impacted_symbols_total_count": len(impacted_symbols) if len(impacted_symbols) > 30 else None,
         "risk": risk,
         "confidence": confidence["level"],
         "confidence_explanation": confidence["why"],

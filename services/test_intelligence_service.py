@@ -495,7 +495,7 @@ def suggest_tests_for_change(repo_root: Path, duckdb_store: DuckDBStore, kuzu_st
     return {
         "scope": scope,
         "base_ref": base_ref,
-        "changes": changes,
+        "changes_compact_summary": changes.get("compact_summary", {}) if isinstance(changes, dict) else {},
         "recommended_tests": selected,
         "compact_results": selected,
         "compact_summary": {
@@ -513,8 +513,7 @@ def suggest_tests_for_change(repo_root: Path, duckdb_store: DuckDBStore, kuzu_st
 
 def test_impact(repo_root: Path, duckdb_store: DuckDBStore, kuzu_store: KuzuStore, scope: str = "unstaged", base_ref: str = "") -> dict[str, object]:
     suggestions = suggest_tests_for_change(repo_root, duckdb_store, kuzu_store, scope=scope, base_ref=base_ref)
-    changes = suggestions.get("changes", {}) if isinstance(suggestions, dict) else {}
-    summary = changes.get("compact_summary", {}) if isinstance(changes, dict) else {}
+    summary = suggestions.get("changes_compact_summary", {}) if isinstance(suggestions, dict) else {}
     risk = summary.get("risk", "LOW") if isinstance(summary, dict) else "LOW"
     tests = suggestions.get("recommended_tests", [])
     risk_note = "No direct tests found; add focused coverage before merging." if not tests else "Run the recommended tests first."

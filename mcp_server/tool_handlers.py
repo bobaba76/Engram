@@ -317,7 +317,7 @@ def trace_processes_tool(
     )
 
 
-def list_processes_tool(session: MCPSession, query: str = "", limit: int = 25, repo: str = "") -> dict[str, object]:
+def list_processes_tool(session: MCPSession, query: str = "", limit: int = 15, repo: str = "") -> dict[str, object]:
     context = session.get_repo_context(repo)
     return list_processes(context["duckdb_store"], query=query, limit=limit)
 
@@ -328,7 +328,7 @@ def symbol_process_participation_tool(
     file_path: str = "",
     kind: str = "",
     symbol_uid: str = "",
-    limit: int = 25,
+    limit: int = 15,
     repo: str = "",
 ) -> dict[str, object]:
     context = session.get_repo_context(repo)
@@ -678,7 +678,7 @@ def find_symbols_tool(session: MCPSession, query: str = "", limit: int = 10, fil
     return find_symbols(context["duckdb_store"], query=query, limit=limit, file_path=file_path or None, kind=kind or None, symbol_uid=symbol_uid or None)
 
 
-def get_callers_and_callees_tool(session: MCPSession, target: str, view: str = "", include_noisy: bool = False, compact: bool = False, edge_cap: int = 25, repo: str = "") -> dict[str, object]:
+def get_callers_and_callees_tool(session: MCPSession, target: str, view: str = "", include_noisy: bool = False, compact: bool = True, edge_cap: int = 25, repo: str = "") -> dict[str, object]:
     resolved = _resolve_graph_target(session, target, repo)
     result = get_callers_and_callees(session.get_kuzu_store(repo), target=resolved, include_noisy=include_noisy, compact=compact, edge_cap=edge_cap)
     if view:

@@ -36,6 +36,15 @@ def get_recent_runs(duckdb_store, limit: int = 10) -> dict[str, object]:
     rows = duckdb_store.runs.fetch_recent(limit=limit)
     runs: list[dict[str, object]] = []
     for row in rows:
+        # stage_results is large (5K+ per run) and is available via
+        # get_run_metrics for a single run. Only include stage names +
+        # statuses here, not the full stage output.
+        stage_results = _decode_json_field(row.get("stage_results_json"), [])
+        stage_summary = [
+            {"stage_name": s.get("stage_name", ""), "status": s.get("status", "")}
+            for s in stage_results
+            if isinstance(s, dict)
+        ] if isinstance(stage_results, list) else []
         runs.append(
             {
                 "run_id": row.get("run_id", ""),
@@ -45,10 +54,9 @@ def get_recent_runs(duckdb_store, limit: int = 10) -> dict[str, object]:
                 "symbol_count": int(row.get("symbol_count") or 0),
                 "chunk_count": int(row.get("chunk_count") or 0),
                 "finding_count": int(row.get("finding_count") or 0),
-                "stage_results": _decode_json_field(row.get("stage_results_json"), []),
-                "warnings": _decode_json_field(row.get("warnings_json"), []),
-                "errors": _decode_json_field(row.get("errors_json"), []),
-                "report_paths": _decode_json_field(row.get("report_paths_json"), {}),
+                "stage_summary": stage_summary,
+                "warning_count": len(_decode_json_field(row.get("warnings_json"), [])),
+                "error_count": len(_decode_json_field(row.get("errors_json"), [])),
                 "created_at": row.get("created_at"),
             }
         )

@@ -85,6 +85,11 @@ def index_health(repo_root: Path, duckdb_store: DuckDBStore, kuzu_store: KuzuSto
                 stage_results = json.loads(row[7] or "[]")
             except json.JSONDecodeError:
                 stage_results = []
+            stage_summary = [
+                {"stage_name": s.get("stage_name", ""), "status": s.get("status", "")}
+                for s in stage_results
+                if isinstance(s, dict)
+            ] if isinstance(stage_results, list) else []
             recent_runs.append(
                 {
                     "run_id": row[0],
@@ -94,7 +99,7 @@ def index_health(repo_root: Path, duckdb_store: DuckDBStore, kuzu_store: KuzuSto
                     "symbol_count": row[4],
                     "chunk_count": row[5],
                     "finding_count": row[6],
-                    "stage_results": stage_results,
+                    "stage_summary": stage_summary,
                 }
             )
     except Exception:

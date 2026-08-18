@@ -113,7 +113,7 @@ def get_symbol_context(symbols_by_file: dict[str, list[SymbolRecord]] = None, du
         status = "ambiguous" if ambiguity_status(matches) else "found" if matches else "not_found"
         graph_context = {}
         if kuzu_store is not None and matches:
-            graph_context = get_callers_and_callees(kuzu_store, str(matches[0].get("qualified_name") or matches[0].get("symbol") or target))
+            graph_context = get_callers_and_callees(kuzu_store, str(matches[0].get("qualified_name") or matches[0].get("symbol") or target), compact=True)
         summary = _compact_summary(target, matches, status)
         if graph_context:
             graph_summary = graph_context.get("compact_summary", {}) if isinstance(graph_context, dict) else {}
@@ -126,8 +126,6 @@ def get_symbol_context(symbols_by_file: dict[str, list[SymbolRecord]] = None, du
             "matches": matches,
             "warnings": ["Target resolution is ambiguous; pass file_path or kind to narrow it."] if status == "ambiguous" else [],
             "graph_context": graph_context,
-            "categorized_references": graph_context.get("categorized_references", {}) if isinstance(graph_context, dict) else {},
-            "relation_counts": graph_context.get("relation_counts", {}) if isinstance(graph_context, dict) else {},
             "compact_results": matches,
             "compact_summary": summary,
         }

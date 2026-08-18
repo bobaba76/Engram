@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import io
+import json
 import logging
 import os
 import sys
@@ -56,6 +57,21 @@ def _make_repo_safe_handler(session: MCPSession, handler: Any) -> Any:
         payload = handler(session, *args, **kwargs)
         if not isinstance(payload, dict):
             return payload
+        # Log response size for token-budget monitoring. This catches
+        # tools that emit excessive payloads and surfaces them for review.
+        try:
+            _size = len(json.dumps(payload, default=str, separators=(",", ":")).encode("utf-8"))
+            if _size > 20000:
+                logger.warning(
+                    "tool:%s response %d bytes (~%d tokens) — exceeds 20K byte budget",
+                    getattr(handler, "__name__", "unknown"),
+                    _size,
+                    _size // 4,
+                )
+            else:
+                logger.debug("tool:%s response %d bytes", getattr(handler, "__name__", "unknown"), _size)
+        except Exception:
+            pass
         if "repo" not in signature.parameters:
             return payload
         try:

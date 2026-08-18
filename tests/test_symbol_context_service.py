@@ -76,8 +76,10 @@ def test_get_symbol_context_includes_graph_context_when_kuzu_store_is_available(
 
     payload = get_symbol_context(duckdb_store=_Store(), kuzu_store=_Kuzu(), target="QueryBuilder.build_period_filter")
 
-    assert payload["relation_counts"]["CALLS"] == {"incoming": 1, "outgoing": 0}
-    assert "IMPORTS" not in payload["relation_counts"]
+    # relation_counts is inside graph_context, not duplicated at top level
+    graph_ctx = payload["graph_context"]
+    assert graph_ctx["relation_counts"]["CALLS"] == {"incoming": 1, "outgoing": 0}
+    assert "IMPORTS" not in graph_ctx["relation_counts"]
     assert payload["compact_summary"]["caller_count"] == 1
 
 
