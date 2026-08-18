@@ -188,15 +188,27 @@ class MCPSession:
         stderr_path = Path(str(job.get("stderr_path", "")))
         warnings: list[str] = []
         if job.get("status") == "running" and not isinstance(job.get("process"), subprocess.Popen):
-            # Try to check if the PID is still alive
+            # Try to check if the PID is still alive. On Windows, os.kill(pid, 0)
+            # calls TerminateProcess (killing the process!) — never use it for a
+            # liveness check. Use ctypes.OpenProcess instead, which is the
+            # correct Win32 way to test PID existence without side effects.
             pid = job.get("pid")
             pid_alive = False
             if pid and isinstance(pid, int) and pid > 0:
                 try:
-                    import os as _os
-                    _os.kill(pid, 0)
-                    pid_alive = True
-                except (ProcessLookupError, PermissionError, OSError):
+                    if sys.platform == "win32":
+                        import ctypes
+                        kernel32 = ctypes.windll.kernel32
+                        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                        if handle:
+                            kernel32.CloseHandle(handle)
+                            pid_alive = True
+                    else:
+                        import os as _os
+                        _os.kill(pid, 0)
+                        pid_alive = True
+                except (ProcessLookupError, PermissionError, OSError, SystemError):
                     pid_alive = False
             if not pid_alive:
                 job["status"] = "failed"
